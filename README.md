@@ -31,7 +31,7 @@ Qt 或桌面环境。
 | 书籍 | 书籍详情、简介、标签、章节列表和章节分页 |
 | 阅读 | 章节正文、上一章/下一章、章节目录、阅读进度和阅读历史 |
 | 排版 | 自动分页、字号、行距、首行缩进、简繁转换和夜间模式 |
-| 字体 | 加载服务端章节字体；缺失字形自动使用 Kindle 系统字体补足 |
+| 字体 | 内置 WOFF2 FreeType 运行时；加载章节字体；缺失字形自动使用系统字体补足 |
 | 图片 | 正文插图、独立图片解码进程、点击全屏预览和再次点击退出 |
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
@@ -68,17 +68,19 @@ Qt 或桌面环境。
 ### KOReader
 
 - 项目：<https://github.com/koreader/koreader>
-- 用途：章节 WOFF2 字体的运行时 FreeType 支持。
+- 用途：提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
 - 使用方式：
-  - 当设备已安装 KOReader 时，启动脚本加载：
+  - Release 包内置 KOReader `v2026.03` 的 FreeType 与匹配 zlib：
 
 ```text
-/mnt/us/koreader/libs/libfreetype.so.6
+/mnt/us/extensions/kinnovel/bin/lib/freetype-woff2/libfreetype.so.6
 ```
 
-  - 该库包含 Kindle 自带的 Python Pillow 所需的 FreeType ABI，并提供
-    WOFF2/Brotli 解码能力。
-- 说明：发布包不包含 KOReader 源码。
+  - 启动时优先加载内置库，因此用户不需要额外安装 KOReader。
+  - 如果内置库缺失，会回退到设备已有的
+    `/mnt/us/koreader/libs/libfreetype.so.6`。
+- 说明：内置二进制按 GPLv3 分发，来源和版本记录在
+  `bin/lib/freetype-woff2/README.txt`。
 
 ### 运行时组件
 
@@ -359,12 +361,14 @@ font-family: read, sans-serif !important;
 Pillow 不会自动进行 CSS 字体回退。KinNovel 会逐字检测字形，章节字体缺少或
 轮廓为空时，仅对该字符使用 `font_path` 指定的系统字体。
 
-WOFF2 章节字体需要支持 Brotli 的 FreeType。启动脚本会优先使用设备中
-KOReader 的：
+WOFF2 章节字体需要支持 Brotli 的 FreeType。Release 包内置了：
 
 ```text
-/mnt/us/koreader/libs/libfreetype.so.6
+/mnt/us/extensions/kinnovel/bin/lib/freetype-woff2/libfreetype.so.6
 ```
+
+因此无需预先安装 KOReader。若内置库不可用，启动脚本才会尝试设备上的
+KOReader 路径。
 
 ## 排障
 
@@ -401,10 +405,10 @@ rm -rf /tmp/kinnovel.lock
 
 ### 字体异常
 
-确认 KOReader 的 FreeType 存在：
+确认内置 FreeType 存在：
 
 ```sh
-ls -l /mnt/us/koreader/libs/libfreetype.so.6
+ls -l /mnt/us/extensions/kinnovel/bin/lib/freetype-woff2/libfreetype.so.6
 ```
 
 ### 网络异常

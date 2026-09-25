@@ -13,9 +13,16 @@ export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # The bundled FreeType matches the Kindle Pillow ABI but lacks WOFF2/Brotli.
-# KOReader's FreeType supplies both while keeping the same ABI.
+# Prefer the WOFF2-capable FreeType bundled with the release. If it is not
+# present, use KOReader's copy when available.
+BUNDLED_FREETYPE="$SCRIPT_DIR/lib/freetype-woff2/libfreetype.so.6"
 KOREADER_FREETYPE=/mnt/us/koreader/libs/libfreetype.so.6
-if [ -f "$KOREADER_FREETYPE" ]; then
+if [ -f "$BUNDLED_FREETYPE" ]; then
+  LD_LIBRARY_PATH="$SCRIPT_DIR/lib/freetype-woff2:$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
+  export LD_LIBRARY_PATH
+  LD_PRELOAD="$BUNDLED_FREETYPE${LD_PRELOAD:+ $LD_PRELOAD}"
+  export LD_PRELOAD
+elif [ -f "$KOREADER_FREETYPE" ]; then
   LD_PRELOAD="$KOREADER_FREETYPE${LD_PRELOAD:+ $LD_PRELOAD}"
   export LD_PRELOAD
 fi

@@ -24,10 +24,19 @@ The complete license text is included in `LICENSE`.
 ### KOReader
 
 - URL: https://github.com/koreader/koreader
-- Used for: a compatible FreeType runtime with WOFF2/Brotli support when the
-  device already has KOReader installed.
-- Runtime path: `/mnt/us/koreader/libs/libfreetype.so.6`.
-- KOReader source code is not included in the KinNovel package.
+- Version: v2026.03.
+- Redistributed files:
+  - `bin/lib/freetype-woff2/libfreetype.so.6`
+    SHA-256 `cdc5afddf765d49069c5ab3ceb8c63ca815545ae772cbe741869c657115a5294`
+  - `bin/lib/freetype-woff2/libz.so.1`
+    SHA-256 `79a78432f05a2dff2db4e518a13827c7979aeed10b1fa7cdc9aa0e350e78416b`
+- Purpose: FreeType/Brotli support required to load LightNovelShelf WOFF2
+  chapter fonts in the bundled Kindle Pillow build.
+- License: GPLv3.
+- These files are used first at runtime. If they are missing, KinNovel falls
+  back to `/mnt/us/koreader/libs/libfreetype.so.6`.
+- Corresponding KOReader source is available from the URL above and at the
+  repository release matching version v2026.03.
 
 ## Bundled or adapted components
 

@@ -131,7 +131,7 @@ ABOUT_LINES = [
     "kComics",
     "framebuffer、EPDC、evdev、启动和恢复流程",
     "KOReader",
-    "运行时 FreeType 与 WOFF2 章节字体支持",
+    "内置 FreeType 与 WOFF2 章节字体支持",
     "",
     "主要依赖",
     "Python 3.14、Pillow、lxml、python-evdev",
