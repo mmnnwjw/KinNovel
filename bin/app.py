@@ -15,10 +15,9 @@ from PIL import ImageFont
 from kinnovel import VERSION
 from kinnovel.api import ApiClient
 from kinnovel.config import Config, LOG_DIR, ensure_directories
-from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, search, series, settings, shelf
+from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
 
-from page import keyboard
 from screen import Screen
 
 
@@ -38,16 +37,6 @@ class PageAdapter:
         if callable(self._enter):
             return self._enter(context)
         return None
-
-
-class KeyboardPage:
-    @staticmethod
-    def render(context, canvas):
-        return keyboard.render(context.screen, context.fonts)
-
-    @staticmethod
-    def handle(data, context):
-        return keyboard.handle(data, context.screen, context.fonts)
 
 
 class KinNovelApp:
@@ -116,7 +105,6 @@ class KinNovelApp:
         context.register("home", home)
         context.register("browse", browse)
         context.register("rank", rank)
-        context.register("search", search)
         context.register("book", book)
         context.register("series", series)
         context.register("history", history)
@@ -126,7 +114,6 @@ class KinNovelApp:
         context.register("settings", settings)
         context.register("about", PageAdapter(settings.render_about,
                                                lambda data, ctx: None, None))
-        context.register("keyboard", KeyboardPage())
         context.register("account", PageAdapter(account.render, account.handle, account.enter))
         context.register("notifications", PageAdapter(account.render_notifications,
                                                        account.handle_notifications,

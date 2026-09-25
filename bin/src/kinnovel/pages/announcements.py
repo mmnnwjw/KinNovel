@@ -1,7 +1,5 @@
 import re
 
-from page import keyboard
-
 
 STATE = {
     "items": [],
@@ -153,7 +151,7 @@ def enter_comments(ctx):
 
 
 def render_comments(ctx, canvas):
-    top = canvas.header("评论", left="返回", right="发表")
+    top = canvas.header("评论", left="返回", right="主页")
     data = COMMENT_STATE.get("data") or {}
     users = data.get("Users") or {}
     commentaries = data.get("Commentaries") or {}
@@ -183,20 +181,4 @@ def render_comments(ctx, canvas):
 
 
 def handle_comments(data, ctx):
-    if data.get("gesture") != "tap":
-        return
-    x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    if y < int(ctx.height * 0.09) and x > int(ctx.width * 0.72):
-        comment_type = ctx.params.get("comment_type") or "Book"
-        target_id = int(ctx.params.get("target_id") or 0)
-
-        def submit(text):
-            ctx.run_async("comments",
-                          lambda: ctx.api.post_comment(comment_type, target_id, text),
-                          lambda _: (ctx.toast("评论成功"), enter_comments(ctx)),
-                          lambda exc: ctx.message(["发表失败", str(exc)]))
-            return None
-        keyboard.start(ctx.screen, ctx.fonts, capabilities=("cn", "en", "numsym"),
-                       hint="请输入评论", enter_label="发表", owner="comments",
-                       on_submit=submit)
-        ctx.navigate("keyboard")
+    return None

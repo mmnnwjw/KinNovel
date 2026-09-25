@@ -12,7 +12,6 @@ def _items(ctx):
     return [
         ("browse", "最近/分类"),
         ("rank", "排行榜"),
-        ("search", "搜索"),
         ("shelf", "书架"),
         ("history", "阅读历史"),
         ("announcements", "公告"),

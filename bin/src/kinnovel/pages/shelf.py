@@ -1,9 +1,3 @@
-import uuid
-from datetime import datetime, timezone
-
-from page import keyboard
-
-
 STATE = {
     "items": [],
     "books": {},
@@ -109,7 +103,7 @@ def render(ctx, canvas):
     width = (canvas.width - 2 * margin - gap * 3) // 4
     buttons = [
         ("up", "上一页", STATE["page"] > 0),
-        ("folder", "新建文件夹", True),
+        ("sync", "同步", True),
         ("prev_folder", "上一层", bool(STATE["path"])),
         ("down", "下一页 (%s/%s)" % (STATE["page"] + 1, pages), STATE["page"] < pages - 1),
     ]
@@ -152,11 +146,8 @@ def handle(data, ctx):
                     _load(ctx)
                 else:
                     ctx.navigate("book", book_id=item.get("id"))
-        elif action == "folder":
-            keyboard.start(ctx.screen, ctx.fonts, capabilities=("cn", "en", "numsym"),
-                           hint="请输入文件夹名称", enter_label="创建",
-                           owner="shelf", on_submit=lambda text: _create_folder(ctx, text))
-            ctx.navigate("keyboard")
+        elif action == "sync":
+            _load(ctx)
         elif action == "prev_folder" and STATE["path"]:
             STATE["path"].pop()
             _load(ctx)
@@ -172,35 +163,6 @@ def handle(data, ctx):
                 STATE["page"] += 1
                 ctx.show()
         return
-
-
-def _create_folder(ctx, name):
-    name = str(name or "").strip()
-    if not name:
-        return None
-    folder_id = uuid.uuid4().hex
-    item = {
-        "type": "FOLDER",
-        "id": folder_id,
-        "index": 0,
-        "parents": list(STATE["path"]),
-        "title": name,
-        "updateAt": datetime.now(timezone.utc).isoformat(),
-    }
-    items = list(STATE["items"])
-    parent = STATE["path"][-1] if STATE["path"] else None
-    for existing in items:
-        if _last_parent(existing) == parent:
-            existing["index"] = int(existing.get("index") or 0) + 1
-    items.append(item)
-
-    def success(_):
-        STATE["items"] = items
-        _load(ctx)
-
-    ctx.run_async("shelf", lambda: ctx.api.save_book_shelf(items), success,
-                  lambda exc: ctx.message(["创建失败", str(exc)]))
-    return None
 
 
 def _long_press(ctx, item):

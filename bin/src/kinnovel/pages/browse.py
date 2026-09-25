@@ -76,7 +76,7 @@ def enter(ctx):
 
 def render(ctx, canvas):
     width, height = canvas.width, canvas.height
-    top = canvas.header("小说书库", left="返回", right="搜索")
+    top = canvas.header("小说书库", left="返回", right="主页")
     margin = int(width * 0.035)
     filter_y = top + 16
     filter_height = 60
@@ -141,9 +141,6 @@ def render(ctx, canvas):
 
 def handle(data, ctx):
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    if y < int(ctx.height * 0.09) and x > int(ctx.width * 0.72):
-        ctx.navigate("search")
-        return
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect
         if not (rx <= x < rx + width and ry <= y < ry + height):

@@ -1,5 +1,3 @@
-from page import keyboard
-
 from ..config import CACHE_DIR
 from ..utils import cache_size, clear_cache
 
@@ -33,7 +31,7 @@ def render(ctx, canvas):
                                   fill=canvas.theme.foreground)
         y += height + gap
 
-    row("服务器", ctx.api.server, "server")
+    row("服务器（配置文件）", ctx.api.server, None)
     row("正文字号", str(ctx.config.get("font_size")), "font_size")
     row("行距", "%.2f" % float(ctx.config.get("line_spacing")), "line_spacing")
     row("夜间模式", "开" if ctx.config.get("night_mode") else "关", "night")
@@ -58,12 +56,7 @@ def handle(data, ctx):
         if not (rx <= x < rx + width and ry <= y < ry + height):
             continue
         action = key[0]
-        if action == "server":
-            keyboard.start(ctx.screen, ctx.fonts, capabilities=("en", "numsym"),
-                           hint="请输入 API 服务器 URL", enter_label="保存",
-                           owner="settings", on_submit=lambda text: _set_server(ctx, text))
-            ctx.navigate("keyboard")
-        elif action == "font_size":
+        if action == "font_size":
             values = [26, 30, 34, 38, 42, 46, 50]
             current = int(ctx.config.get("font_size") or 34)
             next_value = min(values, key=lambda value: (abs(value - current), value > current))
@@ -96,16 +89,6 @@ def handle(data, ctx):
             else:
                 ctx.navigate("account")
         return
-
-
-def _set_server(ctx, value):
-    value = str(value or "").strip().rstrip("/")
-    if not value.startswith(("http://", "https://")):
-        ctx.message("服务器地址必须以 http:// 或 https:// 开头")
-        return None
-    ctx.api.set_server(value)
-    ctx.toast("服务器已更新")
-    return None
 
 
 def _clear(ctx):

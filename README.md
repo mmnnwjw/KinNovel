@@ -6,25 +6,38 @@ to `/dev/fb0`, EPDC ioctl updates, and evdev touch input.
 
 ## Features
 
-- LightNovelShelf login, registration, password reset and token refresh.
-- Latest books, category browsing, rankings, paged lists and all server search
-  modes (fuzzy, exact, title, author, series and tags).
+- This build is intentionally no-input: login credentials are read from
+  `bin/config.json` (`account_email`, `account_password`) and auto-login runs
+  on startup.
+- Latest books, category browsing, rankings, paged lists and book details.
 - Book details, chapter catalogue, reading progress and history.
 - Novel reader with server-provided per-chapter fonts, manual pagination,
   footnotes, illustrations, night mode, font size and line spacing settings.
-- Remote shelf browsing, adding/removing books, folder creation/deletion and
+- Remote shelf browsing, adding/removing books, folder deletion and
   basic local/remote synchronization.
-- Announcements, comments, notifications, daily sign-in, points overview and
+- Read-only comments, announcements, notifications, daily sign-in and
   shop item purchase.
-- Chinese, English and numeric on-device input using the adapted pinyin keyboard.
 
 ## Deliberate exclusions
 
 Uploading, publishing, editing, downloading/exporting, forum/community,
 manga image reading, avatar upload and direct-message UI are not implemented.
+Search, login forms, registration, password reset, comment posting, folder
+creation and all other text-entry screens are removed from this no-input build.
 They either require heavy editors, large image buffers, or provide low value on
 an e-ink device. The API client still contains typed calls for the implemented
 read-only account flows.
+
+Set the account in the device configuration:
+
+```json
+{
+  "account_email": "user@example.com",
+  "account_password": "password"
+}
+```
+
+Do not commit a populated configuration file to Git.
 
 ## Install
 

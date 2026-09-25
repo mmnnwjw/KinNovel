@@ -12,6 +12,8 @@ LOG_DIR = APP_DIR / "logs"
 
 DEFAULTS = {
     "api_server": "https://api.lightnovel.life",
+    "account_email": "",
+    "account_password": "",
     "screen_protocol": "auto",
     "framebuffer": "/dev/fb0",
     "font_path": "/usr/java/lib/fonts/STHeitiMedium.ttf",
