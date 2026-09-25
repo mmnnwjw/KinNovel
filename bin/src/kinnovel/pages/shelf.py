@@ -132,6 +132,30 @@ def handle(data, ctx):
                     return
     if data.get("gesture") != "tap":
         return
+    for key in (("up", 0), ("sync", 0), ("prev_folder", 0), ("down", 0)):
+        rect = STATE["rects"].get(key)
+        if not rect:
+            continue
+        rx, ry, width, height = rect
+        if not (rx <= x < rx + width and ry <= y < ry + height):
+            continue
+        if key[0] == "sync":
+            _load(ctx)
+        elif key[0] == "prev_folder" and STATE["path"]:
+            STATE["path"].pop()
+            _load(ctx)
+        elif key[0] == "up" and STATE["page"] > 0:
+            STATE["page"] -= 1
+            ctx.show()
+        elif key[0] == "down":
+            items = STATE.get("visible") or []
+            row_height = max(74, int(ctx.height * 0.060))
+            per_page = max(1, (ctx.height - int(ctx.height * 0.085) - 110) // row_height)
+            pages = max(1, (len(items) + per_page - 1) // per_page)
+            if STATE["page"] < pages - 1:
+                STATE["page"] += 1
+                ctx.show()
+        return
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect
         if not (rx <= x < rx + width and ry <= y < ry + height):
@@ -146,22 +170,6 @@ def handle(data, ctx):
                     _load(ctx)
                 else:
                     ctx.navigate("book", book_id=item.get("id"))
-        elif action == "sync":
-            _load(ctx)
-        elif action == "prev_folder" and STATE["path"]:
-            STATE["path"].pop()
-            _load(ctx)
-        elif action == "up" and STATE["page"] > 0:
-            STATE["page"] -= 1
-            ctx.show()
-        elif action == "down":
-            items = STATE.get("visible") or []
-            row_height = max(74, int(ctx.height * 0.060))
-            per_page = max(1, (ctx.height - int(ctx.height * 0.085) - 110) // row_height)
-            pages = max(1, (len(items) + per_page - 1) // per_page)
-            if STATE["page"] < pages - 1:
-                STATE["page"] += 1
-                ctx.show()
         return
 
 

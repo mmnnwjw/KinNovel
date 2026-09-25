@@ -23,7 +23,7 @@ STATE = {
 def _signature(ctx, book_id, sort_num):
     top = max(72, int(ctx.height * 0.085))
     return (
-        int(book_id), int(sort_num), int(ctx.config.get("font_size") or 36),
+        int(book_id), int(sort_num), int(ctx.config.get("font_size") or 48),
         float(ctx.config.get("line_spacing") or 1.42),
         int(ctx.config.get("reader_margin") or 34),
         int(ctx.width), int(ctx.height), top,
@@ -45,9 +45,15 @@ def _prepare_document(ctx, chapter):
 def enter(ctx):
     book_id = int(ctx.params.get("book_id") or 0)
     sort_num = int(ctx.params.get("sort_num") or 1)
+    fresh = bool(ctx.params.get("fresh"))
+    at_last = bool(ctx.params.get("at_last"))
     signature = _signature(ctx, book_id, sort_num)
     if (STATE["data"] and STATE["book_id"] == book_id and
             STATE["sort_num"] == sort_num and STATE["signature"] == signature):
+        if fresh:
+            STATE["page"] = 0
+        elif at_last:
+            STATE["page"] = max(0, STATE["doc"].page_count - 1)
         ctx.show()
         return
     if (STATE["data"] and STATE["book_id"] == book_id and
@@ -58,7 +64,12 @@ def enter(ctx):
 
         def success(document):
             STATE["doc"] = document
-            STATE["page"] = document.page_for_path(current_path)
+            if at_last:
+                STATE["page"] = max(0, document.page_count - 1)
+            elif fresh:
+                STATE["page"] = 0
+            else:
+                STATE["page"] = document.page_for_path(current_path)
             STATE["signature"] = signature
             STATE["last_saved"] = -1
             STATE["loading"] = False
@@ -89,7 +100,11 @@ def enter(ctx):
         if chapter.get("Font") and not document.font_resolver.custom_font_loaded:
             ctx.toast("章节字体加载失败，正文可能显示异常")
         position = response.get("ReadPosition") or {}
-        if int(position.get("ChapterId") or 0) == int((response.get("Chapter") or {}).get("Id") or 0):
+        if at_last:
+            STATE["page"] = max(0, document.page_count - 1)
+        elif fresh:
+            STATE["page"] = 0
+        elif int(position.get("ChapterId") or 0) == int(chapter.get("Id") or 0):
             STATE["page"] = document.page_for_path(position.get("Position") or "")
         else:
             STATE["page"] = 0
@@ -129,16 +144,17 @@ def _turn(ctx, delta):
         _save_progress(ctx)
         ctx.show()
         return
-    _change_chapter(ctx, delta)
+    _change_chapter(ctx, delta, at_last=(delta < 0))
 
 
-def _change_chapter(ctx, delta):
+def _change_chapter(ctx, delta, at_last=False):
     sort_num = int(STATE["sort_num"]) + int(delta)
     chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
     if sort_num < 1 or sort_num > len(chapters):
         ctx.toast("已经是%s" % ("第一页" if delta < 0 else "最后一页"))
         return
-    ctx.replace("reader", book_id=STATE["book_id"], sort_num=sort_num)
+    ctx.replace("reader", book_id=STATE["book_id"], sort_num=sort_num,
+                at_last=bool(at_last))
 
 
 def render(ctx, canvas):
@@ -213,7 +229,7 @@ def handle(data, ctx):
             continue
         action = key[0]
         if action == "prev":
-            _change_chapter(ctx, -1)
+            _change_chapter(ctx, -1, at_last=True)
         elif action == "next":
             _change_chapter(ctx, 1)
         elif action == "catalog":
@@ -270,7 +286,8 @@ def handle_catalog(data, ctx):
         if not (rx <= x < rx + width and ry <= y < ry + height):
             continue
         if key[0] == "catalog":
-            ctx.replace("reader", book_id=STATE["book_id"], sort_num=key[1] + 1)
+            ctx.replace("reader", book_id=STATE["book_id"],
+                        sort_num=key[1] + 1, fresh=True)
         elif key[0] == "prev" and STATE["catalog_page"] > 0:
             STATE["catalog_page"] -= 1
             ctx.show()

@@ -1,27 +1,52 @@
-from ..utils import wrap_text
-
-
 STATE = {
     "rects": {},
     "online": None,
 }
 
 
+MODULES = [
+    ("shelf", "书架"),
+    ("history", "阅读历史"),
+    ("rank", "排行榜"),
+    ("browse", "最近/分类"),
+    ("account", "我的账号"),
+    ("settings", "设置"),
+    ("about", "关于"),
+    ("exit", "退出"),
+    ("announcements", "公告"),
+    ("notifications", "通知"),
+    ("shop", "商城"),
+]
+
+DEFAULT_ORDER = {
+    "shelf": 0,
+    "history": 1,
+    "rank": 2,
+    "browse": 3,
+    "account": 4,
+    "settings": 5,
+    "about": 6,
+    "exit": 7,
+    "announcements": -1,
+    "notifications": -1,
+    "shop": -1,
+}
+
+
 def _items(ctx):
-    account = "我的账号" if ctx.api.user else "登录"
-    return [
-        ("browse", "最近/分类"),
-        ("rank", "排行榜"),
-        ("shelf", "书架"),
-        ("history", "阅读历史"),
-        ("announcements", "公告"),
-        ("notifications", "通知"),
-        ("account", account),
-        ("shop", "商城"),
-        ("settings", "设置"),
-        ("about", "关于"),
-        ("exit", "退出"),
-    ]
+    configured = ctx.config.get("home_order") or {}
+    items = []
+    for fallback_index, (target, label) in enumerate(MODULES):
+        raw = configured.get(target, DEFAULT_ORDER.get(target, fallback_index))
+        try:
+            order = int(raw)
+        except (TypeError, ValueError):
+            order = DEFAULT_ORDER.get(target, fallback_index)
+        if order < 0:
+            continue
+        items.append((order, fallback_index, target, label))
+    items.sort(key=lambda item: (item[0], item[1]))
+    return [(target, label) for _order, _index, target, label in items]
 
 
 def render(ctx, canvas):
@@ -51,7 +76,7 @@ def render(ctx, canvas):
         x = margin + column * (button_width + gap)
         y = start_y + row * (button_height + row_gap)
         rect = (x, y, button_width, button_height)
-        canvas.button(rect, label, active=(target == "shelf") or bool(user) or target not in ("account",))
+        canvas.button(rect, label, active=(target == "shelf") or bool(user) or target != "account")
         STATE["rects"][target] = rect
 
 

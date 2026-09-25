@@ -17,7 +17,7 @@ DEFAULTS = {
     "screen_protocol": "auto",
     "framebuffer": "/dev/fb0",
     "font_path": "/usr/java/lib/fonts/STHeitiMedium.ttf",
-    "font_size": 36,
+    "font_size": 48,
     "line_spacing": 1.42,
     "reader_margin": 34,
     "page_flash": False,
@@ -32,6 +32,19 @@ DEFAULTS = {
     "cache_limit_mb": 192,
     "strict_tls": True,
     "check_update": True,
+    "home_order": {
+        "shelf": 0,
+        "history": 1,
+        "rank": 2,
+        "browse": 3,
+        "account": 4,
+        "settings": 5,
+        "about": 6,
+        "exit": 7,
+        "announcements": -1,
+        "notifications": -1,
+        "shop": -1,
+    },
 }
 
 
@@ -59,6 +72,11 @@ class Config:
                 if key not in self._data:
                     self._data[key] = value
                     changed = True
+                elif isinstance(value, dict) and isinstance(self._data.get(key), dict):
+                    for child_key, child_value in value.items():
+                        if child_key not in self._data[key]:
+                            self._data[key][child_key] = child_value
+                            changed = True
             if changed:
                 self.save()
             return dict(self._data)

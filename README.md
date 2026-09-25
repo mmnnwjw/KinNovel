@@ -39,6 +39,30 @@ Set the account in the device configuration:
 
 Do not commit a populated configuration file to Git.
 
+## Home layout
+
+`home_order` controls the home screen modules. A value of `-1` hides the
+module; other values are sorted from low to high, left to right, then top to
+bottom.
+
+```json
+{
+  "home_order": {
+    "shelf": 0,
+    "history": 1,
+    "rank": 2,
+    "browse": 3,
+    "account": 4,
+    "settings": 5,
+    "about": 6,
+    "exit": 7,
+    "announcements": -1,
+    "notifications": -1,
+    "shop": -1
+  }
+}
+```
+
 ## Install
 
 Prerequisites match kComics:

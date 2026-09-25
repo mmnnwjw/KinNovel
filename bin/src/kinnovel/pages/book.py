@@ -88,6 +88,16 @@ def _chapter_rows(ctx, canvas, start_y):
     return total_pages
 
 
+def _chapter_sort(chapters, index):
+    try:
+        value = int(chapters[index].get("SortNum"))
+        if value > 0:
+            return value
+    except (IndexError, TypeError, ValueError):
+        pass
+    return index + 1
+
+
 def render(ctx, canvas):
     top = canvas.header("书籍详情", left="返回", right="主页")
     if not STATE["data"]:
@@ -176,9 +186,9 @@ def handle(data, ctx):
         if action == "chapter":
             chapters = (STATE["data"].get("Book") or {}).get("Chapters") or []
             if key[1] < len(chapters):
-                chapter = chapters[key[1]]
                 ctx.navigate("reader", book_id=STATE["book_id"],
-                             sort_num=int(chapter.get("SortNum") or key[1] + 1))
+                             sort_num=_chapter_sort(chapters, key[1]),
+                             fresh=True)
         elif action == "read":
             chapters = (STATE["data"].get("Book") or {}).get("Chapters") or []
             position = STATE["data"].get("ReadPosition") or {}
@@ -189,8 +199,9 @@ def handle(data, ctx):
                     break
             target = target or (chapters[0] if chapters else None)
             if target:
+                target_index = chapters.index(target)
                 ctx.navigate("reader", book_id=STATE["book_id"],
-                             sort_num=int(target.get("SortNum") or 1))
+                             sort_num=_chapter_sort(chapters, target_index))
         elif action == "shelf":
             _toggle_shelf(ctx)
         elif action == "comments":

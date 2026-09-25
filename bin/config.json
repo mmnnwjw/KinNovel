@@ -5,7 +5,7 @@
   "screen_protocol": "auto",
   "framebuffer": "/dev/fb0",
   "font_path": "/usr/java/lib/fonts/STHeitiMedium.ttf",
-  "font_size": 36,
+  "font_size": 48,
   "line_spacing": 1.42,
   "reader_margin": 34,
   "page_flash": false,
@@ -19,5 +19,18 @@
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
   "strict_tls": true,
-  "check_update": true
+  "check_update": true,
+  "home_order": {
+    "shelf": 0,
+    "history": 1,
+    "rank": 2,
+    "browse": 3,
+    "account": 4,
+    "settings": 5,
+    "about": 6,
+    "exit": 7,
+    "announcements": -1,
+    "notifications": -1,
+    "shop": -1
+  }
 }

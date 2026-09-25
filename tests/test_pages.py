@@ -23,7 +23,7 @@ class Config:
     def __init__(self):
         self.values = {
             "night_mode": False,
-            "font_size": 34,
+            "font_size": 48,
             "line_spacing": 1.42,
             "reader_margin": 30,
             "first_line_indent": True,
@@ -33,6 +33,19 @@ class Config:
             "convert": None,
             "ignore_japanese": False,
             "ignore_ai": False,
+            "home_order": {
+                "shelf": 0,
+                "history": 1,
+                "rank": 2,
+                "browse": 3,
+                "account": 4,
+                "settings": 5,
+                "about": 6,
+                "exit": 7,
+                "announcements": -1,
+                "notifications": -1,
+                "shop": -1,
+            },
         }
 
     def get(self, key, default=None):
@@ -118,8 +131,57 @@ class PageSmokeTests(unittest.TestCase):
         browse.STATE.update({"page": 1, "total_pages": 2, "items": []})
         self.context.page_name = "browse"
         self.context.render()
-        book_rects = [key for key in browse.STATE["rects"] if key[0] == "book"]
-        self.assertEqual(len(book_rects), 6)
+        item_rects = [key for key in browse.STATE["rects"] if key[0] == "item"]
+        nav_rects = [key for key in browse.STATE["rects"] if key[0] in ("prev", "count", "next")]
+        self.assertGreater(len(item_rects), 0)
+        self.assertEqual(len(nav_rects), 3)
+
+    def test_rank_has_bottom_pager(self):
+        rank.STATE.update({"items": [{"Id": 1, "Title": "A"}], "page": 1,
+                           "total_pages": 2, "loaded": True})
+        self.context.page_name = "rank"
+        self.context.render()
+        self.assertIn(("prev", 0), rank.STATE["rects"])
+        self.assertIn(("count", 0), rank.STATE["rects"])
+        self.assertIn(("next", 0), rank.STATE["rects"])
+
+    def test_home_order_can_hide_and_reorder(self):
+        self.context.config.values["home_order"] = {
+            "rank": 0,
+            "shelf": 1,
+            "browse": -1,
+            "history": -1,
+            "account": -1,
+            "settings": -1,
+            "about": -1,
+            "exit": -1,
+            "announcements": -1,
+            "notifications": -1,
+            "shop": -1,
+        }
+        self.assertEqual(home._items(self.context), [
+            ("rank", "排行榜"),
+            ("shelf", "书架"),
+        ])
+
+    def test_previous_chapter_starts_at_last_page(self):
+        reader.STATE["data"] = {"Chapter": {"Chapters": ["一", "二", "三"]}}
+        reader.STATE["sort_num"] = 2
+
+        class ReplaceContext:
+            def __init__(self):
+                self.call = None
+
+            def replace(self, page, **params):
+                self.call = (page, params)
+
+            def toast(self, _message):
+                pass
+
+        replace_context = ReplaceContext()
+        reader._change_chapter(replace_context, -1, at_last=True)
+        self.assertEqual(replace_context.call[1]["sort_num"], 1)
+        self.assertTrue(replace_context.call[1]["at_last"])
 
     def test_header_left_uses_back_stack(self):
         self.context.stack = [("home", {})]
