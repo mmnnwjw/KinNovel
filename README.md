@@ -1,56 +1,112 @@
-# KinNovel
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Kindle-111111?style=for-the-badge" alt="Kindle">
+  <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.14">
+  <img src="https://img.shields.io/badge/License-GPLv3-2C7A7B?style=for-the-badge" alt="GPLv3">
+</p>
 
-KinNovel 是运行在已越狱 Kindle 上的轻书架（LightNovelShelf）阅读客户端。
-项目使用 Python 3.14、Pillow、evdev 和 Kindle EPDC framebuffer，界面运行在
-Kindle 原生系统上，不依赖浏览器、Qt 或桌面环境。
+<p align="center">
+  <strong>KinNovel</strong><br>
+  在已越狱 Kindle 的原生系统上阅读轻书架
+</p>
+
+---
+
+## 项目简介
+
+KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读客户端。
+应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
+Qt 或桌面环境。
 
 当前版本：`0.2.0`
 
-## 功能
+## 支持内容
 
-- 启动时读取配置中的账号密码并自动登录。
-- 小说排行榜、最近更新、分类、阅读历史和书籍详情。
-- 章节列表分页、正文自动分页、上一章/下一章和章节目录。
-- 使用服务端章节字体渲染正文，支持 Kindle 上的 WOFF2 章节字体。
-- 夜间模式、字号、行距、首行缩进和简繁转换设置。
-- 正文图片显示；点击图片进入全屏预览，再次点击退出。
-- 书架浏览、打开文件夹、翻页、加入书架、移出书架和删除文件夹。
-- 公告、评论浏览、通知、签到和商城。
-- 可配置主页模块顺序和显示状态。
+| 模块 | 支持内容 |
+|---|---|
+| 账号 | 从 `config.json` 读取账号并自动登录；自动刷新访问令牌 |
+| 首页 | 书架、阅读历史、排行榜、最近/分类、账号、设置、关于和退出 |
+| 首页配置 | 使用 `home_order` 隐藏模块并调整左右、上下顺序 |
+| 排行榜 | 日榜、周榜、月榜和底部分页 |
+| 最近/分类 | 最近更新、上架时间、总点击数、类型筛选和底部分页 |
+| 书籍 | 书籍详情、简介、标签、章节列表和章节分页 |
+| 阅读 | 章节正文、上一章/下一章、章节目录、阅读进度和阅读历史 |
+| 排版 | 自动分页、字号、行距、首行缩进、简繁转换和夜间模式 |
+| 字体 | 加载服务端章节字体；缺失字形自动使用 Kindle 系统字体补足 |
+| 图片 | 正文插图、独立图片解码进程、点击全屏预览和再次点击退出 |
+| 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
+| 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
+| 显示 | MTK 与 MXCFB EPDC 输出、原屏快照恢复和系统进程暂停/恢复 |
 
-## 当前不包含的功能
+## 参考项目
 
-- 文字输入和触屏输入法。
-- 搜索、登录表单、注册、找回密码、评论发表、私信和文件夹命名。
-- 漫画图片阅读器。漫画接口和页面未包含在当前版本中。
-- 上传、发布、编辑、删除、下载和导出。
-- 论坛和社区。
+本项目参考并复用了以下公开项目。各项目借鉴内容如下：
 
-登录凭据固定从配置文件读取。请勿把填写了账号密码的配置文件提交到公开仓库。
+### LightNovelShelf/Web
+
+- 项目：<https://github.com/LightNovelShelf/Web>
+- 用途：LightNovelShelf 客户端行为与接口契约参考。
+- 借鉴内容：
+  - REST 登录、刷新令牌和统一响应结构。
+  - SignalR Hub 方法、参数和响应字段。
+  - 小说列表、详情、章节和阅读进度逻辑。
+  - 章节字体加载模型。
+  - 阅读位置的相对 XPath 语义。
+- 说明：KinNovel 使用 Python 重新实现 Kindle 端，不包含原 Quasar/Vue
+  前端源码。
+
+### kComics
+
+- 项目：<https://github.com/lxdklp/kComics>
+- 用途：Kindle 原生运行层参考与 GPLv3 代码复用。
+- 借鉴内容：
+  - `/dev/fb0` 与 EPDC framebuffer 输出。
+  - MTK 和 MXCFB 波形、刷新区域与刷新标志。
+  - evdev 触摸设备识别和手势解析。
+  - KUAL 启动、系统进程暂停、屏幕快照和恢复流程。
+  - Kindle ARM 运行库的组织和启动方式。
+
+### KOReader
+
+- 项目：<https://github.com/koreader/koreader>
+- 用途：章节 WOFF2 字体的运行时 FreeType 支持。
+- 使用方式：
+  - 当设备已安装 KOReader 时，启动脚本加载：
+
+```text
+/mnt/us/koreader/libs/libfreetype.so.6
+```
+
+  - 该库包含 Kindle 自带的 Python Pillow 所需的 FreeType ABI，并提供
+    WOFF2/Brotli 解码能力。
+- 说明：发布包不包含 KOReader 源码。
+
+### 运行时组件
+
+| 项目 | 用途 | 许可 |
+|---|---|---|
+| [Pillow](https://github.com/python-pillow/Pillow) | 图像、字体和 framebuffer 渲染 | MIT-CMU |
+| [lxml](https://github.com/lxml/lxml) | 章节 HTML 解析 | BSD |
+| [python-evdev](https://github.com/gvalkov/python-evdev) | Kindle 触摸事件 | BSD |
+
+完整第三方说明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
 ## 环境要求
 
 1. 已越狱的 Kindle。
 2. Kindle 系统版本 `5.16.3` 或更高。
 3. 已安装 KUAL。
-4. 已安装 `πthon (HF) for Kindle`，默认路径为：
+4. 已安装 [πthon (HF) for Kindle](https://github.com/lxdklp/python-for-kindle)。
+5. Python 默认路径：
 
 ```text
 /mnt/us/python3/bin/python3.14
 ```
 
-如果还没有 Python，可参考 kComics 的安装方式：
-
-- MRPI：把 `Update_install_python3.bin` 放到 `/mnt/us/mrpackages/`，在 Kindle 搜索框输入 `;log mrpi`。
-- KPM：执行：
-
-```text
-;kpm install file:///mnt/us/python3_3.14.3_kindlehf.kpkg
-```
-
 ## 安装
 
-### 方式一：使用 Release 压缩包
+### Release 安装包
+
+发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
 1. 下载 Release 中的 `KinNovel-v0.2.0.zip`。
 2. 解压得到 `KinNovel` 文件夹。
@@ -60,16 +116,17 @@ Kindle 原生系统上，不依赖浏览器、Qt 或桌面环境。
 /mnt/us/extensions/kinnovel/
 ```
 
-4. 确认入口文件存在：
+4. 检查目录：
 
 ```text
 /mnt/us/extensions/kinnovel/bin/start.sh
+/mnt/us/extensions/kinnovel/bin/config.json
 /mnt/us/extensions/kinnovel/config.xml
 /mnt/us/extensions/kinnovel/manifest.json
 /mnt/us/extensions/kinnovel/menu.json
 ```
 
-5. 如果权限被复制工具修改，通过 Kindle SSH 执行：
+5. 从 SSH 设置执行权限：
 
 ```sh
 chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
@@ -77,9 +134,9 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 
 6. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
 
-### 方式二：SSH 手动安装
+### SSH 安装
 
-把整个项目复制到 Kindle：
+把安装包中的内容复制到 Kindle：
 
 ```sh
 mkdir -p /mnt/us/extensions/kinnovel
@@ -89,15 +146,15 @@ cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
 chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 ```
 
-启动：
+直接启动：
 
 ```sh
 /bin/sh /mnt/us/extensions/kinnovel/bin/start.sh
 ```
 
-### 方式三：项目内安装脚本
+### 安装脚本
 
-如果项目已经完整复制到 Kindle，可执行：
+如果安装包已完整复制到 `/mnt/us/extensions/kinnovel`：
 
 ```sh
 /bin/sh /mnt/us/extensions/kinnovel/install.sh
@@ -105,13 +162,13 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 
 ## 配置
 
-配置文件位置：
+配置文件：
 
 ```text
 /mnt/us/extensions/kinnovel/bin/config.json
 ```
 
-默认配置：
+### 完整默认配置
 
 ```json
 {
@@ -152,7 +209,7 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 }
 ```
 
-### 账号配置
+### 账号
 
 ```json
 {
@@ -161,19 +218,19 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 }
 ```
 
-应用启动后自动使用这两个字段登录，不显示登录界面。`account_password` 是明文
-存储，只应保存在个人 Kindle 上，不能提交到 Git 或公开分享。
+应用启动后自动登录，不显示登录表单。密码以明文保存在设备本地，请勿提交到
+Git，也不要分享带有真实凭据的 `config.json`。
 
-### 显示配置
+### 显示
 
-| 配置项 | 说明 | 默认值 |
+| 字段 | 说明 | 默认值 |
 |---|---|---|
-| `screen_protocol` | EPDC 协议。`auto` 会依次尝试 `mtk`、`mxcfb` | `auto` |
+| `screen_protocol` | EPDC 协议；`auto` 依次尝试 `mtk`、`mxcfb` | `auto` |
 | `framebuffer` | Kindle framebuffer 路径 | `/dev/fb0` |
 | `page_flash` | 翻页时是否强制全屏刷新 | `false` |
-| `night_mode` | 是否反转黑白显示 | `false` |
+| `night_mode` | 是否使用黑白反转的夜间模式 | `false` |
 
-如果启动后屏幕无显示或刷新异常，可依次尝试：
+屏幕无法显示或刷新异常时，可手动指定：
 
 ```json
 {"screen_protocol": "mtk"}
@@ -183,39 +240,28 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 {"screen_protocol": "mxcfb"}
 ```
 
-### 阅读配置
+### 阅读
 
-| 配置项 | 说明 | 默认值 |
+| 字段 | 说明 | 默认值 |
 |---|---|---|
-| `font_size` | 正文字号，可在设置页用 `-` / `+` 调整 | `48` |
-| `line_spacing` | 正文行距，可在设置页调整 | `1.42` |
-| `reader_margin` | 正文左右边距（像素） | `34` |
+| `font_size` | 正文字号；设置页可用 `-` / `+` 调整 | `48` |
+| `line_spacing` | 行距；设置页可用 `-` / `+` 调整 | `1.42` |
+| `reader_margin` | 正文左右边距，单位像素 | `34` |
 | `font_path` | Kindle 系统中文字体 | `/usr/java/lib/fonts/STHeitiMedium.ttf` |
-| `first_line_indent` | 段落首行缩进 | `true` |
-| `justify` | 是否两端对齐 | `false` |
+| `first_line_indent` | 首行缩进 | `true` |
+| `justify` | 两端对齐 | `false` |
 | `convert` | 简繁转换：`null`、`t2s`、`s2t` | `null` |
 | `ignore_japanese` | 列表过滤日文作品 | `false` |
 | `ignore_ai` | 列表过滤 AI 作品 | `false` |
 
-章节正文会优先使用服务端返回的章节字体。Kindle 上需要 KOReader 自带的
-FreeType 支持 WOFF2；启动脚本默认检测：
+### 首页模块
 
-```text
-/mnt/us/koreader/libs/libfreetype.so.6
-```
+`home_order` 的规则：
 
-如果没有 KOReader，正文会回退到 `font_path` 指定的系统字体。
-
-### 主页模块顺序
-
-`home_order` 控制主页模块：
-
-- `-1`：隐藏该模块。
-- `0`、`1`、`2` 等：按数值从小到大排列。
-- 排列方向为从左到右、从上到下。
-- 数值相同时按内置顺序排列。
-
-可配置模块：
+- `-1`：隐藏模块。
+- 非负整数：数值越小越靠前。
+- 排列方向：从左到右，从上到下。
+- 数值相同：按程序内置顺序排列。
 
 | 值 | 模块 |
 |---|---|
@@ -231,7 +277,7 @@ FreeType 支持 WOFF2；启动脚本默认检测：
 | `notifications` | 通知 |
 | `shop` | 商城 |
 
-例如，只保留书架和最近/分类：
+例如只显示书架和最近/分类：
 
 ```json
 {
@@ -251,93 +297,91 @@ FreeType 支持 WOFF2；启动脚本默认检测：
 }
 ```
 
-### 网络和缓存
+### 网络与缓存
 
-| 配置项 | 说明 | 默认值 |
+| 字段 | 说明 | 默认值 |
 |---|---|---|
 | `api_server` | LightNovelShelf API 地址 | `https://api.lightnovel.life` |
-| `request_limit` | 时间窗口内允许的请求数量 | `9` |
+| `request_limit` | 请求窗口内允许的最大请求数 | `9` |
 | `request_window_ms` | 请求限流窗口，单位毫秒 | `5500` |
-| `cache_limit_mb` | 封面、字体、图片和正文缓存总上限 | `192` |
-| `strict_tls` | 是否严格验证 HTTPS 证书 | `true` |
+| `cache_limit_mb` | 封面、字体、图片和正文缓存上限 | `192` |
+| `strict_tls` | 是否严格校验证书 | `true` |
 
-只有设备缺少 CA 证书且日志明确报告 TLS 证书错误时，才建议临时设置：
+只有日志明确报告设备缺少 CA 证书时，才临时使用：
 
 ```json
 {"strict_tls": false}
 ```
 
-### 更新检查
+## 使用
 
-```json
-{"check_update": true}
-```
-
-当前版本保留配置字段，但更新检查模块未包含在发布包内。
-
-## 使用说明
-
-### 启动
+### 启动与退出
 
 1. 打开 KUAL。
 2. 进入 `KinNovel`。
 3. 点击 `KinNovel`。
-4. 应用会暂停占用 framebuffer 的系统进程、保存原屏幕并启动。
-5. 退出应用后，原屏幕和系统进程会恢复。
-
-### 书库和排行榜
-
-- 最近/分类支持上一页、下一页和页码显示。
-- 排行榜支持日榜、周榜、月榜以及上一页、下一页。
-- 列表页每页显示数量会根据屏幕高度计算。
-
-### 章节跳转
-
-- 在书籍详情中选择第 N 章：从第 N 章第一页开始阅读。
-- 在第 N 章第一页继续向左：进入第 N-1 章最后一页。
-- 点击阅读器中的章节目录：点选章节后从该章第一页开始。
+4. 应用会暂停占用 framebuffer 的系统进程并保存原屏幕。
+5. 退出应用后，原屏幕和系统进程自动恢复。
 
 ### 阅读器
 
-- 点击屏幕左右边缘：上一页或下一页。
-- 点击顶部主页图标：返回主页。
+- 点击左右边缘：上一页或下一页。
 - 点击顶部返回图标：返回上一页。
+- 点击顶部主页图标：返回主页。
 - 点击正文插图：进入全屏预览。
-- 在全屏预览中点击任意位置：退出预览。
-- 底部按钮：上一章、章节目录、设置、下一章。
+- 全屏预览中再次点击：退出预览。
+- 底栏：上一章、章节目录、设置、下一章。
+
+### 章节跳转
+
+- 选择第 N 章：从第 N 章第一页开始。
+- 在第 N 章首屏继续向左：进入第 N-1 章最后一页。
+- 从章节目录点选章节：从该章第一页开始。
 
 ### 书架
 
-- 点击文件夹进入下一层。
-- 点击书籍进入详情。
-- 长按项目可移出书籍或删除文件夹。
-- 底部分页可浏览超过一屏的书架内容。
+- 点击文件夹：进入下一层。
+- 点击书籍：打开详情。
+- 长按项目：移出书籍或删除文件夹。
+- 底部分页：浏览超过一屏的书架内容。
 
-## 日志和排障
+## 字体说明
 
-日志位置：
+LightNovelShelf 会为章节返回专用字体。阅读器必须同时使用该字体进行文本测量
+和绘制，否则正文可能显示为错误汉字。
+
+官方 Web 阅读器使用：
+
+```css
+font-family: read, sans-serif !important;
+```
+
+Pillow 不会自动进行 CSS 字体回退。KinNovel 会逐字检测字形，章节字体缺少或
+轮廓为空时，仅对该字符使用 `font_path` 指定的系统字体。
+
+WOFF2 章节字体需要支持 Brotli 的 FreeType。启动脚本会优先使用设备中
+KOReader 的：
+
+```text
+/mnt/us/koreader/libs/libfreetype.so.6
+```
+
+## 排障
+
+日志：
 
 ```text
 /mnt/us/extensions/kinnovel/logs/kinnovel.log
 ```
 
-### 应用无法启动
-
-检查 Python：
+### 无法启动
 
 ```sh
 /mnt/us/python3/bin/python3.14 --version
-```
-
-检查启动脚本：
-
-```sh
 chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 ```
 
-### 应用残留锁
-
-异常退出后如果无法再次启动，删除：
+### 出现残留锁
 
 ```sh
 rm -rf /tmp/kinnovel.lock
@@ -345,62 +389,44 @@ rm -rf /tmp/kinnovel.lock
 
 ### 屏幕刷新异常
 
-修改 `screen_protocol`：
+依次尝试：
 
-- Paperwhite 4 等 MTK 机型：`"mtk"`
-- 常见 i.MX 机型：`"mxcfb"`
-
-### 章节字体显示异常
-
-确认日志中是否加载了 KOReader FreeType：
-
-```text
-/mnt/us/koreader/libs/libfreetype.so.6
+```json
+{"screen_protocol": "mtk"}
 ```
 
-如果章节字体无法加载，应用会提示“章节字体加载失败，正文可能显示异常”。
+```json
+{"screen_protocol": "mxcfb"}
+```
 
-### 网络错误
+### 字体异常
 
-检查 `api_server` 是否可访问，并确认 Kindle 网络正常。可将 `strict_tls`
-临时设为 `false` 做兼容测试，测试后应恢复为 `true`。
-
-## 卸载
-
-删除扩展目录：
+确认 KOReader 的 FreeType 存在：
 
 ```sh
-rm -rf /mnt/us/extensions/kinnovel
+ls -l /mnt/us/koreader/libs/libfreetype.so.6
 ```
 
-或执行：
+### 网络异常
+
+检查 `api_server`、Wi-Fi 和 Kindle 时间。测试完成后应把 `strict_tls`
+恢复为 `true`。
+
+## 卸载
 
 ```sh
 /bin/sh /mnt/us/extensions/kinnovel/uninstall.sh
 ```
 
-卸载会同时删除缓存、日志和保存在设备上的账号配置。
-
-## 开发
-
-运行测试：
+或：
 
 ```sh
-PYTHONPATH=bin/src python -m unittest discover -s tests -v
+rm -rf /mnt/us/extensions/kinnovel
 ```
 
-生成桌面预览：
-
-```sh
-python tools/render_preview.py
-```
-
-预览输出到：
-
-```text
-build/previews/
-```
+卸载会删除缓存、日志和设备上的账号配置。
 
 ## 许可证
 
-GPLv3。第三方组件和代码来源见 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`。
+KinNovel 使用 GPLv3 发布。LightNovelShelf 内容、封面、正文和字体归原站及
+对应权利人所有。使用前请阅读并遵守站点规则和内容许可。

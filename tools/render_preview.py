@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "bin" / "src"))
 
 from PIL import Image, ImageDraw, ImageFont
 
-from kinnovel.pages import browse, home, reader
+from kinnovel.pages import browse, home, reader, settings
 from kinnovel.reader import ReaderDocument
 from kinnovel.ui import ImageCache, PageContext
 
@@ -35,7 +35,7 @@ class FakeConfig:
     def __init__(self):
         self.values = {
             "night_mode": False,
-            "font_size": 34,
+            "font_size": 48,
             "line_spacing": 1.42,
             "reader_margin": 34,
             "first_line_indent": True,
@@ -151,6 +151,37 @@ def render_reader():
     return app.screen.output.last
 
 
+def render_settings():
+    app = FakeApp()
+    context = PageContext(app)
+    context.register("settings", settings)
+    context.page_name = "settings"
+    context.params = {}
+    context.show()
+    return app.screen.output.last
+
+
+class StaticPage:
+    def __init__(self, render):
+        self._render = render
+
+    def render(self, context, canvas):
+        return self._render(context, canvas)
+
+    def handle(self, data, context):
+        return None
+
+
+def render_about():
+    app = FakeApp()
+    context = PageContext(app)
+    context.register("about", StaticPage(settings.render_about))
+    context.page_name = "about"
+    context.params = {}
+    context.show()
+    return app.screen.output.last
+
+
 def main():
     output = ROOT / "build" / "previews"
     output.mkdir(parents=True, exist_ok=True)
@@ -158,6 +189,8 @@ def main():
         "home": render_home(),
         "browse": render_browse(),
         "reader": render_reader(),
+        "settings": render_settings(),
+        "about": render_about(),
     }
     for name, image in pages.items():
         path = output / (name + ".png")

@@ -123,15 +123,22 @@ def _clear(ctx):
 
 ABOUT_LINES = [
     "KinNovel 0.2.0",
-    "LightNovelShelf 的 Kindle 客户端",
+    "运行于 Kindle 原生系统的轻书架客户端",
     "",
-    "本项目使用 GPLv3 发布。",
-    "复用 kComics 的 framebuffer、evdev 和 Pinyin 组件。",
+    "开发参考",
+    "LightNovelShelf/Web",
+    "接口、业务逻辑、阅读器行为、章节字体机制",
+    "kComics",
+    "framebuffer、EPDC、evdev、启动和恢复流程",
+    "KOReader",
+    "运行时 FreeType 与 WOFF2 章节字体支持",
     "",
+    "主要依赖",
+    "Python 3.14、Pillow、lxml、python-evdev",
+    "",
+    "本项目按 GPLv3 发布。",
     "LightNovelShelf 内容与接口归原站及其权利人所有。",
     "请遵守站点规则和内容版权。",
-    "",
-    "第三方组件: Pillow、lxml、evdev、KOReader。",
 ]
 
 
