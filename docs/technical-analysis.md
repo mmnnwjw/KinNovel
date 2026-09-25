@@ -317,11 +317,43 @@ KinNovel handles the font as follows:
    an SFNT TTF/OTF container before loading it in Pillow.
 5. Use the system CJK font only for UI labels and as an explicit fallback.
 
-The host-side Pillow 11.3 test loaded the live server's WOFF2 chapter font
-directly. The bundled ARM Pillow is version 12.3 with the FreeType extension,
-but WOFF2 support must still be confirmed on the target Kindle. If that Pillow
-build lacks WOFF2/Brotli support, the reader falls back to the system font
-instead of inventing a text transformation.
+The bundled Kindle Pillow 12.3 can load the live WOFF2 chapter font when the
+KOReader FreeType library is preloaded; this was verified on the target device.
+If a different Pillow build lacks WOFF2/Brotli support, the reader falls back
+to the system font instead of inventing a text transformation.
+
+The currently deployed official web reader does not implement per-character
+fallback in JavaScript. It injects:
+
+```css
+@font-face {
+  font-family: read;
+  font-display: block;
+  src: url("<chapter-font>");
+}
+```
+
+and uses:
+
+```css
+font-family: read, sans-serif !important;
+```
+
+There is no `unicode-range` on the chapter font, so the browser's normal CSS
+font fallback selects `sans-serif` when `read` has no glyph for a code point.
+
+A live inspection of book `9990`, chapter 5 found 12,701 chapter characters and
+1,385 unique non-space code points. Seven code points were absent from the
+chapter font and all seven were available in the Kindle system font:
+
+```text
+U+200B, U+200C, U+200D, U+2500, U+25A0, U+25BC, U+FEFF
+```
+
+Pillow does not automatically apply CSS-style font fallback when it is given a
+single `FreeTypeFont`. KinNovel therefore performs the equivalent operation
+explicitly: it checks each character's glyph mask and uses the system font only
+for characters whose chapter-font glyph is absent or empty.
 
 The reader generates relative XPaths from the parsed block DOM and sends the
 first visible block's path to `SaveReadPosition`. This keeps progress compatible
