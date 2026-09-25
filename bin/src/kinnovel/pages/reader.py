@@ -1,4 +1,5 @@
 import threading
+import time
 
 from PIL import Image, ImageDraw, ImageOps
 
@@ -19,6 +20,7 @@ STATE = {
     "image_pending": set(),
     "image_rects": {},
     "fullscreen_image": None,
+    "last_turn_at": 0.0,
 }
 
 
@@ -144,6 +146,7 @@ def _turn(ctx, delta):
     target = int(STATE["page"]) + int(delta)
     if 0 <= target < doc.page_count:
         STATE["page"] = target
+        STATE["last_turn_at"] = time.monotonic()
         _save_progress(ctx)
         ctx.show()
         return
@@ -158,6 +161,11 @@ def _change_chapter(ctx, delta, at_last=False):
         return
     ctx.replace("reader", book_id=STATE["book_id"], sort_num=sort_num,
                 at_last=bool(at_last))
+    STATE["last_turn_at"] = time.monotonic()
+
+
+def header_blocked():
+    return time.monotonic() - float(STATE.get("last_turn_at") or 0.0) < 0.35
 
 
 def render(ctx, canvas):
@@ -199,7 +207,10 @@ def render(ctx, canvas):
             y = top + item["y"]
             if y + item.get("size", 0) > top + content_height:
                 continue
-            canvas.text((item["x"], y), item["text"], font=item["font"])
+            canvas.text_fallback(
+                (item["x"], y), item["text"], item["font"],
+                item.get("fallback_font"),
+            )
         elif item["type"] == "image":
             image = ctx.images.get(item["url"])
             if image is None:

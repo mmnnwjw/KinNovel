@@ -248,6 +248,13 @@ class PageSmokeTests(unittest.TestCase):
         self.context.handle({"gesture": "tap", "x-pixel": 10, "y-pixel": 10})
         self.assertEqual(self.context.page_name, "home")
 
+    def test_back_is_debounced(self):
+        self.context.stack = [("home", {})]
+        self.context.page_name = "browse"
+        self.context._last_back_at = time.monotonic()
+        self.context.back()
+        self.assertEqual(self.context.page_name, "browse")
+
     def test_long_gesture_reaches_page(self):
         class LongPage:
             @staticmethod

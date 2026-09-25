@@ -215,11 +215,23 @@ def normalize_font(path):
 
 
 class FontResolver:
-    def __init__(self, system_font):
-        self.system_font = system_font
+    def __init__(self, system_font_path):
+        self.system_font_path = system_font_path
         self._cache = {}
         self.custom_font_loaded = False
         self.last_error = ""
+        self._system_cache = {}
+
+    def system_font(self, size):
+        from PIL import ImageFont
+        key = int(size)
+        if key not in self._system_cache:
+            try:
+                self._system_cache[key] = ImageFont.truetype(
+                    self.system_font_path, key)
+            except OSError:
+                self._system_cache[key] = ImageFont.load_default()
+        return self._system_cache[key]
 
     def resolve(self, chapter_font, base_url, size, strict_tls=False):
         from PIL import ImageFont
@@ -236,7 +248,7 @@ class FontResolver:
                 self.custom_font_loaded = True
                 return self._cache[key]
         try:
-            return ImageFont.truetype(self.system_font, int(size))
+            return ImageFont.truetype(self.system_font_path, int(size))
         except OSError:
             return ImageFont.load_default()
 
@@ -249,7 +261,47 @@ def text_width(draw, text, font):
         return float(bbox[2] - bbox[0])
 
 
-def wrap_line(draw, text, font, max_width, remove_trailing_spaces=True):
+_GLYPH_CACHE = {}
+
+
+def glyph_available(font, character):
+    if not character:
+        return True
+    if character.isspace():
+        return True
+    key = (id(font), character)
+    cached = _GLYPH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        available = bool(font.getmask(character).getbbox())
+    except (AttributeError, OSError, ValueError):
+        available = False
+    _GLYPH_CACHE[key] = available
+    return available
+
+
+def char_font(font, fallback_font, character):
+    if fallback_font is None or glyph_available(font, character):
+        return font
+    if glyph_available(fallback_font, character):
+        return fallback_font
+    return font
+
+
+def split_font_runs(text, font, fallback_font):
+    runs = []
+    for character in str(text or ""):
+        selected = char_font(font, fallback_font, character)
+        if runs and runs[-1][1] is selected:
+            runs[-1] = (runs[-1][0] + character, selected)
+        else:
+            runs.append((character, selected))
+    return runs
+
+
+def wrap_line(draw, text, font, max_width, fallback_font=None,
+              remove_trailing_spaces=True):
     text = str(text or "").replace("\u00a0", " ")
     if not text:
         return [""]
@@ -262,13 +314,18 @@ def wrap_line(draw, text, font, max_width, remove_trailing_spaces=True):
             current = ""
             current_width = 0.0
             continue
-        character_width = text_width(draw, character, font)
+        character_width = text_width(
+            draw, character, char_font(font, fallback_font, character))
         if current and current_width + character_width > max_width:
             cut = current
             if len(cut) > 1 and cut[-1] in "，。！？；：、,.!?;:'\")]】》”’":
                 cut = cut[:-1]
                 current = current[-1] + character
-                current_width = text_width(draw, current, font)
+                current_width = sum(
+                    text_width(draw, character,
+                               char_font(font, fallback_font, character))
+                    for character in current
+                )
             else:
                 current = character
                 current_width = character_width
@@ -288,7 +345,9 @@ class ReaderDocument:
         self.blocks = extract_blocks(self.chapter.get("Content") or "", base_url)
         self.font_resolver = FontResolver(system_font)
         self.body_font = None
+        self.body_fallback = None
         self.small_font = None
+        self.small_fallback = None
         self.pages = []
         self._draw_proxy = None
 
@@ -304,12 +363,14 @@ class ReaderDocument:
             size,
             strict_tls=bool(self.config.get("strict_tls")),
         )
+        self.body_fallback = self.font_resolver.system_font(size)
         self.small_font = self.font_resolver.resolve(
             self.chapter.get("Font"),
             self.base_url,
             max(20, int(size * 0.82)),
             strict_tls=bool(self.config.get("strict_tls")),
         )
+        self.small_fallback = self.font_resolver.system_font(max(20, int(size * 0.82)))
         self.pages = self._paginate(self._draw_proxy, int(width), int(height))
         return self.pages
 
@@ -331,14 +392,17 @@ class ReaderDocument:
             current = []
             y = 0
 
-        def add_line(text, font=None, indent=False, gap_before=0, gap_after=0):
+        def add_line(text, font=None, fallback_font=None, indent=False,
+                     gap_before=0, gap_after=0):
             nonlocal y, current
             font = font or self.body_font
+            fallback_font = fallback_font or self.body_fallback
             if y + gap_before + line_height > usable_height and current:
                 new_page()
             y += gap_before
             prefix = "　　" if indent and self.config.get("first_line_indent") else ""
-            for line in wrap_line(draw, prefix + text, font, usable_width):
+            for line in wrap_line(draw, prefix + text, font, usable_width,
+                                  fallback_font=fallback_font):
                 if y + line_height > usable_height and current:
                     new_page()
                 current.append({
@@ -347,6 +411,7 @@ class ReaderDocument:
                     "x": margin,
                     "y": margin + y,
                     "font": font,
+                    "fallback_font": fallback_font,
                     "size": getattr(font, "size", 28),
                     "path": path,
                 })
@@ -380,16 +445,23 @@ class ReaderDocument:
                     int(self.body_font.size * max(1.08, 1.30 - block.level * 0.05)),
                     strict_tls=bool(self.config.get("strict_tls")),
                 )
-                add_line(block.text, font=font, indent=False,
+                add_line(block.text, font=font,
+                         fallback_font=self.font_resolver.system_font(
+                             int(self.body_font.size * max(
+                                 1.08, 1.30 - block.level * 0.05))),
+                         indent=False,
                          gap_before=heading_gap if current else 0,
                          gap_after=int(line_height * 0.35))
             else:
                 add_line(block.text, indent=self.config.get("first_line_indent", True),
                          gap_after=int(line_height * 0.22))
         if footnote_lines:
-            add_line("注释", font=self.small_font, gap_before=heading_gap)
+            add_line("注释", font=self.small_font,
+                     fallback_font=self.small_fallback, gap_before=heading_gap)
             for text, path in footnote_lines:
-                add_line(text, font=self.small_font, gap_after=int(line_height * 0.15))
+                add_line(text, font=self.small_font,
+                         fallback_font=self.small_fallback,
+                         gap_after=int(line_height * 0.15))
         if current or not pages:
             pages.append(current)
         return pages

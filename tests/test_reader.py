@@ -3,7 +3,12 @@ import unittest
 from PIL import Image, ImageDraw, ImageFont
 
 from kinnovel.config import Config
-from kinnovel.reader import ReaderDocument, extract_blocks, sanitize_html
+from kinnovel.reader import (
+    ReaderDocument,
+    extract_blocks,
+    sanitize_html,
+    split_font_runs,
+)
 
 
 class MemoryConfig:
@@ -55,6 +60,28 @@ class ReaderTests(unittest.TestCase):
         pages = document.prepare(draw, 800, 1000)
         self.assertGreater(len(pages), 1)
         self.assertTrue(any(item["type"] == "text" for item in pages[0]))
+
+    def test_missing_glyph_falls_back_per_character(self):
+        class Mask:
+            def __init__(self, visible):
+                self.visible = visible
+
+            def getbbox(self):
+                return (0, 0, 10, 10) if self.visible else None
+
+        class Font:
+            def __init__(self, available):
+                self.available = available
+
+            def getmask(self, character):
+                return Mask(character in self.available)
+
+        primary = Font({"A", "B"})
+        fallback = Font({"\u30fb"})
+        runs = split_font_runs("A\u30fbB", primary, fallback)
+        self.assertEqual(runs[0], ("A", primary))
+        self.assertEqual(runs[1], ("\u30fb", fallback))
+        self.assertEqual(runs[2], ("B", primary))
 
 
 if __name__ == "__main__":

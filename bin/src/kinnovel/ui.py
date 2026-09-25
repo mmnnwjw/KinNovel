@@ -1,14 +1,14 @@
-import io
+import subprocess
+import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
+from .reader import split_font_runs, text_width
 from .utils import prune_cache
 
 
@@ -64,6 +64,13 @@ class Canvas:
     def text(self, xy, value, font=None, fill=None, anchor=None):
         self.draw.text(xy, str(value), font=font or self.fonts["body"],
                        fill=self.theme.foreground if fill is None else fill, anchor=anchor)
+
+    def text_fallback(self, xy, value, font, fallback_font, fill=None):
+        x, y = xy
+        color = self.theme.foreground if fill is None else fill
+        for run, selected_font in split_font_runs(value, font, fallback_font):
+            self.draw.text((x, y), run, font=selected_font, fill=color)
+            x += text_width(self.draw, run, selected_font)
 
     def centered_text(self, value, font, cx, cy, fill=None):
         self.draw.text(self.centered(value, font, cx, cy), str(value),
@@ -156,13 +163,8 @@ class ImageCache:
         self._lock = threading.RLock()
 
     def _path(self, url):
-        suffix = ".img"
-        for extension in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".ttf", ".otf"):
-            if url.lower().split("?", 1)[0].endswith(extension):
-                suffix = extension
-                break
         from .utils import stable_cache_name
-        return CACHE_DIR / "covers" / (stable_cache_name(url) + suffix)
+        return CACHE_DIR / "covers" / (stable_cache_name(url) + ".png")
 
     def get(self, url):
         if not url:
@@ -192,24 +194,24 @@ class ImageCache:
         path = self._path(url)
         if path.exists() and path.stat().st_size:
             return
-        context = None
-        if url.startswith("https://"):
-            import ssl
-            context = ssl.create_default_context()
-            if not strict_tls:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "KinNovel/0.1"})
-            with urllib.request.urlopen(request, timeout=12, context=context) as response:
-                data = response.read(8 * 1024 * 1024)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_suffix(path.suffix + ".tmp")
-            with temp.open("wb") as handle:
-                handle.write(data)
-            temp.replace(path)
-        except (OSError, urllib.error.URLError, ValueError):
+            worker = Path(__file__).resolve().parents[2] / "image_worker.py"
+            completed = subprocess.run(
+                [sys.executable, str(worker), url, str(path),
+                 "1" if strict_tls else "0"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=25,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
             return
+        if completed.returncode != 0:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def cover(self, url, width, height, strict_tls=False, fetch=False):
         image = self.get(url)
@@ -237,6 +239,7 @@ class PageContext:
         self.modal = None
         self.status = ""
         self._header_state = None
+        self._last_back_at = 0.0
         self._show_lock = threading.RLock()
         self._closed = False
 
@@ -276,6 +279,10 @@ class PageContext:
             self.modal = None
             self.show()
             return
+        now = time.monotonic()
+        if now - self._last_back_at < 0.35:
+            return
+        self._last_back_at = now
         if self.stack:
             self.page_name, self.params = self.stack.pop()
         else:
@@ -328,20 +335,27 @@ class PageContext:
         gesture = data.get("gesture")
         if gesture not in ("tap", "long"):
             return None
+        x = int(data.get("x-pixel") or 0)
+        y = int(data.get("y-pixel") or 0)
+        if x == 0 and y == 0:
+            return None
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return None
         if self.modal:
             if gesture != "tap":
                 return None
             self._handle_modal(data)
             return None
         if gesture == "tap" and self._header_state:
-            x = int(data.get("x-pixel") or 0)
-            y = int(data.get("y-pixel") or 0)
             header_height = int(self._header_state.get("height") or 0)
             if y < header_height:
-                if x < int(self.width * 0.22):
+                blocker = getattr(self.pages[self.page_name], "header_blocked", None)
+                if callable(blocker) and blocker():
+                    return None
+                if x < int(self.width * 0.16):
                     self.back()
                     return None
-                if x > int(self.width * 0.78) and self._header_state.get("right") == "主页":
+                if x > int(self.width * 0.84) and self._header_state.get("right") == "主页":
                     self.home()
                     return None
         return self.pages[self.page_name].handle(data, self)
