@@ -19,6 +19,41 @@ Qt 或桌面环境。
 
 当前版本：`0.2.0`
 
+## 界面预览
+
+<table>
+  <tr>
+    <td width="50%">
+      <a href="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/home.png">
+        <img src="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/home.png" alt="KinNovel 主界面" width="100%">
+      </a>
+      <p align="center"><strong>主界面</strong></p>
+    </td>
+    <td width="50%">
+      <a href="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/rank.png">
+        <img src="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/rank.png" alt="KinNovel 排行榜" width="100%">
+      </a>
+      <p align="center"><strong>排行榜</strong></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <a href="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/book-1854.png">
+        <img src="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/book-1854.png" alt="KinNovel 书籍详情" width="100%">
+      </a>
+      <p align="center"><strong>书籍详情</strong></p>
+    </td>
+    <td width="50%">
+      <a href="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/reader-1854-chapter-5.png">
+        <img src="https://raw.githubusercontent.com/mmnnwjw/KinNovel/main/docs/images/readme/reader-1854-chapter-5.png" alt="KinNovel 阅读器" width="100%">
+      </a>
+      <p align="center"><strong>阅读器</strong></p>
+    </td>
+  </tr>
+</table>
+
+预览图使用真实账号数据和 book `1854` 第 5 章生成；账号名称已脱敏。
+
 ## 支持内容
 
 | 模块 | 支持内容 |
