@@ -15,7 +15,7 @@ from PIL import ImageFont
 from kinnovel import VERSION
 from kinnovel.api import ApiClient
 from kinnovel.config import Config, LOG_DIR, ensure_directories
-from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
+from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
 
 from screen import Screen
@@ -106,7 +106,6 @@ class KinNovelApp:
         context.register("browse", browse)
         context.register("rank", rank)
         context.register("book", book)
-        context.register("series", series)
         context.register("history", history)
         context.register("reader", reader)
         context.register("catalog", PageAdapter(reader.render_catalog, reader.handle_catalog, None))

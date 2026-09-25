@@ -130,12 +130,6 @@ class ApiClient:
             raise ApiError(str(message), int(content.get("Status") or content.get("status") or status))
         return content.get("Response", content.get("response"))
 
-    def send_register_email(self, email):
-        return self._http("/api/user/send_register_email", {"email": email}, "GET")
-
-    def send_reset_email(self, email):
-        return self._http("/api/user/send_reset_email", {"email": email}, "GET")
-
     def login(self, email, password):
         credentials = self._http("/api/user/login", {
             "email": email,
@@ -145,26 +139,6 @@ class ApiClient:
         user = self.get_my_info()
         self.session.set_many({"User": user})
         return user
-
-    def register(self, username, email, password, code, invite_code):
-        credentials = self._http("/api/user/register", {
-            "userName": username,
-            "email": email,
-            "password": sha256_text(password),
-            "code": code,
-            "inviteCode": invite_code,
-        })
-        self._store_credentials(credentials)
-        user = self.get_my_info()
-        self.session.set_many({"User": user})
-        return user
-
-    def reset_password(self, email, new_password, code):
-        return self._http("/api/user/reset_password", {
-            "email": email,
-            "newPassword": sha256_text(new_password),
-            "code": code,
-        })
 
     def _store_credentials(self, credentials):
         if not isinstance(credentials, dict):
@@ -216,10 +190,6 @@ class ApiClient:
         self.session.set_many({"User": user})
         return user
 
-    def logout(self):
-        self.session.clear_credentials()
-        self.hub.close()
-
     def invoke(self, method, params=None):
         try:
             return self.hub.invoke(method, params or {})
@@ -232,14 +202,6 @@ class ApiClient:
             return self.hub.invoke(method, params or {})
 
     # Public catalogue methods
-    def get_latest_book_list(self, ignore_japanese=False, ignore_ai=False, page=1, size=6):
-        return self.invoke("GetLatestBookList", {
-            "Page": page,
-            "Size": size,
-            "IgnoreJapanese": bool(ignore_japanese),
-            "IgnoreAI": bool(ignore_ai),
-        })
-
     def get_book_list(self, page=1, size=12, keywords=None, order="latest",
                       ignore_japanese=False, ignore_ai=False, category_id=None):
         params = {
@@ -255,82 +217,17 @@ class ApiClient:
             params["CategoryId"] = int(category_id)
         return self.invoke("GetBookList", params)
 
-    def search_books(self, mode, keywords, page=1, size=12,
-                     ignore_japanese=False, ignore_ai=False):
-        params = {
-            "Page": int(page),
-            "Size": int(size),
-            "KeyWords": keywords,
-            "IgnoreJapanese": bool(ignore_japanese),
-            "IgnoreAI": bool(ignore_ai),
-        }
-        method = {
-            "title": "GetBookListByTitle",
-            "author": "GetBookListByAuthor",
-            "name": "GetBookListByName",
-            "tags": "GetBookListByTags",
-            "exact": "GetBookList",
-            "fuzzy": "GetBookList",
-        }.get(mode, "GetBookList")
-        if mode == "exact":
-            params["KeyWords"] = '"%s"' % keywords
-        return self.invoke(method, params)
-
     def get_book_categories(self, book_type="Novel"):
         return self.invoke("GetBookCategories", {"Type": book_type})
 
-    def get_series_list(self, page=1, size=12, order="latest", category_id=None,
-                        ignore_japanese=False, ignore_ai=False):
-        params = {
-            "Page": int(page),
-            "Size": int(size),
-            "Order": order,
-            "IgnoreJapanese": bool(ignore_japanese),
-            "IgnoreAI": bool(ignore_ai),
-        }
-        if category_id is not None:
-            params["CategoryId"] = int(category_id)
-        return self.invoke("GetSeriesList", params)
-
-    def get_books_by_series(self, series_name, page=1, size=12, order="latest"):
-        return self.invoke("GetBooksBySeries", {
-            "SeriesName": series_name,
-            "Page": int(page),
-            "Size": int(size),
-            "Order": order,
-        })
-
     def get_rank(self, days=1):
         return self.invoke("GetRank", {"Days": int(days)})
-
-    def get_comic_list(self, page=1, size=12, order="latest"):
-        return self.invoke("GetComicList", {"Page": int(page), "Size": int(size), "Order": order})
-
-    def search_comic_series(self, keywords, mode="fuzzy", page=1, size=12,
-                            ignore_japanese=False, ignore_ai=False):
-        return self.invoke("SearchComicSeries", {
-            "KeyWords": keywords,
-            "Mode": mode,
-            "Page": int(page),
-            "Size": int(size),
-            "IgnoreJapanese": bool(ignore_japanese),
-            "IgnoreAI": bool(ignore_ai),
-        })
-
-    def get_online_info(self):
-        return self.invoke("GetOnlineInfo")
 
     def get_announcement_list(self, page=1, size=12):
         return self.invoke("GetAnnouncementList", {"Page": int(page), "Size": int(size)})
 
     def get_announcement_detail(self, announcement_id):
         return self.invoke("GetAnnouncementDetail", {"Id": int(announcement_id)})
-
-    def get_collaborator_list(self):
-        return self.invoke("GetCollaboratorList")
-
-    def get_ban_list(self):
-        return self.invoke("GetBanList")
 
     # Authenticated catalogue and reading
     def get_book_info(self, book_id):
@@ -357,9 +254,6 @@ class ApiClient:
             "XPath": str(xpath or "."),
         })
 
-    def get_read_position(self, book_id):
-        return self.invoke("GetReadPosition", {"Id": int(book_id)})
-
     def get_read_history(self):
         return self.invoke("GetReadHistory")
 
@@ -369,9 +263,6 @@ class ApiClient:
     # User and shelf
     def get_my_info(self):
         return self.invoke("GetMyInfo")
-
-    def get_public_user_summary(self, user_id):
-        return self.invoke("GetUserSummary", {"UserId": int(user_id)})
 
     def get_notifications(self, page=1, size=12):
         return self.invoke("GetNotifications", {"Page": int(page), "Size": int(size)})
@@ -388,15 +279,6 @@ class ApiClient:
     def sign_in(self):
         return self.invoke("SignIn", {})
 
-    def get_point_log(self, page=1, size=12):
-        return self.invoke("GetPointLog", {"Page": int(page), "Size": int(size)})
-
-    def get_coin_log(self, page=1, size=12):
-        return self.invoke("GetCoinLog", {"Page": int(page), "Size": int(size)})
-
-    def get_sign_in_calendar(self, year, month):
-        return self.invoke("GetSignInCalendar", {"Year": int(year), "Month": int(month)})
-
     def get_shop(self):
         return self.invoke("GetShop", {})
 
@@ -406,62 +288,10 @@ class ApiClient:
     def buy_shop_item(self, key, quantity=1):
         return self.invoke("BuyShopItem", {"Key": key, "Quantity": int(quantity)})
 
-    def use_sign_makeup_card(self, date):
-        return self.invoke("UseSignMakeupCard", {"Date": date})
-
-    def use_comic_quota_card(self):
-        return self.invoke("UseComicQuotaCard", {})
-
     # Comments
     def get_comments(self, comment_type, target_id, page=1):
         return self.invoke("GetComments", {
             "Type": comment_type,
             "Id": int(target_id),
             "Page": int(page),
-        })
-
-    def post_comment(self, comment_type, target_id, content):
-        return self.invoke("PostComment", {
-            "Type": comment_type,
-            "Id": int(target_id),
-            "Content": content,
-        })
-
-    def reply_comment(self, comment_type, target_id, content, reply_id, parent_id):
-        return self.invoke("ReplyComment", {
-            "Type": comment_type,
-            "Id": int(target_id),
-            "Content": content,
-            "ReplyId": int(reply_id),
-            "ParentId": int(parent_id),
-        })
-
-    def delete_comment(self, comment_id):
-        return self.invoke("DeleteComment", {"Id": int(comment_id)})
-
-    # Direct messages
-    def get_direct_conversations(self, before_message_id=0, size=20):
-        return self.invoke("GetDirectConversations", {
-            "BeforeMessageId": int(before_message_id),
-            "Size": int(size),
-        })
-
-    def get_direct_messages(self, peer_user_id, before_message_id=0, size=30):
-        return self.invoke("GetDirectMessages", {
-            "PeerUserId": int(peer_user_id),
-            "BeforeMessageId": int(before_message_id),
-            "Size": int(size),
-        })
-
-    def send_direct_message(self, recipient_user_id, client_message_id, content):
-        return self.invoke("SendDirectMessage", {
-            "RecipientUserId": int(recipient_user_id),
-            "ClientMessageId": client_message_id,
-            "Content": content,
-        })
-
-    def mark_direct_messages_read(self, peer_user_id, through_message_id):
-        return self.invoke("MarkDirectMessagesRead", {
-            "PeerUserId": int(peer_user_id),
-            "ThroughMessageId": int(through_message_id),
         })

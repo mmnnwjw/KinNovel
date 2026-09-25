@@ -107,11 +107,6 @@ class Config:
             if save:
                 self.save()
 
-    def as_dict(self):
-        with self._lock:
-            return dict(self._data)
-
-
 def ensure_directories():
     for path in (CACHE_DIR, LOG_DIR, CACHE_DIR / "covers", CACHE_DIR / "fonts",
                  CACHE_DIR / "images", CACHE_DIR / "content"):

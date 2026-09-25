@@ -122,7 +122,7 @@ def _clear(ctx):
 
 
 ABOUT_LINES = [
-    "KinNovel 0.1.0",
+    "KinNovel 0.2.0",
     "LightNovelShelf 的 Kindle 客户端",
     "",
     "本项目使用 GPLv3 发布。",
@@ -131,7 +131,7 @@ ABOUT_LINES = [
     "LightNovelShelf 内容与接口归原站及其权利人所有。",
     "请遵守站点规则和内容版权。",
     "",
-    "第三方组件: Pillow、lxml、evdev、pinyin-data、KOReader。",
+    "第三方组件: Pillow、lxml、evdev、KOReader。",
 ]
 
 

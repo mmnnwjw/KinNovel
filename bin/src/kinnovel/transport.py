@@ -148,9 +148,6 @@ class WebSocketConnection:
     def send_text(self, text):
         self._send_frame(0x1, text.encode("utf-8"))
 
-    def send_binary(self, data):
-        self._send_frame(0x2, data)
-
     def send_pong(self, data):
         self._send_frame(0xA, data)
 

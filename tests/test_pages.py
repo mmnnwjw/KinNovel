@@ -3,7 +3,7 @@ import unittest
 
 from PIL import Image, ImageFont
 
-from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
+from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
 
 
@@ -90,7 +90,6 @@ class PageSmokeTests(unittest.TestCase):
             "book": book,
             "history": history,
             "reader": reader,
-            "series": series,
             "shelf": shelf,
             "account": account,
             "settings": settings,
@@ -112,7 +111,7 @@ class PageSmokeTests(unittest.TestCase):
         }
         browse.STATE.update({"items": [{"Id": 1, "Title": "测试书"}], "loaded": True})
         for page in ("home", "browse", "rank", "book", "history",
-                     "reader", "series", "shelf", "account", "settings",
+                     "reader", "shelf", "account", "settings",
                      "announcements"):
             self.context.page_name = page
             image = self.context.render()

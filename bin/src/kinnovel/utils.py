@@ -1,9 +1,7 @@
 import hashlib
 import json
 import os
-import re
 import shutil
-import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,10 +28,6 @@ def read_json(path, default=None):
         return default
 
 
-def write_json(path, data):
-    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
-
-
 def sha256_text(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -41,12 +35,6 @@ def sha256_text(value):
 def stable_cache_name(value, suffix=""):
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return digest + suffix
-
-
-def safe_filename(value, fallback="unknown"):
-    value = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(value or ""))
-    value = value.strip(" .")
-    return value[:120] or fallback
 
 
 def absolute_url(base, value):
@@ -68,18 +56,6 @@ def format_time(value):
         return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return text[:16].replace("T", " ")
-
-
-def wrap_text(text, max_chars=12):
-    text = str(text or "")
-    lines = []
-    for paragraph in text.splitlines() or [""]:
-        paragraph = paragraph.strip()
-        if not paragraph:
-            lines.append("")
-            continue
-        lines.extend(paragraph[i:i + max_chars] for i in range(0, len(paragraph), max_chars))
-    return lines or [""]
 
 
 def cache_size(path):
@@ -143,7 +119,3 @@ def clear_cache(path):
                 item.unlink()
         except OSError:
             pass
-
-
-def now_monotonic():
-    return time.monotonic()

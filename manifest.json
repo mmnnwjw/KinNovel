@@ -4,7 +4,7 @@
   "name": "KinNovel",
   "author": "KinNovel contributors",
   "description": "A LightNovelShelf client for jailbroken Kindle devices.",
-  "version": [0, 1, 0],
+  "version": [0, 2, 0],
   "dependencies": [],
   "supported_platforms": ["kindlehf"]
 }

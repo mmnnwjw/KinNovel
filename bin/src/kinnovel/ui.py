@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
-from .utils import prune_cache, safe_filename
+from .utils import prune_cache
 
 
 class Theme:
@@ -113,9 +113,6 @@ class Canvas:
                        fill=color, width=4)
         self.draw.line([cx - size + 3, wall_y, cx + size - 3, wall_y],
                        fill=color, width=4)
-
-    def separator(self, y):
-        self.draw.line([0, y, self.width, y], fill=self.theme.mid, width=1)
 
     def popup(self, lines, buttons=None):
         width = int(self.width * 0.78)

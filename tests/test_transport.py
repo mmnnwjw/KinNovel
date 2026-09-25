@@ -15,23 +15,6 @@ class TransportTests(unittest.TestCase):
             payload, ensure_ascii=False).encode("utf-8"))).decode("ascii")
         self.assertEqual(client._decode_response(encoded), payload)
 
-    def test_api_search_method_mapping(self):
-        client = ApiClient.__new__(ApiClient)
-        calls = []
-
-        def invoke(method, params):
-            calls.append((method, params))
-            return {"Data": []}
-
-        client.invoke = invoke
-        client.search_books("author", "作者", page=2, size=10)
-        self.assertEqual(calls[0][0], "GetBookListByAuthor")
-        self.assertEqual(calls[0][1]["Page"], 2)
-        self.assertEqual(calls[0][1]["Size"], 10)
-        client.search_books("exact", "书名")
-        self.assertEqual(calls[1][0], "GetBookList")
-        self.assertEqual(calls[1][1]["KeyWords"], '"书名"')
-
     def test_websocket_buffer_is_consumed_before_socket(self):
         class Socket:
             def __init__(self):
