@@ -1,0 +1,21 @@
+{
+  "api_server": "https://api.lightnovel.life",
+  "screen_protocol": "auto",
+  "framebuffer": "/dev/fb0",
+  "font_path": "/usr/java/lib/fonts/STHeitiMedium.ttf",
+  "font_size": 34,
+  "line_spacing": 1.42,
+  "reader_margin": 34,
+  "page_flash": false,
+  "night_mode": false,
+  "justify": false,
+  "first_line_indent": true,
+  "convert": null,
+  "ignore_japanese": false,
+  "ignore_ai": false,
+  "request_limit": 9,
+  "request_window_ms": 5500,
+  "cache_limit_mb": 192,
+  "strict_tls": true,
+  "check_update": true
+}

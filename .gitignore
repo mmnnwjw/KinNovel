@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+cache/
+logs/
+*.log
+.research/
+TESTACCOUNT.txt
+GithubToken
+audit_bin.txt
+.env
+.env.*
