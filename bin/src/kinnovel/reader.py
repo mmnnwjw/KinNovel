@@ -301,7 +301,7 @@ class ReaderDocument:
         if self._draw_proxy is None:
             image = __import__("PIL.Image", fromlist=["Image"]).new("L", (8, 8), 255)
             self._draw_proxy = ImageDraw.Draw(image)
-        size = int(self.config.get("font_size") or 34)
+        size = int(self.config.get("font_size") or 36)
         self.body_font = self.font_resolver.resolve(
             self.chapter.get("Font"),
             self.base_url,

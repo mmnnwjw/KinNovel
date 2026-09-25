@@ -31,9 +31,36 @@ def render(ctx, canvas):
                                   fill=canvas.theme.foreground)
         y += height + gap
 
+    def stepper_row(label, value, action):
+        nonlocal y
+        rect = (margin, y, canvas.width - 2 * margin, height)
+        canvas.draw.rounded_rectangle(
+            [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
+            radius=9, outline=canvas.theme.mid, width=1)
+        canvas.text((rect[0] + 14, y + 16), label, font=ctx.fonts["small"])
+        button_size = 50
+        plus_rect = (rect[0] + rect[2] - button_size - 8,
+                     y + (height - button_size) // 2,
+                     button_size, button_size)
+        value_width = 78
+        value_rect = (plus_rect[0] - value_width - 8,
+                      y + (height - button_size) // 2,
+                      value_width, button_size)
+        minus_rect = (value_rect[0] - button_size - 8,
+                      y + (height - button_size) // 2,
+                      button_size, button_size)
+        canvas.button(minus_rect, "-", font=ctx.fonts["body"])
+        canvas.button(plus_rect, "+", font=ctx.fonts["body"])
+        canvas.centered_text(str(value), ctx.fonts["small"],
+                             value_rect[0] + value_rect[2] // 2,
+                             value_rect[1] + value_rect[3] // 2)
+        STATE["rects"][(action + "_down", 0)] = minus_rect
+        STATE["rects"][(action + "_up", 0)] = plus_rect
+        y += height + gap
+
     row("服务器（配置文件）", ctx.api.server, None)
-    row("正文字号", str(ctx.config.get("font_size")), "font_size")
-    row("行距", "%.2f" % float(ctx.config.get("line_spacing")), "line_spacing")
+    stepper_row("正文字号", str(ctx.config.get("font_size")), "font")
+    stepper_row("行距", "%.2f" % float(ctx.config.get("line_spacing")), "spacing")
     row("夜间模式", "开" if ctx.config.get("night_mode") else "关", "night")
     row("首行缩进", "开" if ctx.config.get("first_line_indent") else "关", "indent")
     convert = ctx.config.get("convert")
@@ -56,19 +83,15 @@ def handle(data, ctx):
         if not (rx <= x < rx + width and ry <= y < ry + height):
             continue
         action = key[0]
-        if action == "font_size":
-            values = [26, 30, 34, 38, 42, 46, 50]
-            current = int(ctx.config.get("font_size") or 34)
-            next_value = min(values, key=lambda value: (abs(value - current), value > current))
-            if next_value == current:
-                next_value = values[(values.index(current) + 1) % len(values)] if current in values else 34
-            ctx.config.set("font_size", next_value)
+        if action in ("font_down", "font_up"):
+            current = int(ctx.config.get("font_size") or 36)
+            value = current + (-2 if action == "font_down" else 2)
+            ctx.config.set("font_size", max(20, min(64, value)))
             ctx.show()
-        elif action == "line_spacing":
-            values = [1.20, 1.35, 1.42, 1.55, 1.70]
+        elif action in ("spacing_down", "spacing_up"):
             current = float(ctx.config.get("line_spacing") or 1.42)
-            next_value = values[(min(range(len(values)), key=lambda i: abs(values[i] - current)) + 1) % len(values)]
-            ctx.config.set("line_spacing", next_value)
+            value = current + (-0.05 if action == "spacing_down" else 0.05)
+            ctx.config.set("line_spacing", round(max(1.0, min(2.0, value)), 2))
             ctx.show()
         elif action == "convert":
             values = [None, "t2s", "s2t"]

@@ -84,8 +84,35 @@ class Canvas:
         self.draw.rectangle([0, 0, self.width, height], fill=self.theme.light)
         self.centered_text(self.fit_text(title, self.fonts["title"], self.width - 320),
                            self.fonts["title"], self.width // 2, height // 2)
+        self._draw_back_icon(height)
+        self._draw_home_icon(height)
         self.header_state = {"height": height, "left": left, "right": right}
         return height
+
+    def _draw_back_icon(self, header_height):
+        color = self.theme.foreground
+        cx = max(34, header_height // 2)
+        cy = header_height // 2
+        size = max(14, min(24, header_height // 4))
+        self.draw.line([cx + size, cy, cx - size, cy], fill=color, width=5)
+        self.draw.line([cx + size, cy, cx, cy - size], fill=color, width=5)
+        self.draw.line([cx + size, cy, cx, cy + size], fill=color, width=5)
+
+    def _draw_home_icon(self, header_height):
+        color = self.theme.foreground
+        cx = self.width - max(34, header_height // 2)
+        cy = header_height // 2
+        size = max(13, min(22, header_height // 4))
+        roof_y = cy - size
+        wall_y = cy + size
+        self.draw.line([cx - size, cy, cx, roof_y], fill=color, width=5)
+        self.draw.line([cx, roof_y, cx + size, cy], fill=color, width=5)
+        self.draw.line([cx - size + 3, cy, cx - size + 3, wall_y],
+                       fill=color, width=4)
+        self.draw.line([cx + size - 3, cy, cx + size - 3, wall_y],
+                       fill=color, width=4)
+        self.draw.line([cx - size + 3, wall_y, cx + size - 3, wall_y],
+                       fill=color, width=4)
 
     def separator(self, y):
         self.draw.line([0, y, self.width, y], fill=self.theme.mid, width=1)

@@ -43,7 +43,7 @@ def _load(ctx, page=1):
 
 
 def render(ctx, canvas):
-    top = canvas.header("公告", left="返回", right="刷新")
+    top = canvas.header("公告", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(74, int(canvas.height * 0.061))
     per_page = max(1, (canvas.height - top - 80) // row_height)
@@ -95,7 +95,7 @@ def enter_detail(ctx):
 
 
 def render_detail(ctx, canvas):
-    top = canvas.header("公告详情", left="返回", right="评论")
+    top = canvas.header("公告详情", left="返回", right="主页")
     data = STATE.get("data")
     if not data:
         canvas.centered_text("加载中…", ctx.fonts["body"], canvas.width // 2, canvas.height // 2)

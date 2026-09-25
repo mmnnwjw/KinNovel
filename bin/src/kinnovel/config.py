@@ -17,7 +17,7 @@ DEFAULTS = {
     "screen_protocol": "auto",
     "framebuffer": "/dev/fb0",
     "font_path": "/usr/java/lib/fonts/STHeitiMedium.ttf",
-    "font_size": 34,
+    "font_size": 36,
     "line_spacing": 1.42,
     "reader_margin": 34,
     "page_flash": False,

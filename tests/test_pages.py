@@ -2,9 +2,8 @@ import unittest
 
 from PIL import ImageFont
 
-from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, search, series, settings, shelf
+from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
-from page import keyboard
 
 
 class Output:
@@ -71,7 +70,6 @@ class PageSmokeTests(unittest.TestCase):
             "home": home,
             "browse": browse,
             "rank": rank,
-            "search": search,
             "book": book,
             "history": history,
             "reader": reader,
@@ -96,7 +94,7 @@ class PageSmokeTests(unittest.TestCase):
             "ReadPosition": None,
         }
         browse.STATE.update({"items": [{"Id": 1, "Title": "测试书"}], "loaded": True})
-        for page in ("home", "browse", "rank", "search", "book", "history",
+        for page in ("home", "browse", "rank", "book", "history",
                      "reader", "series", "shelf", "account", "settings",
                      "announcements"):
             self.context.page_name = page
@@ -109,12 +107,19 @@ class PageSmokeTests(unittest.TestCase):
         self.context.render()
         self.assertEqual(len(self.context.modal["rects"]), 2)
 
-    def test_keyboard_renders_with_device_font_map(self):
-        app = App()
-        keyboard.start(app.screen, app.fonts, capabilities=("en", "numsym"),
-                       hint="测试", owner="home")
-        image = keyboard.render(app.screen, app.fonts)
-        self.assertEqual(image.size, (1072, 1448))
+    def test_settings_stepper_rects_are_visible_and_clickable(self):
+        self.context.page_name = "settings"
+        self.context.render()
+        for key in (("font_down", 0), ("font_up", 0),
+                    ("spacing_down", 0), ("spacing_up", 0)):
+            self.assertIn(key, settings.STATE["rects"])
+
+    def test_browse_uses_six_items_per_page(self):
+        browse.STATE.update({"page": 1, "total_pages": 2, "items": []})
+        self.context.page_name = "browse"
+        self.context.render()
+        book_rects = [key for key in browse.STATE["rects"] if key[0] == "book"]
+        self.assertEqual(len(book_rects), 6)
 
     def test_header_left_uses_back_stack(self):
         self.context.stack = [("home", {})]

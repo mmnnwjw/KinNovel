@@ -189,7 +189,7 @@ def _notification_error(generation, exc, ctx):
 
 
 def render_notifications(ctx, canvas):
-    top = canvas.header("通知", left="返回", right="全部已读")
+    top = canvas.header("通知", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(76, int(canvas.height * 0.063))
     per_page = max(1, (canvas.height - top - 90) // row_height)

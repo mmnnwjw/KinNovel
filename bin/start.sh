@@ -12,6 +12,14 @@ LOCK_DIR="/tmp/kinnovel.lock"
 export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
+# The bundled FreeType matches the Kindle Pillow ABI but lacks WOFF2/Brotli.
+# KOReader's FreeType supplies both while keeping the same ABI.
+KOREADER_FREETYPE=/mnt/us/koreader/libs/libfreetype.so.6
+if [ -f "$KOREADER_FREETYPE" ]; then
+  LD_PRELOAD="$KOREADER_FREETYPE${LD_PRELOAD:+ $LD_PRELOAD}"
+  export LD_PRELOAD
+fi
+
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)

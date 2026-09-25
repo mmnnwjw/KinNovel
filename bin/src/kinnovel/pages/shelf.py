@@ -66,7 +66,7 @@ def render(ctx, canvas):
             if item.get("id") == STATE["path"][-1]:
                 folder_name = item.get("title") or "文件夹"
                 break
-    top = canvas.header("书架 · " + folder_name, left="返回", right="同步")
+    top = canvas.header("书架 · " + folder_name, left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(74, int(canvas.height * 0.060))
     per_page = max(1, (canvas.height - top - 110) // row_height)

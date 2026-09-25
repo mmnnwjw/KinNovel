@@ -23,7 +23,7 @@ STATE = {
 def _signature(ctx, book_id, sort_num):
     top = max(72, int(ctx.height * 0.085))
     return (
-        int(book_id), int(sort_num), int(ctx.config.get("font_size") or 34),
+        int(book_id), int(sort_num), int(ctx.config.get("font_size") or 36),
         float(ctx.config.get("line_spacing") or 1.42),
         int(ctx.config.get("reader_margin") or 34),
         int(ctx.width), int(ctx.height), top,
@@ -81,6 +81,7 @@ def enter(ctx):
 
     def success(result):
         response, document = result
+        chapter = response.get("Chapter") or {}
         STATE["data"] = response
         STATE["doc"] = document
         STATE["signature"] = signature
@@ -142,7 +143,7 @@ def _change_chapter(ctx, delta):
 
 def render(ctx, canvas):
     top = canvas.header((STATE["data"] or {}).get("Chapter", {}).get("Title") or "阅读",
-                        left="返回", right="目录")
+                        left="返回", right="主页")
     doc = STATE["doc"]
     if not doc:
         canvas.centered_text("正在下载并排版…" if STATE["loading"] else "暂无正文",

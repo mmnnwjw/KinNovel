@@ -33,7 +33,7 @@ def _load(ctx, page=None):
         if STATE["categories"] and STATE["category"] > 0:
             category = STATE["categories"][STATE["category"] - 1].get("Id")
         return ctx.api.get_book_list(
-            page=STATE["page"], size=9, order=STATE["order"],
+            page=STATE["page"], size=6, order=STATE["order"],
             category_id=category,
             ignore_japanese=ctx.config.get("ignore_japanese", False),
             ignore_ai=ctx.config.get("ignore_ai", False),
@@ -96,7 +96,7 @@ def render(ctx, canvas):
     grid_y = filter_y + filter_height + 18
     bottom_height = 96
     grid_height = height - grid_y - bottom_height
-    columns, rows = 3, 3
+    columns, rows = 3, 2
     cell_gap_x, cell_gap_y = 14, 14
     cell_width = (width - 2 * margin - (columns - 1) * cell_gap_x) // columns
     cover_height = int(cell_width * 1.42)
@@ -141,6 +141,19 @@ def render(ctx, canvas):
 
 def handle(data, ctx):
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
+    for key in (("prev", 0), ("page", 0), ("next", 0)):
+        rect = STATE["rects"].get(key)
+        if not rect:
+            continue
+        rx, ry, width, height = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            if key[0] == "prev" and STATE["page"] > 1:
+                _load(ctx, STATE["page"] - 1)
+            elif key[0] == "next" and STATE["page"] < STATE["total_pages"]:
+                _load(ctx, STATE["page"] + 1)
+            else:
+                _load(ctx, STATE["page"])
+            return
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect
         if not (rx <= x < rx + width and ry <= y < ry + height):
@@ -161,12 +174,6 @@ def handle(data, ctx):
             if key[1] < len(STATE["items"]):
                 item = STATE["items"][key[1]]
                 ctx.navigate("book", book_id=item.get("Id"))
-        elif kind == "prev" and STATE["page"] > 1:
-            _load(ctx, STATE["page"] - 1)
-        elif kind == "next" and STATE["page"] < STATE["total_pages"]:
-            _load(ctx, STATE["page"] + 1)
-        elif kind == "page":
-            _load(ctx, STATE["page"])
         return
 
 

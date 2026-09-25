@@ -33,7 +33,7 @@ def _load(ctx):
 
 
 def render(ctx, canvas):
-    top = canvas.header("阅读历史", left="返回", right="清空")
+    top = canvas.header("阅读历史", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(76, int(canvas.height * 0.063))
     start_y = top + 12
