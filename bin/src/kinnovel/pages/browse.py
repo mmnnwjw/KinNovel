@@ -40,8 +40,6 @@ def _category(ctx):
 
 
 def _load(ctx, page=None):
-    if STATE["loading"]:
-        return
     STATE["loading"] = True
     STATE["generation"] += 1
     generation = STATE["generation"]
@@ -54,6 +52,8 @@ def _load(ctx, page=None):
         category = None
         if STATE["categories"] and STATE["category"] > 0:
             category = STATE["categories"][STATE["category"] - 1].get("Id")
+        ctx.app.log("[browse] request page=%s size=%s order=%s category=%s" % (
+            STATE["page"], per_page, STATE["order"], category))
         return ctx.api.get_book_list(
             page=STATE["page"], size=per_page, order=STATE["order"],
             category_id=category,
@@ -65,16 +65,21 @@ def _load(ctx, page=None):
         if generation != STATE["generation"]:
             return
         STATE["items"] = result.get("Data") or []
+        STATE["page"] = max(1, int(result.get("Page") or STATE["page"]))
         STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
         STATE["loaded"] = True
         STATE["loading"] = False
+        ctx.app.log("[browse] response page=%s items=%s total=%s" % (
+            STATE["page"], len(STATE["items"]), STATE["total_pages"]))
 
     def error(exc):
         if generation != STATE["generation"]:
             return
         STATE["loading"] = False
+        ctx.app.log("[browse] error page=%s: %s" % (STATE["page"], exc))
         ctx.message(["加载失败", str(exc)])
 
+    ctx.show()
     ctx.run_async(owner, operation, success, error)
 
 

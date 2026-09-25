@@ -12,7 +12,8 @@ to `/dev/fb0`, EPDC ioctl updates, and evdev touch input.
 - Latest books, category browsing, rankings, paged lists and book details.
 - Book details, chapter catalogue, reading progress and history.
 - Novel reader with server-provided per-chapter fonts, manual pagination,
-  footnotes, illustrations, night mode, font size and line spacing settings.
+  footnotes, illustrations with tap-to-fullscreen preview, night mode, font
+  size and line spacing settings.
 - Remote shelf browsing, adding/removing books, folder deletion and
   basic local/remote synchronization.
 - Read-only comments, announcements, notifications, daily sign-in and

@@ -29,6 +29,12 @@ class ReaderTests(unittest.TestCase):
         blocks = extract_blocks("<div><h1>标题</h1><p>正文</p></div>")
         self.assertEqual([block.text for block in blocks], ["标题", "正文"])
 
+    def test_image_alt_is_not_added_to_text(self):
+        blocks = extract_blocks('<p>前文</p><img src="cover.jpg" alt="封面说明"><p>后文</p>')
+        self.assertEqual([block.kind for block in blocks],
+                         ["text", "image", "text"])
+        self.assertNotIn("封面说明", "".join(block.text for block in blocks))
+
     def test_xpath_preserves_order(self):
         blocks = extract_blocks("<p>一</p><p>二</p><h2>三</h2>")
         self.assertEqual(blocks[0].path, "./p[1]")

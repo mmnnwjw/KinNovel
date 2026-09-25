@@ -92,10 +92,6 @@ def _plain_text(element):
             parts.append("\n")
         if node.text:
             parts.append(node.text)
-        if tag in ("img",):
-            alt = node.get("alt")
-            if alt:
-                parts.append(alt)
         if node.tail:
             parts.append(node.tail)
     return re.sub(r"[ \t\r\f\v]+", " ", "".join(parts)).strip()

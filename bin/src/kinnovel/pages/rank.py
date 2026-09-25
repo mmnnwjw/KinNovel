@@ -59,6 +59,7 @@ def _total_pages(ctx):
 
 def render(ctx, canvas):
     top, list_y, row_height, per_page, nav_y = _layout(ctx)
+    canvas.header("排行榜", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     gap = 10
     tab_width = (canvas.width - 2 * margin - 2 * gap) // 3

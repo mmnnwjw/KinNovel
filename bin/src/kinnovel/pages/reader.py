@@ -17,6 +17,8 @@ STATE = {
     "catalog_page": 0,
     "signature": None,
     "image_pending": set(),
+    "image_rects": {},
+    "fullscreen_image": None,
 }
 
 
@@ -43,6 +45,7 @@ def _prepare_document(ctx, chapter):
 
 
 def enter(ctx):
+    STATE["fullscreen_image"] = None
     book_id = int(ctx.params.get("book_id") or 0)
     sort_num = int(ctx.params.get("sort_num") or 1)
     fresh = bool(ctx.params.get("fresh"))
@@ -158,6 +161,29 @@ def _change_chapter(ctx, delta, at_last=False):
 
 
 def render(ctx, canvas):
+    if STATE["fullscreen_image"]:
+        url = STATE["fullscreen_image"]
+        image = ctx.images.get(url)
+        if image is None and url not in STATE["image_pending"]:
+            STATE["image_pending"].add(url)
+            ctx.run_async(
+                "reader",
+                lambda: ctx.images.prefetch(url, ctx.config.get("strict_tls")),
+                lambda _result: STATE["image_pending"].discard(url),
+                lambda _exc: STATE["image_pending"].discard(url),
+            )
+        if image is not None:
+            fitted = ImageOps.contain(
+                image, (canvas.width, canvas.height),
+                method=Image.Resampling.LANCZOS,
+            )
+            x = (canvas.width - fitted.width) // 2
+            y = (canvas.height - fitted.height) // 2
+            canvas.image.paste(fitted, (x, y))
+        else:
+            canvas.centered_text("图片加载中…", ctx.fonts["body"],
+                                 canvas.width // 2, canvas.height // 2)
+        return
     top = canvas.header((STATE["data"] or {}).get("Chapter", {}).get("Title") or "阅读",
                         left="返回", right="主页")
     doc = STATE["doc"]
@@ -167,6 +193,7 @@ def render(ctx, canvas):
         return
     content_height = canvas.height - top - 92
     page = doc.pages[max(0, min(STATE["page"], len(doc.pages) - 1))]
+    STATE["image_rects"] = {}
     for item in page:
         if item["type"] == "text":
             y = top + item["y"]
@@ -189,7 +216,10 @@ def render(ctx, canvas):
                 fitted = ImageOps.contain(image, (item["width"], item["height"]),
                                           method=Image.Resampling.LANCZOS)
                 x = item["x"] + (item["width"] - fitted.width) // 2
-                canvas.image.paste(fitted, (x, top + item["y"]))
+                image_y = top + item["y"]
+                canvas.image.paste(fitted, (x, image_y))
+                STATE["image_rects"][(item.get("path"), item.get("y"))] = (
+                    item["x"], image_y, item["width"], item["height"], item["url"])
             else:
                 canvas.centered_text("[图片]", ctx.fonts["small"],
                                      canvas.width // 2, top + item["y"] + item["height"] // 2,
@@ -213,10 +243,20 @@ def render(ctx, canvas):
 
 def handle(data, ctx):
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
+    if STATE["fullscreen_image"]:
+        STATE["fullscreen_image"] = None
+        ctx.show()
+        return
     if y < int(ctx.height * 0.09) and x > int(ctx.width * 0.72):
         STATE["catalog_page"] = 0
         ctx.navigate("catalog", book_id=STATE["book_id"], sort_num=STATE["sort_num"])
         return
+    for rect in STATE["image_rects"].values():
+        rx, ry, width, height, url = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            STATE["fullscreen_image"] = url
+            ctx.show()
+            return
     if x < int(ctx.width * 0.18) and y > int(ctx.height * 0.09) and y < ctx.height - 80:
         _turn(ctx, -1)
         return

@@ -1,6 +1,7 @@
+import time
 import unittest
 
-from PIL import ImageFont
+from PIL import Image, ImageFont
 
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
@@ -75,6 +76,9 @@ class App:
             28: ImageFont.truetype(self.config.get("font_path"), 28),
         }
 
+    def log(self, _message):
+        return None
+
 
 class PageSmokeTests(unittest.TestCase):
     def setUp(self):
@@ -144,6 +148,44 @@ class PageSmokeTests(unittest.TestCase):
         self.assertIn(("prev", 0), rank.STATE["rects"])
         self.assertIn(("count", 0), rank.STATE["rects"])
         self.assertIn(("next", 0), rank.STATE["rects"])
+        self.assertIsNotNone(self.context._header_state)
+
+    def test_browse_next_page_replaces_items(self):
+        calls = []
+        self.context.api.get_book_list = lambda **kwargs: (
+            calls.append(kwargs) or {
+                "Page": kwargs["page"],
+                "TotalPages": 3,
+                "Data": [{"Id": kwargs["page"], "Title": "Page %s" % kwargs["page"]}],
+            }
+        )
+        browse.STATE.update({
+            "items": [{"Id": 1, "Title": "Page 1"}],
+            "page": 1,
+            "total_pages": 3,
+            "loading": False,
+            "loaded": True,
+            "categories": [],
+            "category": 0,
+        })
+        self.context.page_name = "browse"
+        self.context.params = {}
+        self.context.render()
+        next_rect = browse.STATE["rects"][("next", 0)]
+        self.context.handle({
+            "gesture": "tap",
+            "x-pixel": next_rect[0] + 4,
+            "y-pixel": next_rect[1] + 4,
+        })
+        deadline = time.monotonic() + 1
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(calls[0]["page"], 2)
+        deadline = time.monotonic() + 1
+        while browse.STATE["page"] != 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(browse.STATE["page"], 2)
+        self.assertEqual(browse.STATE["items"][0]["Title"], "Page 2")
 
     def test_home_order_can_hide_and_reorder(self):
         self.context.config.values["home_order"] = {
@@ -182,6 +224,23 @@ class PageSmokeTests(unittest.TestCase):
         reader._change_chapter(replace_context, -1, at_last=True)
         self.assertEqual(replace_context.call[1]["sort_num"], 1)
         self.assertTrue(replace_context.call[1]["at_last"])
+
+    def test_reader_image_preview_toggles(self):
+        reader.STATE["fullscreen_image"] = None
+        reader.STATE["image_rects"] = {
+            ("p", 0): (100, 100, 200, 200, "image-url"),
+        }
+        self.context.images._memory["image-url"] = Image.new("L", (200, 200), 255)
+        self.context.page_name = "reader"
+        self.context.params = {}
+        self.context.handle({
+            "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
+        })
+        self.assertEqual(reader.STATE["fullscreen_image"], "image-url")
+        self.context.handle({
+            "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
+        })
+        self.assertIsNone(reader.STATE["fullscreen_image"])
 
     def test_header_left_uses_back_stack(self):
         self.context.stack = [("home", {})]
