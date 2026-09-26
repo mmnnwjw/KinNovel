@@ -52,8 +52,6 @@ Qt 或桌面环境。
   </tr>
 </table>
 
-预览图使用真实账号数据和 book `1854` 第 5 章生成；账号名称已脱敏。
-
 ## 支持内容
 
 | 模块 | 支持内容 |
@@ -61,16 +59,18 @@ Qt 或桌面环境。
 | 账号 | 从 `config.json` 读取账号并自动登录；自动刷新访问令牌 |
 | 首页 | 书架、阅读历史、排行榜、最近/分类、账号、设置、关于和退出 |
 | 首页配置 | 使用 `home_order` 隐藏模块并调整左右、上下顺序 |
+| 状态栏 | 顶栏显示当前时间与设备电量 |
 | 排行榜 | 日榜、周榜、月榜和底部分页 |
 | 最近/分类 | 最近更新、上架时间、总点击数、类型筛选和底部分页 |
 | 书籍 | 书籍详情、简介、标签、章节列表和章节分页 |
 | 阅读 | 章节正文、上一章/下一章、章节目录、阅读进度和阅读历史 |
-| 排版 | 自动分页、字号、行距、首行缩进、简繁转换和夜间模式 |
+| 缓存 | 章节正文磁盘缓存与离线回退；可选预加载前后各一章 |
+| 排版 | 自动分页、字号、行距、首行缩进、标点禁则、简繁转换和夜间模式 |
 | 字体 | 内置 WOFF2 FreeType 运行时；加载章节字体；缺失字形自动使用系统字体补足 |
-| 图片 | 正文插图、独立图片解码进程、点击全屏预览和再次点击退出 |
+| 图片 | 正文插图、服务端缩放图、全章插图预取、点击全屏预览和再次点击退出 |
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
-| 显示 | MTK 与 MXCFB EPDC 输出、原屏快照恢复和系统进程暂停/恢复 |
+| 显示 | MTK 与 MXCFB EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
 
 ## 参考项目
 
@@ -225,6 +225,7 @@ chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
   "convert": null,
   "ignore_japanese": false,
   "ignore_ai": false,
+  "prefetch_chapters": false,
   "request_limit": 9,
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
@@ -262,7 +263,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
 
 | 字段 | 说明 | 默认值 |
 |---|---|---|
-| `screen_protocol` | EPDC 协议；`auto` 依次尝试 `mtk`、`mxcfb` | `auto` |
+| `screen_protocol` | EPDC 协议；`auto` 自动探测 `mtk`、`mxcfb` | `auto` |
 | `framebuffer` | Kindle framebuffer 路径 | `/dev/fb0` |
 | `page_flash` | 翻页时是否强制全屏刷新 | `false` |
 | `night_mode` | 是否使用黑白反转的夜间模式 | `false` |
@@ -288,6 +289,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
 | `first_line_indent` | 首行缩进 | `true` |
 | `justify` | 两端对齐 | `false` |
 | `convert` | 简繁转换：`null`、`t2s`、`s2t` | `null` |
+| `prefetch_chapters` | 预加载前后各一章的正文与字体；章节正文始终写入磁盘缓存，离线时自动回退 | `false` |
 | `ignore_japanese` | 列表过滤日文作品 | `false` |
 | `ignore_ai` | 列表过滤 AI 作品 | `false` |
 
