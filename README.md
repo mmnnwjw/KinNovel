@@ -75,62 +75,6 @@ Qt 或桌面环境。
 | 显示 | MTK 与 MXCFB EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
 | 电源与休眠 | 监听物理电源键与原生 LIPC 休眠/唤醒事件（goingToScreenSaver / outOfScreenSaver）；休眠自动让渡屏幕与触控，唤醒全刷无损恢复上次阅读界面；电源状态看门狗在事件丢失时自动恢复，避免卡死在休眠态 |
 
-## 参考项目
-
-本项目参考并复用了以下公开项目。各项目借鉴内容如下：
-
-### LightNovelShelf/Web
-
-- 项目：<https://github.com/LightNovelShelf/Web>
-- 用途：LightNovelShelf 客户端行为与接口契约参考。
-- 借鉴内容：
-  - REST 登录、刷新令牌和统一响应结构。
-  - SignalR Hub 方法、参数和响应字段。
-  - 小说列表、详情、章节和阅读进度逻辑。
-  - 章节字体加载模型。
-  - 阅读位置的相对 XPath 语义。
-- 说明：KinNovel 使用 Python 重新实现 Kindle 端，不包含原 Quasar/Vue
-  前端源码。
-
-### kComics
-
-- 项目：<https://github.com/lxdklp/kComics>
-- 用途：Kindle 原生运行层参考与 GPLv3 代码复用。
-- 借鉴内容：
-  - `/dev/fb0` 与 EPDC framebuffer 输出。
-  - MTK 和 MXCFB 波形、刷新区域与刷新标志。
-  - evdev 触摸设备识别和手势解析。
-  - KUAL 启动、系统进程暂停、屏幕快照和恢复流程。
-  - Kindle ARM 运行库的组织和启动方式。
-
-### KOReader
-
-- 项目：<https://github.com/koreader/koreader>
-- 用途：休眠与电源事件调度机制参考；提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
-- 使用方式：
-  - 休眠与唤醒流程参考了 KOReader 对 Kindle LIPC 电源事件与进程状态的协调管理。
-  - Release 包内置 KOReader `v2026.03` 的 FreeType 与匹配 zlib：
-
-```text
-/mnt/us/extensions/kinnovel/bin/lib/freetype-woff2/libfreetype.so.6
-```
-
-  - 启动时优先加载内置库，因此用户不需要额外安装 KOReader。
-  - 如果内置库缺失，会回退到设备已有的
-    `/mnt/us/koreader/libs/libfreetype.so.6`。
-- 说明：内置二进制按 GPLv3 分发，来源和版本记录在
-  `bin/lib/freetype-woff2/README.txt`。
-
-### 运行时组件
-
-| 项目 | 用途 | 许可 |
-|---|---|---|
-| [Pillow](https://github.com/python-pillow/Pillow) | 图像、字体和 framebuffer 渲染 | MIT-CMU |
-| [lxml](https://github.com/lxml/lxml) | 章节 HTML 解析 | BSD |
-| [python-evdev](https://github.com/gvalkov/python-evdev) | Kindle 触摸与按键事件 | BSD |
-
-完整第三方说明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
-
 ## 环境要求
 
 1. 已越狱的 Kindle。
@@ -167,7 +111,9 @@ Qt 或桌面环境。
 /mnt/us/extensions/kinnovel/menu.json
 ```
 
-5. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
+5. 在 `/mnt/us/extensions/kinnovel/bin/config.json` 中填写 `account_email`
+   和 `account_password`（详见下方「配置」）。
+6. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
 
 ### SSH 安装
 
@@ -179,6 +125,9 @@ cp -R KinNovel/bin /mnt/us/extensions/kinnovel/
 cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
    /mnt/us/extensions/kinnovel/
 ```
+
+在 `/mnt/us/extensions/kinnovel/bin/config.json` 中填写 `account_email`
+和 `account_password`（详见下方「配置」）。
 
 直接启动：
 
@@ -201,6 +150,18 @@ cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
 ```text
 /mnt/us/extensions/kinnovel/bin/config.json
 ```
+
+### 账号
+
+```json
+{
+  "account_email": "user@example.com",
+  "account_password": "your-password"
+}
+```
+
+应用启动后自动登录，不显示登录表单。密码以明文保存在设备本地，请勿提交到
+Git，也不要分享带有真实凭据的 `config.json`。
 
 ### 完整默认配置
 
@@ -243,18 +204,6 @@ cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
   }
 }
 ```
-
-### 账号
-
-```json
-{
-  "account_email": "user@example.com",
-  "account_password": "your-password"
-}
-```
-
-应用启动后自动登录，不显示登录表单。密码以明文保存在设备本地，请勿提交到
-Git，也不要分享带有真实凭据的 `config.json`。
 
 ### 显示
 
@@ -470,6 +419,62 @@ rm -rf /mnt/us/extensions/kinnovel
 ```
 
 卸载会删除缓存、日志和设备上的账号配置。
+
+## 参考项目
+
+本项目参考并复用了以下公开项目。各项目借鉴内容如下：
+
+### LightNovelShelf/Web
+
+- 项目：<https://github.com/LightNovelShelf/Web>
+- 用途：LightNovelShelf 客户端行为与接口契约参考。
+- 借鉴内容：
+  - REST 登录、刷新令牌和统一响应结构。
+  - SignalR Hub 方法、参数和响应字段。
+  - 小说列表、详情、章节和阅读进度逻辑。
+  - 章节字体加载模型。
+  - 阅读位置的相对 XPath 语义。
+- 说明：KinNovel 使用 Python 重新实现 Kindle 端，不包含原 Quasar/Vue
+  前端源码。
+
+### kComics
+
+- 项目：<https://github.com/lxdklp/kComics>
+- 用途：Kindle 原生运行层参考与 GPLv3 代码复用。
+- 借鉴内容：
+  - `/dev/fb0` 与 EPDC framebuffer 输出。
+  - MTK 和 MXCFB 波形、刷新区域与刷新标志。
+  - evdev 触摸设备识别和手势解析。
+  - KUAL 启动、系统进程暂停、屏幕快照和恢复流程。
+  - Kindle ARM 运行库的组织和启动方式。
+
+### KOReader
+
+- 项目：<https://github.com/koreader/koreader>
+- 用途：休眠与电源事件调度机制参考；提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
+- 使用方式：
+  - 休眠与唤醒流程参考了 KOReader 对 Kindle LIPC 电源事件与进程状态的协调管理。
+  - Release 包内置 KOReader `v2026.03` 的 FreeType 与匹配 zlib：
+
+```text
+/mnt/us/extensions/kinnovel/bin/lib/freetype-woff2/libfreetype.so.6
+```
+
+  - 启动时优先加载内置库，因此用户不需要额外安装 KOReader。
+  - 如果内置库缺失，会回退到设备已有的
+    `/mnt/us/koreader/libs/libfreetype.so.6`。
+- 说明：内置二进制按 GPLv3 分发，来源和版本记录在
+  `bin/lib/freetype-woff2/README.txt`。
+
+### 运行时组件
+
+| 项目 | 用途 | 许可 |
+|---|---|---|
+| [Pillow](https://github.com/python-pillow/Pillow) | 图像、字体和 framebuffer 渲染 | MIT-CMU |
+| [lxml](https://github.com/lxml/lxml) | 章节 HTML 解析 | BSD |
+| [python-evdev](https://github.com/gvalkov/python-evdev) | Kindle 触摸与按键事件 | BSD |
+
+完整第三方说明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
 ## 许可证
 
