@@ -46,11 +46,10 @@ def render(ctx, canvas):
     top = canvas.header("公告", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(74, int(canvas.height * 0.061))
-    per_page = max(1, (canvas.height - top - 80) // row_height)
-    start = (STATE["page"] - 1) * per_page
+    per_page = max(1, (canvas.height - top - 150) // row_height)
     STATE["rects"] = {}
     for row in range(per_page):
-        index = start + row
+        index = row
         y = top + 12 + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 6)
         STATE["rects"][("item", index)] = rect
@@ -64,18 +63,46 @@ def render(ctx, canvas):
                     canvas.fit_text("[%s] %s" % (created, item.get("Title") or ""),
                                     ctx.fonts["small"], rect[2] - 24),
                     font=ctx.fonts["small"])
+    nav_y = canvas.height - 72
+    width = int(canvas.width * 0.25)
+    for key, rect, label in (
+        ("prev", (margin, nav_y, width, 54), "上一页"),
+        ("count", ((canvas.width - width) // 2, nav_y, width, 54),
+         "%s/%s" % (STATE["page"], STATE["total_pages"])),
+        ("next", (canvas.width - margin - width, nav_y, width, 54), "下一页"),
+    ):
+        enabled = key == "count" or (
+            key == "prev" and STATE["page"] > 1) or (
+            key == "next" and STATE["page"] < STATE["total_pages"])
+        canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
+        STATE["rects"][(key, 0)] = rect
     if STATE["loading"]:
         canvas.centered_text("加载中…", ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
+    elif STATE["loaded"] and not STATE["items"]:
+        canvas.centered_text("暂无公告", ctx.fonts["body"], canvas.width // 2,
+                             canvas.height // 2, fill=canvas.theme.muted)
 
 
 def handle(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    if y < int(ctx.height * 0.09) and x > int(ctx.width * 0.72):
-        _load(ctx, STATE["page"])
-        return
+    for key in (("prev", 0), ("count", 0), ("next", 0)):
+        rect = STATE["rects"].get(key)
+        if not rect:
+            continue
+        rx, ry, width, height = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            if key[0] == "prev" and STATE["page"] > 1:
+                _load(ctx, STATE["page"] - 1)
+            elif key[0] == "next" and STATE["page"] < STATE["total_pages"]:
+                _load(ctx, STATE["page"] + 1)
+            else:
+                _load(ctx, STATE["page"])
+            return
     for key, rect in STATE["rects"].items():
+        if key[0] != "item":
+            continue
         rx, ry, width, height = rect
         if rx <= x < rx + width and ry <= y < ry + height:
             if key[1] < len(STATE["items"]):
@@ -171,10 +198,11 @@ def render_comments(ctx, canvas):
         canvas.text((32, y + 8), user.get("UserName") or "用户",
                     font=ctx.fonts["small"])
         content = str(comment.get("Content") or "")
+        content_y = y + 40
         for line in canvas.wrap(content, ctx.fonts["tiny"], canvas.width - 64)[:2]:
-            canvas.text((32, y + 40), line, font=ctx.fonts["tiny"],
+            canvas.text((32, content_y), line, font=ctx.fonts["tiny"],
                         fill=canvas.theme.muted)
-            y += 0
+            content_y += ctx.fonts["tiny"].size + 6
         y += 100
     if COMMENT_STATE["loading"]:
         canvas.centered_text("加载中…", ctx.fonts["body"], canvas.width // 2, canvas.height // 2)

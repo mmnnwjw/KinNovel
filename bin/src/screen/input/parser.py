@@ -165,10 +165,10 @@ class MultiTouchParser:
         cfg = self.config
         kind = "unknown"
         if dist <= cfg.tap_max_move_px:
-            # 短按为 tap,长按为 long
+            # 短按为 tap,超过点按时长的静止按压为 long,不留判定死区
             if duration <= cfg.tap_max_duration_s:
                 kind = "tap"
-            elif duration >= cfg.long_press_min_duration_s:
+            else:
                 kind = "long"
         elif dist >= cfg.swipe_min_distance_px:
             # 滑动方向

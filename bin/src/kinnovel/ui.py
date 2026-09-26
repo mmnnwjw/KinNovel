@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
 from .reader import split_font_runs, text_width
-from .utils import prune_cache
+from .utils import battery_level, prune_cache
 
 
 class Theme:
@@ -89,7 +89,19 @@ class Canvas:
     def header(self, title, left="返回", right="主页"):
         height = max(72, int(self.height * 0.085))
         self.draw.rectangle([0, 0, self.width, height], fill=self.theme.light)
-        self.centered_text(self.fit_text(title, self.fonts["title"], self.width - 320),
+        status = time.strftime("%H:%M")
+        level = battery_level()
+        if level is not None:
+            status += " · %d%%" % level
+        status_bbox = self.draw.textbbox((0, 0), status, font=self.fonts["tiny"])
+        status_width = status_bbox[2] - status_bbox[0]
+        home_cx = self.width - max(34, height // 2)
+        status_x = max(self.width // 2 + 60, home_cx - 36 - status_width)
+        self.draw.text(
+            (status_x, height // 2 - (status_bbox[3] - status_bbox[1]) // 2 - status_bbox[1]),
+            status, font=self.fonts["tiny"], fill=self.theme.foreground)
+        title_width = max(120, self.width - 360 - status_width)
+        self.centered_text(self.fit_text(title, self.fonts["title"], title_width),
                            self.fonts["title"], self.width // 2, height // 2)
         self._draw_back_icon(height)
         self._draw_home_icon(height)
@@ -156,6 +168,14 @@ class Canvas:
         return rects
 
 
+def _scaled_url(url):
+    # 站点图床 URL 含 size 参数时按 Web 端行为追加 height,避免下载原图
+    if "size=" not in url or "height=" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return url + separator + "height=1024"
+
+
 class ImageCache:
     def __init__(self, maximum=24):
         self.maximum = maximum
@@ -197,7 +217,7 @@ class ImageCache:
         try:
             worker = Path(__file__).resolve().parents[2] / "image_worker.py"
             completed = subprocess.run(
-                [sys.executable, str(worker), url, str(path),
+                [sys.executable, str(worker), _scaled_url(url), str(path),
                  "1" if strict_tls else "0"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -374,12 +394,15 @@ class PageContext:
 
     def toast(self, message, seconds=2.0):
         self.status = str(message)
+        self._toast_generation = getattr(self, "_toast_generation", 0) + 1
+        generation = self._toast_generation
         self.show()
 
         def clear():
             time.sleep(seconds)
-            self.status = ""
-            self.show()
+            if generation == getattr(self, "_toast_generation", 0):
+                self.status = ""
+                self.show()
         threading.Thread(target=clear, daemon=True).start()
 
     def confirm(self, title, on_yes, on_no=None, yes="确定", no="取消"):

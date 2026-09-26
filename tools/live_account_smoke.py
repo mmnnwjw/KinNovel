@@ -114,14 +114,14 @@ def main():
             len(history.get("Novel") or []), len(history.get("Comic") or [])), flush=True)
 
         latest = call(
-            "GetLatestBookList",
-            lambda: api.get_latest_book_list(page=1, size=2),
+            "GetBookList",
+            lambda: api.get_book_list(page=1, size=2),
         )
         latest_items = latest.get("Data") or []
         print("[summary] latest returned=%s total=%s" % (
             len(latest_items), latest.get("Total")), flush=True)
         if not latest_items:
-            raise RuntimeError("GetLatestBookList returned no books")
+            raise RuntimeError("GetBookList returned no books")
         book_id = int(latest_items[0].get("Id"))
         print("[summary] selected book_id=%s title=%s" % (
             book_id, ascii_preview(latest_items[0].get("Title"), 50)), flush=True)

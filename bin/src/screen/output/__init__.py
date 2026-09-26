@@ -32,6 +32,18 @@ class ScreenOutput:
             return None
         return self.display.show(image, is_flashing, waveform_mode, dither, region)
 
+    # 协议探测:验证当前协议的刷新 ioctl 可用
+    def probe(self):
+        if self.display is None:
+            return False
+        return self.display.probe()
+
+    # 释放 framebuffer 资源
+    def close(self):
+        if self.display is not None:
+            self.display.close()
+            self.display = None
+
     # 清屏
     def clear(self):
         from PIL import Image

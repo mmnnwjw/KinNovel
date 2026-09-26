@@ -7,7 +7,6 @@
 - `bin/start.sh` pauses Kindle UI processes, snapshots `/dev/fb0`, starts the
   app, then restores the previous screen and processes on exit.
 - `bin/src/screen/` is the adapted kComics framebuffer/evdev layer.
-- `bin/src/page/keyboard.py` is the adapted pinyin-capable touch keyboard.
 
 ## Application modules
 
@@ -25,9 +24,9 @@
 
 ### Login
 
-`account.py` collects credentials with the on-device keyboard. `api.py` sends
+`account.py` reads credentials from `bin/config.json`, then `api.py` sends
 SHA-256 password data to `/api/user/login`, stores the returned access and
-refresh tokens, then invokes `GetMyInfo`. The token provider refreshes the
+refresh tokens, and invokes `GetMyInfo`. The token provider refreshes the
 access token before Hub calls when it is older than 25 seconds.
 
 ### Search and catalogue
@@ -66,14 +65,12 @@ the server remains the source of truth.
 ## Implemented API families
 
 - REST authentication, email codes, registration and password reset.
-- Catalogue: latest, paged list, categories, all search dimensions, series,
-  ranking, book details.
+- Catalogue: paged list, categories, ranking and book details.
 - Reading: chapter content, progress, history, per-book position.
 - User: profile/growth, notifications, daily sign-in.
 - Shelf: fetch and save.
-- Comments: list and post.
+- Comments: read-only listing.
 - Shop: catalogue, owned items and purchase.
-- Direct-message methods are present in the API client but have no UI.
 
 ## Excluded or degraded
 
@@ -81,7 +78,7 @@ the server remains the source of truth.
 - Whole-book/chapter download and EPUB/CBZ/MOBI export.
 - Forum/community.
 - Manga image reader and comic quota flows.
-- Direct-message conversation UI.
+- Text-entry screens, direct messages and the manga reader.
 - Avatar upload and profile editing.
 
 These exclusions avoid Calibre, large decoded image buffers, complex editor

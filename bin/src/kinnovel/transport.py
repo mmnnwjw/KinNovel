@@ -1,5 +1,5 @@
 import base64
-import gzip
+import hashlib
 import json
 import os
 import socket
@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from collections import deque
 
 
@@ -22,6 +23,22 @@ class ApiError(TransportError):
     def __init__(self, message="请求失败", status=500):
         super().__init__(message)
         self.status = status
+
+
+def _xor_mask(payload, mask):
+    if not payload:
+        return payload
+    cycle = (mask * (len(payload) // 4 + 1))[:len(payload)]
+    merged = int.from_bytes(payload, "big") ^ int.from_bytes(cycle, "big")
+    return merged.to_bytes(len(payload), "big")
+
+
+def gunzip_limited(raw, limit=8 * 1024 * 1024):
+    obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = obj.decompress(raw, limit + 1)
+    if len(out) > limit or obj.unconsumed_tail:
+        raise TransportError("gzip 响应超过 8MB 上限")
+    return out + obj.flush()
 
 
 class RateLimit:
@@ -106,6 +123,16 @@ class WebSocketConnection:
         if not response.startswith(b"HTTP/1.1 101") and not response.startswith(b"HTTP/1.0 101"):
             first_line = response.split(b"\r\n", 1)[0].decode("latin1", "replace")
             raise TransportError("WebSocket 握手失败: " + first_line)
+        expected = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+        ).digest())
+        accept = b""
+        for line in response[:header_end].split(b"\r\n")[1:]:
+            if line.lower().startswith(b"sec-websocket-accept:"):
+                accept = line.split(b":", 1)[1].strip()
+                break
+        if accept != expected:
+            raise TransportError("WebSocket 握手校验失败: Sec-WebSocket-Accept 不匹配")
         if header_end >= 0:
             self._buffer.extend(response[header_end + 4:])
         return self
@@ -141,7 +168,7 @@ class WebSocketConnection:
             header.append(0x80 | 127)
             header.extend(struct.pack("!Q", length))
         header.extend(mask)
-        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        masked = _xor_mask(payload, mask)
         with self._send_lock:
             self.sock.sendall(bytes(header) + masked)
 
@@ -170,7 +197,7 @@ class WebSocketConnection:
             mask = self._recv_exact(4) if masked else None
             payload = self._recv_exact(length) if length else b""
             if mask:
-                payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+                payload = _xor_mask(payload, mask)
             if opcode == 0x8:
                 self._closed = True
                 raise TransportError("WebSocket 已被服务器关闭")
@@ -222,6 +249,7 @@ class SignalRClient:
         self._visitor_id = visitor_id or uuid.uuid4().hex
         self.notifications = deque(maxlen=100)
         self.last_error = ""
+        self._record_buffer = bytearray()
 
     def set_server(self, server):
         with self._lock:
@@ -265,6 +293,7 @@ class SignalRClient:
         if self._socket is not None:
             self._socket.close()
             self._socket = None
+        self._record_buffer = bytearray()
 
     def _connect_locked(self):
         self._close_locked()
@@ -290,11 +319,15 @@ class SignalRClient:
         ).connect()
         socket_.send_text('{"protocol":"json","version":1}' + self.RECORD_SEPARATOR)
         deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            messages = self._receive_messages(socket_)
-            if any(message == {} for message in messages):
-                self._socket = socket_
-                return
+        try:
+            while time.monotonic() < deadline:
+                messages = self._receive_messages(socket_)
+                if any(message == {} for message in messages):
+                    self._socket = socket_
+                    return
+        except (OSError, TransportError) as exc:
+            socket_.close()
+            raise TransportError("SignalR 握手失败: %s" % exc)
         socket_.close()
         raise TransportError("SignalR 握手超时")
 
@@ -304,10 +337,15 @@ class SignalRClient:
 
     def _receive_messages(self, socket_):
         _, data = socket_.receive()
-        text = data.decode("utf-8", "replace")
+        self._record_buffer.extend(data)
+        separator = self.RECORD_SEPARATOR.encode("ascii")
         messages = []
-        for raw in text.split(self.RECORD_SEPARATOR):
-            raw = raw.strip()
+        while True:
+            index = self._record_buffer.find(separator)
+            if index < 0:
+                break
+            raw = bytes(self._record_buffer[:index]).decode("utf-8", "replace").strip()
+            del self._record_buffer[:index + 1]
             if not raw:
                 continue
             try:
@@ -340,8 +378,10 @@ class SignalRClient:
         except (ValueError, TypeError):
             return value
         try:
-            raw = gzip.decompress(raw)
-        except (OSError, EOFError):
+            raw = gunzip_limited(raw)
+        except TransportError:
+            raise
+        except (OSError, EOFError, zlib.error):
             return value
         try:
             return json.loads(raw.decode("utf-8"))
@@ -397,6 +437,8 @@ class SignalRClient:
         for attempt in range(2):
             try:
                 return self._invoke_once(invocation, method, timeout)
+            except ApiError:
+                raise
             except TransportError as exc:
                 last_error = exc
                 with self._lock:

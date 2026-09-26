@@ -27,6 +27,7 @@ DEFAULTS = {
     "convert": None,
     "ignore_japanese": False,
     "ignore_ai": False,
+    "prefetch_chapters": False,
     "request_limit": 9,
     "request_window_ms": 5500,
     "cache_limit_mb": 192,

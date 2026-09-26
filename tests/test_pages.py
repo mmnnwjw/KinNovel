@@ -186,6 +186,29 @@ class PageSmokeTests(unittest.TestCase):
         self.assertEqual(browse.STATE["page"], 2)
         self.assertEqual(browse.STATE["items"][0]["Title"], "Page 2")
 
+    def test_browse_second_page_rows_map_to_current_page_items(self):
+        browse.STATE.update({
+            "items": [{"Id": 11, "Title": "第二页书"}],
+            "page": 2,
+            "total_pages": 2,
+            "loading": False,
+            "loaded": True,
+            "categories": [],
+            "category": 0,
+        })
+        self.context.page_name = "browse"
+        self.context.params = {}
+        self.context.render()
+        calls = []
+        self.context.navigate = lambda name, **params: calls.append((name, params))
+        rect = browse.STATE["rects"][("item", 0)]
+        self.context.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        })
+        self.assertEqual(calls, [("book", {"book_id": 11})])
+
     def test_home_order_can_hide_and_reorder(self):
         self.context.config.values["home_order"] = {
             "rank": 0,
@@ -240,6 +263,28 @@ class PageSmokeTests(unittest.TestCase):
             "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
         })
         self.assertIsNone(reader.STATE["fullscreen_image"])
+
+    def test_reader_image_hit_rect_matches_fitted_image(self):
+        class Doc:
+            page_count = 1
+            pages = [[{
+                "type": "image", "url": "illu", "x": 34, "y": 0,
+                "width": 1004, "height": 600, "path": "p",
+            }]]
+
+        reader.STATE.update({
+            "data": {"Chapter": {"Title": "测试"}},
+            "doc": Doc(),
+            "page": 0,
+            "fullscreen_image": None,
+        })
+        self.context.images._memory["illu"] = Image.new("L", (400, 200), 255)
+        self.context.page_name = "reader"
+        self.context.params = {}
+        self.context.render()
+        rect = reader.STATE["image_rects"][("p", 0)]
+        self.assertEqual(rect[2], 1004)
+        self.assertEqual(rect[3], 502)
 
     def test_header_left_uses_back_stack(self):
         self.context.stack = [("home", {})]

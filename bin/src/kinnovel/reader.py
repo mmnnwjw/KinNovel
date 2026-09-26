@@ -11,7 +11,7 @@ from lxml import etree
 
 from .config import CACHE_DIR
 from .transport import TransportError
-from .utils import absolute_url, atomic_write
+from .utils import absolute_url, atomic_write, stable_cache_name
 
 
 BLOCK_TAGS = {
@@ -139,10 +139,15 @@ def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
     if not font_url:
         return ""
     url = absolute_url(base_url, font_url)
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", url.split("?", 1)[0].rsplit("/", 1)[-1]) or "chapter-font"
-    path = CACHE_DIR / "fonts" / name
+    suffix = ""
+    if "." in url.split("?", 1)[0].rsplit("/", 1)[-1]:
+        suffix = "." + url.split("?", 1)[0].rsplit(".", 1)[-1].lower()
+    if suffix not in (".ttf", ".otf", ".woff", ".woff2"):
+        suffix = ".font"
+    path = CACHE_DIR / "fonts" / (stable_cache_name(url) + suffix)
     if path.exists() and path.stat().st_size > 0:
-        return str(path)
+        converted = normalize_font(path)
+        return str(converted or path)
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "KinNovel/0.1"})
         context = None
@@ -152,15 +157,19 @@ def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
             if not strict_tls:
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
+        limit = 20 * 1024 * 1024
         with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
-            data = response.read(20 * 1024 * 1024)
-        if data:
-            atomic_write(path, data)
-            converted = normalize_font(path)
-            return str(converted or path)
-    except (OSError, urllib.error.URLError):
+            expected = response.headers.get("Content-Length")
+            data = response.read(limit + 1)
+        if not data or len(data) > limit:
+            return ""
+        if expected is not None and int(expected) != len(data):
+            return ""
+        atomic_write(path, data)
+        converted = normalize_font(path)
+        return str(converted or path)
+    except (OSError, urllib.error.URLError, ValueError):
         return ""
-    return ""
 
 
 def normalize_font(path):
@@ -247,10 +256,7 @@ class FontResolver:
             if self._cache.get(key) is not None:
                 self.custom_font_loaded = True
                 return self._cache[key]
-        try:
-            return ImageFont.truetype(self.system_font_path, int(size))
-        except OSError:
-            return ImageFont.load_default()
+        return self.system_font(int(size))
 
 
 def text_width(draw, text, font):
@@ -262,6 +268,7 @@ def text_width(draw, text, font):
 
 
 _GLYPH_CACHE = {}
+_GLYPH_CACHE_LIMIT = 40000
 
 
 def glyph_available(font, character):
@@ -277,6 +284,8 @@ def glyph_available(font, character):
         available = bool(font.getmask(character).getbbox())
     except (AttributeError, OSError, ValueError):
         available = False
+    if len(_GLYPH_CACHE) >= _GLYPH_CACHE_LIMIT:
+        _GLYPH_CACHE.clear()
     _GLYPH_CACHE[key] = available
     return available
 
@@ -300,6 +309,11 @@ def split_font_runs(text, font, fallback_font):
     return runs
 
 
+# 标点禁则:闭标点不允许出现在行首,开标点不允许出现在行尾
+_LINE_START_FORBIDDEN = "，。、；：？！,.!?;:'\")]】》”’%…—·"
+_LINE_END_FORBIDDEN = "（《【「『“‘([{"
+
+
 def wrap_line(draw, text, font, max_width, fallback_font=None,
               remove_trailing_spaces=True):
     text = str(text or "").replace("\u00a0", " ")
@@ -317,19 +331,24 @@ def wrap_line(draw, text, font, max_width, fallback_font=None,
         character_width = text_width(
             draw, character, char_font(font, fallback_font, character))
         if current and current_width + character_width > max_width:
+            if character in _LINE_START_FORBIDDEN:
+                # 闭标点挤压到上一行行尾,允许轻微溢出
+                current += character
+                lines.append(current.rstrip() if remove_trailing_spaces else current)
+                current = ""
+                current_width = 0.0
+                continue
             cut = current
-            if len(cut) > 1 and cut[-1] in "，。！？；：、,.!?;:'\")]】》”’":
-                cut = cut[:-1]
-                current = current[-1] + character
-                current_width = sum(
-                    text_width(draw, character,
-                               char_font(font, fallback_font, character))
-                    for character in current
-                )
-            else:
-                current = character
-                current_width = character_width
+            carry = ""
+            if len(cut) > 1 and cut[-1] in _LINE_END_FORBIDDEN:
+                # 开标点不允许留在行尾,随下一行移动
+                cut, carry = cut[:-1], cut[-1]
             lines.append(cut.rstrip() if remove_trailing_spaces else cut)
+            current = carry + character
+            current_width = sum(
+                text_width(draw, c, char_font(font, fallback_font, c))
+                for c in current
+            )
         else:
             current += character
             current_width += character_width
@@ -397,13 +416,16 @@ class ReaderDocument:
             nonlocal y, current
             font = font or self.body_font
             fallback_font = fallback_font or self.body_fallback
-            if y + gap_before + line_height > usable_height and current:
+            # 标题等大字号行使用自身行高,避免与正文行高不一致导致重叠
+            actual_height = max(line_height, int(
+                getattr(font, "size", 28) * float(self.config.get("line_spacing") or 1.42)))
+            if y + gap_before + actual_height > usable_height and current:
                 new_page()
             y += gap_before
             prefix = "　　" if indent and self.config.get("first_line_indent") else ""
             for line in wrap_line(draw, prefix + text, font, usable_width,
                                   fallback_font=fallback_font):
-                if y + line_height > usable_height and current:
+                if y + actual_height > usable_height and current:
                     new_page()
                 current.append({
                     "type": "text",
@@ -415,7 +437,7 @@ class ReaderDocument:
                     "size": getattr(font, "size", 28),
                     "path": path,
                 })
-                y += line_height
+                y += actual_height
             y += gap_after
 
         for block in self.blocks:

@@ -9,8 +9,11 @@ def render(ctx, canvas):
     top = canvas.header("设置", left="返回", right="主页")
     margin = int(canvas.width * 0.05)
     y = top + 18
-    height = 64
-    gap = 14
+    # 行高随屏幕高度自适应,低分辨率设备(如 600x800)不溢出
+    row_count = 12
+    available = canvas.height - top - 30
+    gap = 14 if available >= 12 * 64 + 11 * 14 else 8
+    height = max(44, min(64, (available - gap * (row_count - 1)) // row_count))
 
     def row(label, value=None, action=None, progress=None):
         nonlocal y
@@ -18,11 +21,13 @@ def render(ctx, canvas):
         STATE["rects"][(action or label, 0)] = rect
         canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
                                       radius=9, outline=canvas.theme.mid, width=1)
-        canvas.text((rect[0] + 14, y + 16), label, font=ctx.fonts["small"])
+        canvas.text((rect[0] + 14, y + max(4, (height - ctx.fonts["small"].size) // 2)),
+                    label, font=ctx.fonts["small"])
         if value is not None:
             text = canvas.fit_text(str(value), ctx.fonts["tiny"], rect[2] // 2 - 20)
             bbox = canvas.draw.textbbox((0, 0), text, font=ctx.fonts["tiny"])
-            canvas.text((rect[0] + rect[2] - (bbox[2] - bbox[0]) - 14, y + 22),
+            canvas.text((rect[0] + rect[2] - (bbox[2] - bbox[0]) - 14,
+                         y + max(4, (height - ctx.fonts["tiny"].size) // 2)),
                         text, font=ctx.fonts["tiny"], fill=canvas.theme.muted)
         if progress is not None:
             bar_y = y + height - 8
@@ -37,8 +42,9 @@ def render(ctx, canvas):
         canvas.draw.rounded_rectangle(
             [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
             radius=9, outline=canvas.theme.mid, width=1)
-        canvas.text((rect[0] + 14, y + 16), label, font=ctx.fonts["small"])
-        button_size = 50
+        canvas.text((rect[0] + 14, y + max(4, (height - ctx.fonts["small"].size) // 2)),
+                    label, font=ctx.fonts["small"])
+        button_size = min(50, height - 8)
         plus_rect = (rect[0] + rect[2] - button_size - 8,
                      y + (height - button_size) // 2,
                      button_size, button_size)
@@ -67,6 +73,7 @@ def render(ctx, canvas):
     row("简繁转换", {"t2s": "繁转简", "s2t": "简转繁"}.get(convert, "关闭"), "convert")
     row("忽略日文", "开" if ctx.config.get("ignore_japanese") else "关", "ignore_japanese")
     row("忽略 AI", "开" if ctx.config.get("ignore_ai") else "关", "ignore_ai")
+    row("预加载章节", "开" if ctx.config.get("prefetch_chapters") else "关", "prefetch")
     row("翻页闪屏", "开" if ctx.config.get("page_flash") else "关", "flash")
     size_text = "%.1f MB" % (cache_size(CACHE_DIR) / 1024.0 / 1024.0)
     row("缓存", size_text, "clear_cache")
@@ -99,18 +106,16 @@ def handle(data, ctx):
             index = values.index(current) if current in values else 0
             ctx.config.set("convert", values[(index + 1) % len(values)])
             ctx.show()
-        elif action in ("night", "indent", "flash", "ignore_japanese", "ignore_ai"):
-            mapping = {"night": "night_mode", "indent": "first_line_indent", "flash": "page_flash"}
+        elif action in ("night", "indent", "flash", "ignore_japanese", "ignore_ai", "prefetch"):
+            mapping = {"night": "night_mode", "indent": "first_line_indent",
+                       "flash": "page_flash", "prefetch": "prefetch_chapters"}
             key = mapping.get(action, action)
             ctx.config.set(key, not bool(ctx.config.get(key)))
             ctx.show()
         elif action == "clear_cache":
             ctx.confirm("确认清空封面、正文和字体的磁盘缓存？", lambda: _clear(ctx))
         elif action == "account":
-            if ctx.api.user:
-                ctx.navigate("account")
-            else:
-                ctx.navigate("account")
+            ctx.navigate("account")
         return
 
 

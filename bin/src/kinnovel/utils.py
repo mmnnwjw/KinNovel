@@ -1,7 +1,9 @@
+import glob
 import hashlib
 import json
 import os
 import shutil
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,3 +121,24 @@ def clear_cache(path):
                 item.unlink()
         except OSError:
             pass
+
+
+_BATTERY_CACHE = {"at": 0.0, "value": None}
+
+
+def battery_level():
+    now = time.monotonic()
+    if now - _BATTERY_CACHE["at"] < 60:
+        return _BATTERY_CACHE["value"]
+    value = None
+    for path in sorted(glob.glob("/sys/class/power_supply/*/capacity")):
+        try:
+            level = int(Path(path).read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        if 0 <= level <= 100:
+            value = level
+            break
+    _BATTERY_CACHE["at"] = now
+    _BATTERY_CACHE["value"] = value
+    return value

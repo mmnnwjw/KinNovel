@@ -48,17 +48,23 @@ def _detect_touch_device(fallback="/dev/input/event1"):
             dev = InputDevice(path)
         except (OSError, PermissionError):
             continue
-        if not _has_touch_caps(dev):
-            continue
-        abs_items = {}
-        for item in dev.capabilities(absinfo=True).get(ecodes.EV_ABS, []):
-            if isinstance(item, tuple):
-                code, info = item
-                abs_items[code] = info
-        absinfo_x = abs_items.get(ecodes.ABS_MT_POSITION_X)
-        absinfo_y = abs_items.get(ecodes.ABS_MT_POSITION_Y)
-        if absinfo_x is not None and absinfo_y is not None:
-            return path, dev.name, absinfo_x, absinfo_y
+        try:
+            if not _has_touch_caps(dev):
+                continue
+            abs_items = {}
+            for item in dev.capabilities(absinfo=True).get(ecodes.EV_ABS, []):
+                if isinstance(item, tuple):
+                    code, info = item
+                    abs_items[code] = info
+            absinfo_x = abs_items.get(ecodes.ABS_MT_POSITION_X)
+            absinfo_y = abs_items.get(ecodes.ABS_MT_POSITION_Y)
+            if absinfo_x is not None and absinfo_y is not None:
+                return path, dev.name, absinfo_x, absinfo_y
+        finally:
+            try:
+                dev.close()
+            except OSError:
+                pass
     return None
 
 # 触控输入类
@@ -122,7 +128,8 @@ class ScreenInput:
     def to_pixels(self, x, y, clamp=True):
         rx, ry = self.to_ratio(x, y, clamp=clamp)
         if self.render_w and self.render_h:
-            return int(rx * self.render_w), int(ry * self.render_h)
+            return (min(self.render_w - 1, int(rx * self.render_w)),
+                    min(self.render_h - 1, int(ry * self.render_h)))
         return int(rx * self.max_x), int(ry * self.max_y)
 
     # 将硬件坐标转换为比例坐标

@@ -125,6 +125,8 @@ def _render_profile(ctx, canvas):
 
 
 def handle(data, ctx):
+    if data.get("gesture") != "tap":
+        return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect
@@ -277,7 +279,7 @@ def _mark_notifications_local():
         item["IsRead"] = True
 
 
-SHOP_STATE = {"shop": {}, "items": [], "owned": [], "rects": {}, "loading": True}
+SHOP_STATE = {"shop": {}, "items": [], "owned": [], "rects": {}, "loading": True, "page": 0}
 
 
 def enter_shop(ctx):
@@ -288,6 +290,7 @@ def enter_shop(ctx):
         SHOP_STATE["shop"], mine = result
         SHOP_STATE["items"] = SHOP_STATE["shop"].get("Items") or []
         SHOP_STATE["owned"] = mine.get("Items") or []
+        SHOP_STATE["page"] = 0
         SHOP_STATE["loading"] = False
 
     ctx.run_async("shop", operation, success,
@@ -300,10 +303,18 @@ def render_shop(ctx, canvas):
                         left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     row_height = max(84, int(canvas.height * 0.070))
+    per_page = max(1, (canvas.height - top - 92) // row_height)
     items = SHOP_STATE["items"]
+    pages = max(1, (len(items) + per_page - 1) // per_page)
+    SHOP_STATE["page"] = min(SHOP_STATE["page"], pages - 1)
+    start = SHOP_STATE["page"] * per_page
     SHOP_STATE["rects"] = {}
-    for index, item in enumerate(items[:8]):
-        y = top + 12 + index * row_height
+    for row in range(per_page):
+        index = start + row
+        if index >= len(items):
+            break
+        item = items[index]
+        y = top + 12 + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 8)
         SHOP_STATE["rects"][("item", index)] = rect
         canvas.draw.rounded_rectangle(
@@ -314,9 +325,26 @@ def render_shop(ctx, canvas):
         canvas.text((rect[0] + 12, y + 44),
                     "%s 金币 · 持有 %s" % (item.get("Price", 0), item.get("Owned", 0)),
                     font=ctx.fonts["tiny"], fill=canvas.theme.muted)
+    nav_y = canvas.height - 68
+    width = int(canvas.width * 0.25)
+    for key, rect, label in (
+        ("prev", (margin, nav_y, width, 50), "上一页"),
+        ("count", ((canvas.width - width) // 2, nav_y, width, 50),
+         "%s/%s" % (SHOP_STATE["page"] + 1, pages)),
+        ("next", (canvas.width - margin - width, nav_y, width, 50), "下一页"),
+    ):
+        enabled = key == "count" or (
+            key == "prev" and SHOP_STATE["page"] > 0) or (
+            key == "next" and SHOP_STATE["page"] < pages - 1)
+        canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
+        SHOP_STATE["rects"][(key, 0)] = rect
     if SHOP_STATE["loading"]:
         canvas.centered_text("加载中…", ctx.fonts["body"],
                              canvas.width // 2, canvas.height // 2)
+    elif not items:
+        canvas.centered_text("暂无商品", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2,
+                             fill=canvas.theme.muted)
 
 
 def handle_shop(data, ctx):
@@ -325,11 +353,24 @@ def handle_shop(data, ctx):
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     for key, rect in SHOP_STATE["rects"].items():
         rx, ry, width, height = rect
-        if rx <= x < rx + width and ry <= y < ry + height:
+        if not (rx <= x < rx + width and ry <= y < ry + height):
+            continue
+        if key[0] == "item":
             item = SHOP_STATE["items"][key[1]]
             ctx.confirm("购买 %s？" % item.get("Name"),
                         lambda item=item: _buy(ctx, item))
-            return
+        elif key[0] == "prev" and SHOP_STATE["page"] > 0:
+            SHOP_STATE["page"] -= 1
+            ctx.show()
+        elif key[0] == "next":
+            row_height = max(84, int(ctx.height * 0.070))
+            top = max(72, int(ctx.height * 0.085))
+            per_page = max(1, (ctx.height - top - 92) // row_height)
+            pages = max(1, (len(SHOP_STATE["items"]) + per_page - 1) // per_page)
+            if SHOP_STATE["page"] < pages - 1:
+                SHOP_STATE["page"] += 1
+                ctx.show()
+        return
 
 
 def _buy(ctx, item):
