@@ -30,8 +30,9 @@ def restore(path):
         data = f.read()
     display = EInkDisplay(FB_PATH)
     if len(data) != display.smem_len:
-        print(f"[快照] 文件大小 {len(data)} 与 smem_len {display.smem_len} 不符, 但是仍按文件长度写回")
-    display.mem[: len(data)] = data
+        print(f"[快照] 文件大小 {len(data)} 与 smem_len {display.smem_len} 不符, 按较小长度写回")
+    size = min(len(data), display.smem_len)
+    display.mem[:size] = data[:size]
     print("[快照] 已写回帧缓冲,全屏刷新...")
     display.mxc_update(0, 0, display.width, display.height,
                         is_flashing=True, waveform_mode=WAVEFORM.GC16)

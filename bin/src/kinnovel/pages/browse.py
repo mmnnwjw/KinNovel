@@ -116,9 +116,9 @@ def render(ctx, canvas):
         canvas.button(rect, label, active=index != 2, font=ctx.fonts["small"])
         STATE["rects"][("filter", index)] = rect
 
-    start = (STATE["page"] - 1) * per_page
+    # 服务端已按页返回数据,行索引即当前页内索引
     for row in range(per_page):
-        index = start + row
+        index = row
         y = list_y + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 6)
         STATE["rects"][("item", index)] = rect
@@ -127,7 +127,8 @@ def render(ctx, canvas):
         item = STATE["items"][index]
         canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
                                       radius=8, outline=canvas.theme.mid, width=1)
-        canvas.centered_text(str(index + 1), ctx.fonts["body"],
+        canvas.centered_text(str((STATE["page"] - 1) * per_page + index + 1),
+                             ctx.fonts["body"],
                              rect[0] + 38, y + rect[3] // 2)
         title = item.get("Title") or "未知"
         author = item.get("UserName") or "未知作者"
@@ -155,6 +156,10 @@ def render(ctx, canvas):
     if STATE["loading"]:
         canvas.centered_text("加载中…", ctx.fonts["body"],
                              canvas.width // 2, canvas.height // 2)
+    elif STATE["loaded"] and not STATE["items"]:
+        canvas.centered_text("暂无内容", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2,
+                             fill=canvas.theme.muted)
 
 
 def handle(data, ctx):

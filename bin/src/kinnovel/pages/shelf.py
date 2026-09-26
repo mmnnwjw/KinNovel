@@ -113,6 +113,9 @@ def render(ctx, canvas):
         STATE["rects"][(action, 0)] = rect
     if STATE["loading"]:
         canvas.centered_text("同步中…", ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
+    elif STATE["loaded"] and not items:
+        canvas.centered_text("书架为空", ctx.fonts["body"], canvas.width // 2,
+                             canvas.height // 2, fill=canvas.theme.muted)
 
 
 def handle(data, ctx):
@@ -175,7 +178,8 @@ def handle(data, ctx):
 
 def _long_press(ctx, item):
     if item.get("type") == "FOLDER":
-        ctx.confirm("删除文件夹及其下级？", lambda: _delete_folder(ctx, item.get("id")))
+        ctx.confirm("删除文件夹？其中的书籍会移到上一层",
+                    lambda: _delete_folder(ctx, item.get("id")))
     else:
         ctx.confirm("从书架移出书籍？", lambda: _remove_book(ctx, int(item.get("id"))))
 

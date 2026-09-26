@@ -1,9 +1,76 @@
+import json
+import os
 import threading
 import time
 
 from PIL import Image, ImageDraw, ImageOps
 
-from ..reader import ReaderDocument
+from ..config import CACHE_DIR
+from ..reader import ReaderDocument, ensure_font
+from ..utils import atomic_write, read_json, stable_cache_name
+
+
+_CHAPTER_CACHE_TTL = 12 * 3600
+
+
+def _chapter_cache_path(book_id, sort_num, convert):
+    key = "%s:%s:%s" % (int(book_id), int(sort_num), convert or "")
+    return CACHE_DIR / "content" / (stable_cache_name(key) + ".json")
+
+
+def _load_chapter(ctx, book_id, sort_num):
+    convert = ctx.config.get("convert")
+    path = _chapter_cache_path(book_id, sort_num, convert)
+    cached = read_json(path)
+    fresh = False
+    if cached:
+        try:
+            fresh = (time.time() - path.stat().st_mtime) < _CHAPTER_CACHE_TTL
+        except OSError:
+            fresh = False
+    if cached and fresh:
+        return cached
+    try:
+        response = ctx.api.get_novel_content(book_id, sort_num, convert=convert)
+    except Exception:
+        if cached:
+            return cached
+        raise
+    atomic_write(path, json.dumps(response, ensure_ascii=False))
+    return response
+
+
+def _prefetch_images(ctx, document):
+    for block in document.blocks:
+        if block.kind != "image" or not block.source_url:
+            continue
+        url = block.source_url
+        if ctx.images.get(url) is not None or url in STATE["image_pending"]:
+            continue
+        STATE["image_pending"].add(url)
+        ctx.run_async(
+            "reader",
+            lambda url=url: ctx.images.prefetch(url, ctx.config.get("strict_tls")),
+            lambda _result, url=url: STATE["image_pending"].discard(url),
+            lambda _exc, url=url: STATE["image_pending"].discard(url),
+        )
+
+
+def _prefetch_neighbors(ctx, book_id, sort_num, chapters):
+    for target in (int(sort_num) - 1, int(sort_num) + 1):
+        if target < 1 or target > len(chapters):
+            continue
+        if _chapter_cache_path(book_id, target, ctx.config.get("convert")).exists():
+            continue
+
+        def task(target=target):
+            response = _load_chapter(ctx, book_id, target)
+            font_url = (response.get("Chapter") or {}).get("Font")
+            if font_url:
+                ensure_font(font_url, ctx.api.server,
+                            strict_tls=bool(ctx.config.get("strict_tls")))
+
+        ctx.run_async("reader", task, lambda _result: None, lambda _exc: None)
 
 
 STATE = {
@@ -21,7 +88,21 @@ STATE = {
     "image_rects": {},
     "fullscreen_image": None,
     "last_turn_at": 0.0,
+    "fitted_cache": {},
 }
+
+
+def _fit_image(url, image, width, height):
+    key = (url, int(width), int(height))
+    cached = STATE["fitted_cache"].get(key)
+    if cached is not None:
+        return cached
+    fitted = ImageOps.contain(image, (int(width), int(height)),
+                              method=Image.Resampling.LANCZOS)
+    if len(STATE["fitted_cache"]) >= 8:
+        STATE["fitted_cache"].clear()
+    STATE["fitted_cache"][key] = fitted
+    return fitted
 
 
 def _signature(ctx, book_id, sort_num):
@@ -68,6 +149,8 @@ def enter(ctx):
         ctx.show()
 
         def success(document):
+            if STATE["book_id"] != book_id or STATE["sort_num"] != sort_num:
+                return
             STATE["doc"] = document
             if at_last:
                 STATE["page"] = max(0, document.page_count - 1)
@@ -85,17 +168,18 @@ def enter(ctx):
         return
     STATE.update({"book_id": book_id, "sort_num": sort_num, "data": None,
                   "doc": None, "page": 0, "loading": True, "last_saved": -1,
-                  "signature": signature})
+                  "signature": signature, "fitted_cache": {}})
     ctx.show()
 
     def operation():
-        response = ctx.api.get_novel_content(
-            book_id, sort_num, convert=ctx.config.get("convert"))
+        response = _load_chapter(ctx, book_id, sort_num)
         chapter = response.get("Chapter") or {}
         document = _prepare_document(ctx, chapter)
         return response, document
 
     def success(result):
+        if STATE["book_id"] != book_id or STATE["sort_num"] != sort_num:
+            return
         response, document = result
         chapter = response.get("Chapter") or {}
         STATE["data"] = response
@@ -116,8 +200,13 @@ def enter(ctx):
         chapters = (response.get("Chapter") or {}).get("Chapters") or []
         if chapters:
             _save_progress(ctx)
+            if ctx.config.get("prefetch_chapters"):
+                _prefetch_neighbors(ctx, book_id, sort_num, chapters)
+        _prefetch_images(ctx, document)
 
     def error(exc):
+        if STATE["book_id"] != book_id or STATE["sort_num"] != sort_num:
+            return
         STATE["loading"] = False
         ctx.message(["章节加载失败", str(exc)])
 
@@ -181,10 +270,8 @@ def render(ctx, canvas):
                 lambda _exc: STATE["image_pending"].discard(url),
             )
         if image is not None:
-            fitted = ImageOps.contain(
-                image, (canvas.width, canvas.height),
-                method=Image.Resampling.LANCZOS,
-            )
+            fitted = _fit_image("fullscreen:" + url, image,
+                                canvas.width, canvas.height)
             x = (canvas.width - fitted.width) // 2
             y = (canvas.height - fitted.height) // 2
             canvas.image.paste(fitted, (x, y))
@@ -224,13 +311,12 @@ def render(ctx, canvas):
                         lambda _exc, url=url: STATE["image_pending"].discard(url),
                     )
             if image is not None:
-                fitted = ImageOps.contain(image, (item["width"], item["height"]),
-                                          method=Image.Resampling.LANCZOS)
+                fitted = _fit_image(item["url"], image, item["width"], item["height"])
                 x = item["x"] + (item["width"] - fitted.width) // 2
                 image_y = top + item["y"]
                 canvas.image.paste(fitted, (x, image_y))
                 STATE["image_rects"][(item.get("path"), item.get("y"))] = (
-                    item["x"], image_y, item["width"], item["height"], item["url"])
+                    x, image_y, fitted.width, fitted.height, item["url"])
             else:
                 canvas.centered_text("[图片]", ctx.fonts["small"],
                                      canvas.width // 2, top + item["y"] + item["height"] // 2,
@@ -253,6 +339,8 @@ def render(ctx, canvas):
 
 
 def handle(data, ctx):
+    if data.get("gesture") != "tap":
+        return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     if STATE["fullscreen_image"]:
         STATE["fullscreen_image"] = None
@@ -331,6 +419,8 @@ def render_catalog(ctx, canvas):
 
 
 def handle_catalog(data, ctx):
+    if data.get("gesture") != "tap":
+        return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect

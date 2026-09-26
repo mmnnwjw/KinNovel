@@ -42,8 +42,16 @@ def _load(ctx, force=False):
             ctx.run_async("book", lambda: ctx.images.prefetch(cover, ctx.config.get("strict_tls")))
         if ctx.api.user:
             def shelf_result(shelf):
-                ids = {item.get("id") for item in (shelf.get("data") or [])
-                       if str(item.get("type")) != "FOLDER"}
+                if book_id != STATE["book_id"]:
+                    return
+                ids = set()
+                for item in (shelf.get("data") or []):
+                    if str(item.get("type")) == "FOLDER":
+                        continue
+                    try:
+                        ids.add(int(item.get("id")))
+                    except (TypeError, ValueError):
+                        continue
                 STATE["bound"] = book_id in ids
                 ctx.show()
             ctx.run_async("book", ctx.api.get_book_shelf, shelf_result, lambda _: None)

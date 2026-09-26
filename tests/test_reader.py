@@ -8,6 +8,7 @@ from kinnovel.reader import (
     extract_blocks,
     sanitize_html,
     split_font_runs,
+    wrap_line,
 )
 
 
@@ -60,6 +61,24 @@ class ReaderTests(unittest.TestCase):
         pages = document.prepare(draw, 800, 1000)
         self.assertGreater(len(pages), 1)
         self.assertTrue(any(item["type"] == "text" for item in pages[0]))
+
+    def test_closing_punctuation_stays_on_previous_line(self):
+        image = Image.new("L", (8, 8), 255)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        max_width = font.getlength("汉汉汉汉汉") + 1
+        lines = wrap_line(draw, "汉汉汉汉汉。汉汉汉", font, max_width)
+        self.assertEqual(lines[0], "汉汉汉汉汉。")
+        self.assertFalse(lines[1].startswith("。"))
+
+    def test_opening_punctuation_moves_to_next_line(self):
+        image = Image.new("L", (8, 8), 255)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        max_width = font.getlength("汉汉汉汉“") + 1
+        lines = wrap_line(draw, "汉汉汉汉“汉汉汉汉", font, max_width)
+        self.assertEqual(lines[0], "汉汉汉汉")
+        self.assertTrue(lines[1].startswith("“"))
 
     def test_missing_glyph_falls_back_per_character(self):
         class Mask:

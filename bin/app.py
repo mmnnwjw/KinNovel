@@ -62,14 +62,21 @@ class KinNovelApp:
 
     def load_fonts(self):
         path = self.config.get("font_path")
+        scale = 1.0
+        try:
+            width, height = self.screen.output.resolution
+            scale = max(0.75, min(1.15, min(width / 1072, height / 1448)))
+        except (AttributeError, TypeError):
+            scale = 1.0
         sizes = {
             "hero": 82, "title": 50, "body": 38, "small": 31, "tiny": 25,
             96: 96, 48: 48, 36: 36, 28: 28,
         }
         fonts = {}
         for key, size in sizes.items():
+            scaled = max(12, int(round(size * scale)))
             try:
-                fonts[key] = ImageFont.truetype(path, size)
+                fonts[key] = ImageFont.truetype(path, scaled)
             except OSError:
                 fonts[key] = ImageFont.load_default()
         self.fonts = fonts
@@ -84,12 +91,16 @@ class KinNovelApp:
         for protocol in protocols:
             try:
                 kwargs = {"protocol": protocol} if protocol else {}
-                if self.screen.output.initialization(fb_path, **kwargs):
+                if not self.screen.output.initialization(fb_path, **kwargs):
+                    continue
+                if self.screen.output.probe():
                     initialized = True
                     self.log("[屏幕] 输出协议: " + protocol)
                     break
+                self.log("[屏幕] %s 协议探测失败,尝试下一个" % protocol)
             except Exception as exc:
                 self.log("[屏幕] %s 初始化异常: %s" % (protocol, exc))
+            self.screen.output.close()
         if not initialized:
             raise RuntimeError("framebuffer 初始化失败")
         width, height = self.screen.output.resolution
@@ -133,13 +144,23 @@ class KinNovelApp:
 
     def run(self):
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = os.path.join(LOG_DIR, "kinnovel.log")
         try:
-            self._log_file = open(os.path.join(LOG_DIR, "kinnovel.log"), "a", encoding="utf-8")
+            if os.path.getsize(log_path) > 1024 * 1024:
+                with open(log_path, "rb") as handle:
+                    handle.seek(-512 * 1024, os.SEEK_END)
+                    tail = handle.read()
+                with open(log_path, "wb") as handle:
+                    handle.write(tail)
+        except OSError:
+            pass
+        try:
+            self._log_file = open(log_path, "a", encoding="utf-8")
         except OSError:
             self._log_file = None
         self.log("[启动] KinNovel %s" % VERSION)
-        self.load_fonts()
         self.initialize_screen()
+        self.load_fonts()
         self.context = PageContext(self)
         self.build_pages()
         self.context.home()
@@ -175,6 +196,11 @@ class KinNovelApp:
             if self.screen and self.screen.input.device:
                 self.screen.input.device.ungrab()
                 self.screen.input.device.close()
+        except Exception:
+            pass
+        try:
+            if self.screen:
+                self.screen.output.close()
         except Exception:
             pass
         if self._log_file:

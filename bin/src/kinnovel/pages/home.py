@@ -81,6 +81,8 @@ def render(ctx, canvas):
 
 
 def handle(data, ctx):
+    if data.get("gesture") != "tap":
+        return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     for target, (rx, ry, width, height) in STATE["rects"].items():
         if rx <= x < rx + width and ry <= y < ry + height:
