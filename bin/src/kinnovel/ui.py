@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
-from .reader import split_font_runs, text_width
+from .reader import _INVISIBLE_RE, split_font_runs, text_width
 from .utils import battery_level, prune_cache
 
 
@@ -47,7 +47,7 @@ class Canvas:
         return text + suffix
 
     def wrap(self, text, font, max_width):
-        text = str(text or "")
+        text = _INVISIBLE_RE.sub("", str(text or ""))
         output = []
         for paragraph in text.splitlines() or [""]:
             current = ""
