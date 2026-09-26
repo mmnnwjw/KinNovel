@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest.mock import MagicMock
 
 from PIL import Image, ImageFont
 
@@ -96,6 +97,58 @@ class PageSmokeTests(unittest.TestCase):
             "announcements": announcements,
         }.items():
             self.context.register(name, module)
+
+    def _prime_reader(self, **params):
+        class Catalog:
+            @staticmethod
+            def render(_context, _canvas):
+                return None
+
+        self.context.register("catalog", Catalog)
+        document = MagicMock()
+        document.page_count = 10
+        document.pages = [[] for _ in range(10)]
+        document.first_anchor_on_page.return_value = ("./p[1]", 0)
+        book_id = 1
+        sort_num = 2
+        reader.STATE.update({
+            "book_id": book_id,
+            "sort_num": sort_num,
+            "data": {"Chapter": {"Title": "测试", "Chapters": ["一", "二"]}},
+            "doc": document,
+            "page": 5,
+            "signature": reader._signature(self.context, book_id, sort_num),
+            "loading": False,
+        })
+        self.context.page_name = "reader"
+        self.context.params = {
+            "book_id": book_id,
+            "sort_num": sort_num,
+            **params,
+        }
+        reader.enter(self.context)
+
+    def test_reader_fresh_intent_is_consumed_before_navigation_round_trip(self):
+        self._prime_reader(fresh=True)
+        self.assertEqual(reader.STATE["page"], 0)
+        self.assertNotIn("fresh", self.context.params)
+
+        reader.STATE["page"] = 5
+        self.context.navigate("catalog", book_id=1, sort_num=2)
+        self.context.back()
+        self.assertEqual(reader.STATE["page"], 5)
+        self.assertNotIn("fresh", self.context.params)
+
+    def test_reader_at_last_intent_is_consumed_before_navigation_round_trip(self):
+        self._prime_reader(at_last=True)
+        self.assertEqual(reader.STATE["page"], 9)
+        self.assertNotIn("at_last", self.context.params)
+
+        reader.STATE["page"] = 5
+        self.context.navigate("catalog", book_id=1, sort_num=2)
+        self.context.back()
+        self.assertEqual(reader.STATE["page"], 5)
+        self.assertNotIn("at_last", self.context.params)
 
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
