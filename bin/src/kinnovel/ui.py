@@ -341,13 +341,14 @@ class PageContext:
             )
         return image
 
-    def show(self):
+    def show(self, is_flashing=None):
         if self._closed:
             return
         with self._show_lock:
             image = self.render()
+            flashing = bool(self.config.get("page_flash")) if is_flashing is None else bool(is_flashing)
             try:
-                self.screen.output.show(image, is_flashing=bool(self.config.get("page_flash")))
+                self.screen.output.show(image, is_flashing=flashing)
             except OSError:
                 pass
 

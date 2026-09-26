@@ -16,6 +16,7 @@ from kinnovel import VERSION
 from kinnovel.api import ApiClient
 from kinnovel.config import Config, LOG_DIR, ensure_directories
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, settings, shelf
+from kinnovel.power import PowerManager
 from kinnovel.ui import ImageCache, PageContext
 
 from screen import Screen
@@ -48,6 +49,7 @@ class KinNovelApp:
         self.screen = None
         self.fonts = {}
         self.context = None
+        self.power = None
         self.running = True
         self._log_file = None
 
@@ -165,8 +167,15 @@ class KinNovelApp:
         self.build_pages()
         self.context.home()
         self.context.run_async("home", self.context.prune_cache)
+        try:
+            self.power = PowerManager(self)
+            self.power.start()
+        except Exception as exc:
+            self.log("[电源] 电源管理器启动失败: %s" % exc)
 
         def on_gesture(data):
+            if hasattr(self, "power") and self.power and self.power.is_sleeping:
+                return
             try:
                 result = self.context.handle(data)
                 if isinstance(result, str):
@@ -186,6 +195,11 @@ class KinNovelApp:
 
     def shutdown(self):
         self.log("[退出] 正在关闭")
+        if hasattr(self, "power") and self.power:
+            try:
+                self.power.stop()
+            except Exception:
+                pass
         try:
             if self.context:
                 self.context._closed = True
