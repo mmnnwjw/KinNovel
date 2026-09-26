@@ -1,7 +1,7 @@
 #!/bin/sh
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="$SCRIPT_DIR/../logs"
 LOG_FILE="$LOG_DIR/kinnovel.log"
 PAUSE_LIST="/tmp/kinnovel_paused_pids"
 FB_DEV="/dev/fb0"

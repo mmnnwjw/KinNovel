@@ -18,6 +18,26 @@ def _chapter_cache_path(book_id, sort_num, convert):
     return CACHE_DIR / "content" / (stable_cache_name(key) + ".json")
 
 
+def _progress_path(book_id, sort_num):
+    return CACHE_DIR / "progress" / ("%s-%s.json" % (
+        int(book_id), int(sort_num)))
+
+
+def _load_progress(book_id, sort_num):
+    progress = read_json(_progress_path(book_id, sort_num))
+    if not isinstance(progress, dict):
+        return None
+    path = progress.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        offset = max(0, int(progress.get("offset") or 0))
+        page = max(0, int(progress.get("page") or 0))
+    except (TypeError, ValueError):
+        return None
+    return {"path": path, "offset": offset, "page": page}
+
+
 def _load_chapter(ctx, book_id, sort_num):
     convert = ctx.config.get("convert")
     path = _chapter_cache_path(book_id, sort_num, convert)
@@ -144,7 +164,8 @@ def enter(ctx):
         return
     if (STATE["data"] and STATE["book_id"] == book_id and
             STATE["sort_num"] == sort_num and STATE["doc"]):
-        current_path = STATE["doc"].first_path_on_page(STATE["page"])
+        current_path, current_offset = STATE["doc"].first_anchor_on_page(
+            STATE["page"])
         STATE["loading"] = True
         ctx.show()
 
@@ -157,7 +178,8 @@ def enter(ctx):
             elif fresh:
                 STATE["page"] = 0
             else:
-                STATE["page"] = document.page_for_path(current_path)
+                STATE["page"] = document.page_for_path(
+                    current_path, current_offset)
             STATE["signature"] = signature
             STATE["last_saved"] = -1
             STATE["loading"] = False
@@ -189,14 +211,21 @@ def enter(ctx):
         if chapter.get("Font") and not document.font_resolver.custom_font_loaded:
             ctx.toast("章节字体加载失败，正文可能显示异常")
         position = response.get("ReadPosition") or {}
+        local = _load_progress(book_id, sort_num)
         if at_last:
             STATE["page"] = max(0, document.page_count - 1)
         elif fresh:
             STATE["page"] = 0
-        elif int(position.get("ChapterId") or 0) == int(chapter.get("Id") or 0):
-            STATE["page"] = document.page_for_path(position.get("Position") or "")
         else:
-            STATE["page"] = 0
+            server_page = None
+            if int(position.get("ChapterId") or 0) == int(chapter.get("Id") or 0):
+                server_page = document.page_for_path(position.get("Position") or "")
+            local_page = None
+            if local:
+                local_page = document.page_for_path(local["path"], local["offset"])
+            # 多端进度取最远页，避免本机旧缓存覆盖其他设备的新进度
+            candidates = [p for p in (server_page, local_page) if p is not None]
+            STATE["page"] = max(candidates) if candidates else 0
         chapters = (response.get("Chapter") or {}).get("Chapters") or []
         if chapters:
             _save_progress(ctx)
@@ -223,6 +252,17 @@ def _save_progress(ctx):
     chapter = (STATE["data"].get("Chapter") or {})
     book_id = int(chapter.get("BookId") or STATE["book_id"])
     chapter_id = int(chapter.get("Id") or 0)
+    path, offset = STATE["doc"].first_anchor_on_page(page)
+    try:
+        atomic_write(
+            _progress_path(book_id, STATE["sort_num"]),
+            json.dumps(
+                {"path": path, "offset": offset, "page": page},
+                ensure_ascii=False,
+            ),
+        )
+    except OSError:
+        pass
     xpath = STATE["doc"].first_path_on_page(page)
     ctx.run_async("reader", lambda: ctx.api.save_read_position(book_id, chapter_id, xpath),
                   lambda _: None, lambda _: None)

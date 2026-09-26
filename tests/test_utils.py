@@ -1,11 +1,14 @@
 import unittest
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
 from kinnovel.config import APP_DIR
+from kinnovel import utils
 from kinnovel.utils import atomic_write, read_json
 
 
@@ -22,6 +25,59 @@ class UtilityTests(unittest.TestCase):
                 path.unlink()
             except OSError:
                 pass
+
+    def test_atomic_write_is_serialized_per_path(self):
+        path = APP_DIR / "build" / "atomic-concurrent.bin"
+        contents = [
+            bytes([index]) * 65536
+            for index in range(8)
+        ]
+        barrier = threading.Barrier(len(contents))
+        errors = []
+
+        def worker(payload):
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(20):
+                    atomic_write(path, payload)
+            except BaseException as exc:
+                errors.append(exc)
+
+        try:
+            threads = [
+                threading.Thread(target=worker, args=(payload,))
+                for payload in contents
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertIn(path.read_bytes(), contents)
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            for temp in path.parent.glob(path.name + "*.tmp"):
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+
+    def test_atomic_write_removes_temp_file_on_error(self):
+        path = APP_DIR / "build" / "atomic-cleanup.bin"
+        with mock.patch.object(
+                utils.os, "replace",
+                side_effect=OSError("replace failed")):
+            with self.assertRaises(OSError):
+                atomic_write(path, b"payload")
+        self.assertFalse(path.exists())
+        self.assertEqual(
+            list(path.parent.glob(path.name + "*.tmp")),
+            [],
+        )
 
     def test_image_worker_isolated_conversion(self):
         source = APP_DIR / "build" / "worker-source.png"

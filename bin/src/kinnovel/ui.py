@@ -341,7 +341,11 @@ class PageContext:
             )
         return image
 
-    def show(self, is_flashing=None):
+    def show(self, is_flashing=None, force=False):
+        if not force:
+            power = getattr(self.app, "power", None)
+            if power is not None and getattr(power, "is_sleeping", False):
+                return
         if self._closed:
             return
         with self._show_lock:

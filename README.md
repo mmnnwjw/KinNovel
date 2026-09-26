@@ -19,7 +19,7 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：`0.3.2`
+当前版本：`0.4.0`
 
 ## 界面预览
 
@@ -73,7 +73,7 @@ Qt 或桌面环境。
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
 | 显示 | MTK 与 MXCFB EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
-| 电源与休眠 | 监听物理电源键与原生 LIPC 休眠/唤醒事件（goingToScreenSaver / outOfScreenSaver）；休眠自动让渡屏幕与触控，唤醒全刷无损恢复上次阅读界面 |
+| 电源与休眠 | 监听物理电源键与原生 LIPC 休眠/唤醒事件（goingToScreenSaver / outOfScreenSaver）；休眠自动让渡屏幕与触控，唤醒全刷无损恢复上次阅读界面；电源状态看门狗在事件丢失时自动恢复，避免卡死在休眠态 |
 
 ## 参考项目
 
@@ -149,7 +149,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 `KinNovel-v0.3.2.zip`。
+1. 下载 Release 中的 `KinNovel-v0.4.0.zip`。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 

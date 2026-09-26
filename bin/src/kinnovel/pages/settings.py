@@ -127,7 +127,7 @@ def _clear(ctx):
 
 
 ABOUT_LINES = [
-    "KinNovel 0.3.2",
+    "KinNovel 0.4.0",
     "运行于 Kindle 原生系统的轻书架客户端",
     "",
     "开发参考",

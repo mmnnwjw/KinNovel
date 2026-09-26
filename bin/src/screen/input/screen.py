@@ -15,7 +15,7 @@ PROP_DIRECT = frozenset((ecodes.INPUT_PROP_DIRECT,))
 
 # 设备识别
 def _has_touch_caps(dev):
-    #按能力位掩码判断设备是否为触控类
+    # 按能力位掩码判断设备是否为触控类
     caps = dev.capabilities(absinfo=True)
     try:
         props = set(dev.input_props())
@@ -23,48 +23,61 @@ def _has_touch_caps(dev):
         props = set()
     direct = bool(props & PROP_DIRECT)
 
-    abs_codes = set()
+    abs_items = {}
     for item in caps.get(ecodes.EV_ABS, []):
-        code = item[0] if isinstance(item, tuple) else item
-        abs_codes.add(code)
-    key_codes = set(caps.get(ecodes.EV_KEY, []))
+        if isinstance(item, tuple):
+            code = item[0]
+            info = item[1] if len(item) > 1 else None
+        else:
+            code = item
+            info = None
+        abs_items[code] = info
 
-    has_xy = TOUCH_ABS_REQUIRED <= abs_codes
-    has_mt = TOUCH_MT_REQUIRED <= abs_codes
-    has_btn_touch = ecodes.BTN_TOUCH in key_codes
+    has_xy = all(abs_items.get(code) is not None for code in TOUCH_ABS_REQUIRED)
+    has_mt = TOUCH_MT_REQUIRED <= set(abs_items)
 
     # 多点触控屏:绝对坐标 + MT 协议并具备触点坐标
     if has_xy and has_mt:
         return True
-    # 直接输入设备(坐标直接对应屏幕)且带绝对坐标或 BTN_TOUCH
-    if direct and (has_xy or has_btn_touch):
+    # 直接输入设备(坐标直接对应屏幕)且具备触点坐标
+    if direct and has_xy:
         return True
     return False
+
+
+def _probe_touch_device(path):
+    try:
+        dev = InputDevice(path)
+    except (OSError, PermissionError):
+        return None
+    try:
+        if not _has_touch_caps(dev):
+            return None
+        abs_items = {}
+        for item in dev.capabilities(absinfo=True).get(ecodes.EV_ABS, []):
+            if isinstance(item, tuple) and len(item) > 1:
+                code, info = item
+                abs_items[code] = info
+        absinfo_x = abs_items.get(ecodes.ABS_MT_POSITION_X)
+        absinfo_y = abs_items.get(ecodes.ABS_MT_POSITION_Y)
+        if absinfo_x is not None and absinfo_y is not None:
+            return path, dev.name, absinfo_x, absinfo_y
+        return None
+    finally:
+        try:
+            dev.close()
+        except OSError:
+            pass
+
 
 # 扫描设备
 def _detect_touch_device(fallback="/dev/input/event1"):
     for path in sorted(glob.glob("/dev/input/event*")):
-        try:
-            dev = InputDevice(path)
-        except (OSError, PermissionError):
-            continue
-        try:
-            if not _has_touch_caps(dev):
-                continue
-            abs_items = {}
-            for item in dev.capabilities(absinfo=True).get(ecodes.EV_ABS, []):
-                if isinstance(item, tuple):
-                    code, info = item
-                    abs_items[code] = info
-            absinfo_x = abs_items.get(ecodes.ABS_MT_POSITION_X)
-            absinfo_y = abs_items.get(ecodes.ABS_MT_POSITION_Y)
-            if absinfo_x is not None and absinfo_y is not None:
-                return path, dev.name, absinfo_x, absinfo_y
-        finally:
-            try:
-                dev.close()
-            except OSError:
-                pass
+        result = _probe_touch_device(path)
+        if result is not None:
+            return result
+    if fallback:
+        return _probe_touch_device(fallback)
     return None
 
 # 触控输入类
@@ -81,6 +94,8 @@ class ScreenInput:
         self.max_y = 0
         self.render_w = 0
         self.render_h = 0
+        self.parser = None
+
     # 初始化触摸屏
     def initialization(self, render_w=0, render_h=0, fallback="/dev/input/event1"):
         result = _detect_touch_device(fallback)
@@ -160,9 +175,17 @@ class ScreenInput:
             data.update(self._point(*gesture.start))
         return data
 
+    def reset_gesture_state(self):
+        parser = getattr(self, "parser", None)
+        if parser is not None:
+            try:
+                parser.reset()
+            except Exception:
+                pass
+
     # 事件循环
     def listen(self, on_gesture=None, on_down=None):
-        parser = MultiTouchParser(
+        self.parser = MultiTouchParser(
             config=GestureConfig(),
             on_down=on_down,
             on_gesture=lambda g: on_gesture(self.get(g)) if on_gesture else None,
@@ -171,6 +194,6 @@ class ScreenInput:
         try:
             assert self.device is not None
             for ev in self.device.read_loop():
-                parser.handle_event(ev)
+                self.parser.handle_event(ev)
         except KeyboardInterrupt:
             print("正在退出")

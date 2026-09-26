@@ -1,4 +1,4 @@
 """KinNovel: a LightNovelShelf client for jailbroken Kindle devices."""
 
-VERSION = "0.3.2"
-BUILD = 3
+VERSION = "0.4.0"
+BUILD = 4

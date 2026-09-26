@@ -174,7 +174,7 @@ class KinNovelApp:
             self.log("[电源] 电源管理器启动失败: %s" % exc)
 
         def on_gesture(data):
-            if hasattr(self, "power") and self.power and self.power.is_sleeping:
+            if self.power and self.power.is_sleeping:
                 return
             try:
                 result = self.context.handle(data)

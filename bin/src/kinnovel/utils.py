@@ -3,23 +3,60 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
 
+_ATOMIC_WRITE_LOCKS = {}
+_ATOMIC_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def _atomic_write_lock(path):
+    key = os.path.abspath(os.fspath(path))
+    with _ATOMIC_WRITE_LOCKS_GUARD:
+        lock = _ATOMIC_WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ATOMIC_WRITE_LOCKS[key] = lock
+        return lock
+
+
 def atomic_write(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
     mode = "wb" if isinstance(data, (bytes, bytearray)) else "w"
     kwargs = {} if "b" in mode else {"encoding": "utf-8"}
-    with temp.open(mode, **kwargs) as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp, path)
+    with _atomic_write_lock(path):
+        descriptor = None
+        temp = None
+        try:
+            descriptor, temp_name = tempfile.mkstemp(
+                dir=path.parent, prefix=path.name, suffix=".tmp")
+            temp = Path(temp_name)
+            handle = os.fdopen(descriptor, mode, **kwargs)
+            descriptor = None
+            with handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            temp = None
+        except BaseException:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if temp is not None:
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+            raise
 
 
 def read_json(path, default=None):
