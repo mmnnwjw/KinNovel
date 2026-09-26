@@ -153,6 +153,9 @@ def enter(ctx):
     sort_num = int(ctx.params.get("sort_num") or 1)
     fresh = bool(ctx.params.get("fresh"))
     at_last = bool(ctx.params.get("at_last"))
+    # 一次性意图，消费后移除，防止从目录/设置返回时重置页码
+    ctx.params.pop("fresh", None)
+    ctx.params.pop("at_last", None)
     signature = _signature(ctx, book_id, sort_num)
     if (STATE["data"] and STATE["book_id"] == book_id and
             STATE["sort_num"] == sort_num and STATE["signature"] == signature):
