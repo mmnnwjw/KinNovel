@@ -57,12 +57,13 @@ class PreviewApp:
         self.config = PreviewConfig(Config())
         self.api = api
         self.images = ImageCache(maximum=8)
+        # 与 app.load_fonts 相同的分辨率缩放逻辑
+        scale = max(0.75, min(1.15, min(SIZE[0] / 1072, SIZE[1] / 1448)))
         self.fonts = {
-            "hero": ImageFont.truetype(str(_local_font()), 82),
-            "title": ImageFont.truetype(str(_local_font()), 50),
-            "body": ImageFont.truetype(str(_local_font()), 38),
-            "small": ImageFont.truetype(str(_local_font()), 31),
-            "tiny": ImageFont.truetype(str(_local_font()), 25),
+            key: ImageFont.truetype(str(_local_font()), max(12, int(round(size * scale))))
+            for key, size in (
+                ("hero", 82), ("title", 50), ("body", 38), ("small", 31), ("tiny", 25)
+            )
         }
 
     def stop(self):
