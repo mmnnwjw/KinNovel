@@ -2,11 +2,13 @@
   <img src="https://img.shields.io/badge/Platform-Kindle-111111?style=for-the-badge" alt="Kindle">
   <img src="https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.14">
   <img src="https://img.shields.io/badge/License-GPLv3-2C7A7B?style=for-the-badge" alt="GPLv3">
+  <img src="https://img.shields.io/badge/Vibe-Coded-8A2BE2?style=for-the-badge" alt="Vibe Coded">
 </p>
 
 <p align="center">
   <strong>KinNovel</strong><br>
-  在已越狱 Kindle 的原生系统上阅读轻书架
+  在已越狱 Kindle 的原生系统上阅读轻书架<br>
+  所有代码都是他们写的：DeepSeek V4.1 Flash、Kimi K3、GLM 5.3
 </p>
 
 ---
@@ -17,7 +19,7 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：`0.3.0`
+当前版本：`0.3.1`
 
 ## 界面预览
 
@@ -145,7 +147,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 `KinNovel-v0.3.0.zip`。
+1. 下载 Release 中的 `KinNovel-v0.3.1.zip`。
 2. 解压得到 `KinNovel` 文件夹。
 3. 使用 USB 或 SFTP 复制到 Kindle：
 
