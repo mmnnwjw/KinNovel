@@ -80,6 +80,17 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(lines[0], "汉汉汉汉")
         self.assertTrue(lines[1].startswith("“"))
 
+    def test_invisible_format_chars_are_stripped(self):
+        blocks = extract_blocks("<p>破折​号﻿测试­文本⁠。</p>")
+        self.assertEqual(blocks[0].text, "破折号测试文本。")
+
+    def test_notdef_box_is_not_treated_as_available(self):
+        from kinnovel.reader import glyph_available
+        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 32)
+        self.assertTrue(glyph_available(font, "中"))
+        # 超出 Unicode 范围的探测字符必然映射到 .notdef
+        self.assertFalse(glyph_available(font, "\U0010FFFF"))
+
     def test_missing_glyph_falls_back_per_character(self):
         class Mask:
             def __init__(self, visible):

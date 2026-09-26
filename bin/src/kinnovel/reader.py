@@ -84,6 +84,10 @@ def _relative_xpath(element, root):
     return "./" + "/".join(steps) if steps else "."
 
 
+# 零宽/格式字符:在浏览器中不渲染,直接剥除,避免回退字体画出方框
+_INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\ufeff\u00ad\u2060]")
+
+
 def _plain_text(element):
     parts = []
     for node in element.iter():
@@ -94,7 +98,8 @@ def _plain_text(element):
             parts.append(node.text)
         if node.tail:
             parts.append(node.tail)
-    return re.sub(r"[ \t\r\f\v]+", " ", "".join(parts)).strip()
+    text = _INVISIBLE_RE.sub("", "".join(parts))
+    return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
 
 
 def extract_blocks(content, base_url=""):
@@ -269,6 +274,22 @@ def text_width(draw, text, font):
 
 _GLYPH_CACHE = {}
 _GLYPH_CACHE_LIMIT = 40000
+_NOTDEF_BYTES = {}
+
+
+def _char_bitmap_bytes(font, character):
+    from PIL import Image, ImageDraw
+    size = int(getattr(font, "size", 48) or 48)
+    image = Image.new("L", (max(8, size * 2), max(8, int(size * 1.6))), 0)
+    ImageDraw.Draw(image).text((0, 0), character, font=font, fill=255)
+    return image.tobytes()
+
+
+def _notdef_bytes(font):
+    key = id(font)
+    if key not in _NOTDEF_BYTES:
+        _NOTDEF_BYTES[key] = _char_bitmap_bytes(font, "\U0010FFFF")
+    return _NOTDEF_BYTES[key]
 
 
 def glyph_available(font, character):
@@ -281,7 +302,16 @@ def glyph_available(font, character):
     if cached is not None:
         return cached
     try:
-        available = bool(font.getmask(character).getbbox())
+        mask = font.getmask(character)
+        available = bool(mask.getbbox())
+        if available:
+            try:
+                if _char_bitmap_bytes(font, character) == _notdef_bytes(font):
+                    # 缺字时部分 FreeType 渲染出带轮廓的 notdef 方框(如 STHeiti),
+                    # 与 .notdef 位图一致即视为缺字,交给回退链处理
+                    available = False
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
     except (AttributeError, OSError, ValueError):
         available = False
     if len(_GLYPH_CACHE) >= _GLYPH_CACHE_LIMIT:

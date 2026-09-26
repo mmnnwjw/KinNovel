@@ -285,6 +285,9 @@ class SignalRClient:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
+            if exc.code >= 500:
+                # 5xx 是临时性服务端错误,交给 invoke 的重连重试路径
+                raise TransportError("Hub 协商失败 (%s)" % exc.code)
             raise ApiError(body[:300] or ("Hub 协商失败 (%s)" % exc.code), exc.code)
         except OSError as exc:
             raise TransportError("Hub 协商网络错误: %s" % exc)
