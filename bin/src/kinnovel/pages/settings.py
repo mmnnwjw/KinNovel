@@ -64,7 +64,7 @@ def render(ctx, canvas):
         STATE["rects"][(action + "_up", 0)] = plus_rect
         y += height + gap
 
-    row("服务器（配置文件）", ctx.api.server, None)
+    row("服务器", ctx.api.server, None)
     stepper_row("正文字号", str(ctx.config.get("font_size")), "font")
     stepper_row("行距", "%.2f" % float(ctx.config.get("line_spacing")), "spacing")
     row("夜间模式", "开" if ctx.config.get("night_mode") else "关", "night")
