@@ -149,7 +149,7 @@ Qt 或桌面环境。
 
 1. 下载 Release 中的 `KinNovel-v0.3.1.zip`。
 2. 解压得到 `KinNovel` 文件夹。
-3. 使用 USB 或 SFTP 复制到 Kindle：
+3. 复制到 Kindle 的 `extensions` 目录：
 
 ```text
 /mnt/us/extensions/kinnovel/
@@ -165,13 +165,7 @@ Qt 或桌面环境。
 /mnt/us/extensions/kinnovel/menu.json
 ```
 
-5. 从 SSH 设置执行权限：
-
-```sh
-chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
-```
-
-6. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
+5. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
 
 ### SSH 安装
 
@@ -419,8 +413,15 @@ KOReader 路径。
 
 ### 无法启动
 
+确认 Python 3.14 正常工作：
+
 ```sh
 /mnt/us/python3/bin/python3.14 --version
+```
+
+若因跨平台传输丢失了执行权限导致点击无反应，可尝试补全权限：
+
+```sh
 chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 ```
 
