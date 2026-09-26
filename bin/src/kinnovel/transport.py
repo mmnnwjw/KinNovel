@@ -15,6 +15,10 @@ import zlib
 from collections import deque
 
 
+MAX_WEBSOCKET_MESSAGE_BYTES = 32 * 1024 * 1024
+MAX_SIGNALR_RECORD_BYTES = 64 * 1024 * 1024
+
+
 class TransportError(RuntimeError):
     pass
 
@@ -192,7 +196,8 @@ class WebSocketConnection:
                 length = struct.unpack("!H", self._recv_exact(2))[0]
             elif length == 127:
                 length = struct.unpack("!Q", self._recv_exact(8))[0]
-            if length > 32 * 1024 * 1024:
+            if length > MAX_WEBSOCKET_MESSAGE_BYTES:
+                self.close()
                 raise TransportError("WebSocket 消息超过 32MB")
             mask = self._recv_exact(4) if masked else None
             payload = self._recv_exact(length) if length else b""
@@ -209,8 +214,14 @@ class WebSocketConnection:
             if opcode in (0x1, 0x2):
                 message_opcode = opcode
                 fragments = bytearray(payload)
+                if len(fragments) > MAX_WEBSOCKET_MESSAGE_BYTES:
+                    self.close()
+                    raise TransportError("WebSocket 消息超过 32MB")
             elif opcode == 0x0 and message_opcode is not None:
                 fragments.extend(payload)
+                if len(fragments) > MAX_WEBSOCKET_MESSAGE_BYTES:
+                    self.close()
+                    raise TransportError("WebSocket 消息超过 32MB")
             else:
                 continue
             if fin:
@@ -341,6 +352,9 @@ class SignalRClient:
     def _receive_messages(self, socket_):
         _, data = socket_.receive()
         self._record_buffer.extend(data)
+        if len(self._record_buffer) > MAX_SIGNALR_RECORD_BYTES:
+            self._close_locked()
+            raise TransportError("SignalR 记录超过 64MB")
         separator = self.RECORD_SEPARATOR.encode("ascii")
         messages = []
         while True:

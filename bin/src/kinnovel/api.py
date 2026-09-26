@@ -199,6 +199,7 @@ class ApiClient:
             self.session.set_many({"Token": "", "TokenUpdatedAt": 0})
             if not self.refresh_access_token():
                 raise
+            self.hub.close()
             return self.hub.invoke(method, params or {})
 
     # Public catalogue methods

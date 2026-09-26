@@ -2,7 +2,21 @@
 import time
 from dataclasses import dataclass
 
-from evdev import ecodes
+try:
+    from evdev import ecodes
+except ImportError:
+    class _FallbackEcodes:
+        EV_KEY = 0x01
+        EV_ABS = 0x03
+        ABS_X = 0x00
+        ABS_Y = 0x01
+        ABS_MT_SLOT = 0x2f
+        ABS_MT_POSITION_X = 0x35
+        ABS_MT_POSITION_Y = 0x36
+        ABS_MT_TRACKING_ID = 0x39
+        BTN_TOUCH = 0x14a
+
+    ecodes = _FallbackEcodes()
 
 
 @dataclass
@@ -49,6 +63,13 @@ class MultiTouchParser:
         self.slots = {}
         self.current_slot = 0
         self.tracking_to_slot = {}
+        self.btn_touch = 0
+
+    def reset(self):
+        """Discard all in-progress touch and gesture state."""
+        self.slots.clear()
+        self.current_slot = 0
+        self.tracking_to_slot.clear()
         self.btn_touch = 0
 
     def _scale(self, x, y):

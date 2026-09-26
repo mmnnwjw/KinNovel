@@ -23,6 +23,8 @@ except ImportError:
 
 DEFAULT_PAUSE_FILE = Path("/tmp/kinnovel_paused_pids")
 FB_DEV = "/dev/fb0"
+SIGCONT = getattr(signal, "SIGCONT", 18)
+SIGSTOP = getattr(signal, "SIGSTOP", 19)
 
 
 def find_fb_users(fb_dev=FB_DEV):
@@ -129,7 +131,20 @@ class PowerManager:
         else:
             self.log("lipc-wait-event 不可用，跳过 LIPC 监听")
 
-        # 2. Start hardware power key listeners
+        # 2. Start sleep watchdog if powerd state can be queried
+        if shutil.which("lipc-get-prop"):
+            t_watchdog = threading.Thread(
+                target=self._sleep_watchdog_loop,
+                daemon=True,
+                name="powerd-sleep-watchdog",
+            )
+            t_watchdog.start()
+            self._threads.append(t_watchdog)
+            self.log("已启动电源状态休眠看门狗")
+        else:
+            self.log("lipc-get-prop 不可用，跳过休眠看门狗")
+
+        # 3. Start hardware power key listeners
         power_paths = find_power_device_paths()
         if power_paths:
             for p_path in power_paths:
@@ -149,6 +164,10 @@ class PowerManager:
                 self._lipc_proc.terminate()
             except Exception:
                 pass
+            try:
+                self._lipc_proc.wait(timeout=2)
+            except Exception:
+                pass
         for dev in self._power_devices:
             try:
                 dev.close()
@@ -159,9 +178,76 @@ class PowerManager:
             pids = self._tracked_pids or read_paused_pids(self.pause_file)
             for pid in pids:
                 try:
-                    os.kill(pid, signal.SIGCONT)
+                    os.kill(pid, SIGCONT)
                 except OSError:
                     pass
+        current = threading.current_thread()
+        for thread in list(self._threads):
+            if thread is current:
+                continue
+            try:
+                thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+    def _read_powerd_state(self):
+        """Return the current powerd state, or None when it cannot be read."""
+        try:
+            completed = subprocess.run(
+                ["lipc-get-prop", "com.lab126.powerd", "state"],
+                timeout=2.0,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except Exception:
+            return None
+        if completed.returncode != 0:
+            return None
+        return (completed.stdout or "").strip()
+
+    @staticmethod
+    def _is_sleep_state(state):
+        value = str(state or "").lower()
+        return "screensaver" in value or "suspend" in value
+
+    def _sleep_watchdog_check(self, consecutive_active):
+        """Check one powerd sample and return the updated active streak."""
+        state = self._read_powerd_state()
+        if state is None:
+            return consecutive_active
+        if self._is_sleep_state(state):
+            return 0
+
+        consecutive_active += 1
+        if consecutive_active == 1:
+            self.log(f"休眠中 powerd state={state!r}，补发一次物理电源键请求屏保")
+            try:
+                subprocess.run(
+                    ["lipc-set-prop", "-i", "com.lab126.powerd", "powerButton", "1"],
+                    timeout=2.0,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                self.log(f"补发电源键请求失败: {exc}")
+        elif consecutive_active >= 2:
+            self.log(f"休眠中 powerd state 连续两次为 {state!r}，执行自愈恢复")
+            self.handle_resume()
+            return 0
+        return consecutive_active
+
+    def _sleep_watchdog_loop(self):
+        """Nudge or recover from a missed screen-saver transition."""
+        consecutive_active = 0
+        while not self._stopped:
+            time.sleep(2.0)
+            if self._stopped:
+                break
+            if not self.is_sleeping:
+                consecutive_active = 0
+                continue
+            consecutive_active = self._sleep_watchdog_check(consecutive_active)
 
     def _lipc_event_loop(self):
         """Listen to com.lab126.powerd state change events."""
@@ -199,53 +285,60 @@ class PowerManager:
         """Read evdev events from a power button device."""
         if not InputDevice or not ecodes:
             return
-        try:
-            dev = InputDevice(device_path)
-            self._power_devices.append(dev)
-            for event in dev.read_loop():
-                if self._stopped:
-                    break
-                if event.type == ecodes.EV_KEY:
-                    is_power = (event.code == ecodes.KEY_POWER or
-                                event.code == getattr(ecodes, "KEY_POWER2", -1))
-                    # value == 1 means key pressed down
-                    if is_power and event.value == 1:
-                        now = time.monotonic()
-                        if now - self._last_power_press_at < 0.8:
-                            continue
-                        self._last_power_press_at = now
-                        self.log(f"物理按键按下: code={event.code}")
-                        self.handle_power_key()
-        except Exception as exc:
-            if not self._stopped:
-                self.log(f"电源键设备 {device_path} 监听结束: {exc}")
+        while not self._stopped:
+            dev = None
+            try:
+                dev = InputDevice(device_path)
+                self._power_devices.append(dev)
+                for event in dev.read_loop():
+                    if self._stopped:
+                        break
+                    if event.type == ecodes.EV_KEY:
+                        is_power = (event.code == ecodes.KEY_POWER or
+                                    event.code == getattr(ecodes, "KEY_POWER2", -1))
+                        # value == 1 means key pressed down
+                        if is_power and event.value == 1:
+                            now = time.monotonic()
+                            if now - self._last_power_press_at < 0.8:
+                                continue
+                            self._last_power_press_at = now
+                            self.log(f"物理按键按下: code={event.code}")
+                            self.handle_power_key()
+            except Exception as exc:
+                if not self._stopped:
+                    self.log(f"电源键设备 {device_path} 监听异常: {exc}, 3秒后重试")
+                    time.sleep(3.0)
+            finally:
+                if dev is not None:
+                    try:
+                        self._power_devices.remove(dev)
+                    except ValueError:
+                        pass
+                    try:
+                        dev.close()
+                    except Exception:
+                        pass
 
     def handle_power_key(self):
         """Handle physical power key press."""
         with self._lock:
             if self.is_sleeping:
-                # If LIPC is active, wait for native outOfScreenSaver event
-                if not shutil.which("lipc-wait-event"):
+                if not shutil.which("lipc-get-prop"):
                     self.log("休眠中收到电源键 (无 LIPC)，执行唤醒流程")
                     self._resume_locked()
                 else:
-                    self.log("休眠中收到电源键，等待系统 outOfScreenSaver 事件")
+                    state = self._read_powerd_state()
+                    if state is None:
+                        self.log("休眠中收到电源键，无法查询系统状态，保守等待")
+                    elif self._is_sleep_state(state):
+                        self.log(f"休眠中收到电源键，powerd state={state!r}，继续等待唤醒事件")
+                    else:
+                        self.log(f"休眠中收到电源键，powerd state={state!r}，直接执行恢复")
+                        self._resume_locked()
                 return
 
             self.log("收到电源键，执行休眠前置流程")
             self._suspend_locked()
-
-        # Let system know we are ready to sleep
-        if shutil.which("lipc-set-prop"):
-            try:
-                subprocess.run(
-                    ["lipc-set-prop", "com.lab126.powerd", "state", "screenSaver"],
-                    timeout=2.0,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
 
     def handle_suspend(self):
         """Handle system suspend (screen saver) trigger."""
@@ -258,6 +351,10 @@ class PowerManager:
         """Perform suspend operations with lock held."""
         self.is_sleeping = True
         self.log("正在挂起应用，释放触摸屏并恢复系统 UI 进程...")
+        try:
+            self.app.screen.input.reset_gesture_state()
+        except Exception:
+            pass
 
         # 1. Ungrab touchscreen device so native lockscreen can receive input
         try:
@@ -274,7 +371,7 @@ class PowerManager:
 
         for pid in pids:
             try:
-                os.kill(pid, signal.SIGCONT)
+                os.kill(pid, SIGCONT)
             except OSError:
                 pass
         self.log(f"已向 {len(pids)} 个系统进程发送 SIGCONT")
@@ -289,6 +386,10 @@ class PowerManager:
     def _resume_locked(self):
         """Perform resume operations with lock held."""
         self.log("正在恢复应用，准备重新接管屏幕...")
+        try:
+            self.app.screen.input.reset_gesture_state()
+        except Exception:
+            pass
 
         # 1. Small delay to let Kindle kernel / powerd restore backlight & power
         time.sleep(0.35)
@@ -298,7 +399,7 @@ class PowerManager:
         paused = []
         for pid in pids:
             try:
-                os.kill(pid, signal.SIGSTOP)
+                os.kill(pid, SIGSTOP)
                 paused.append(pid)
             except OSError:
                 pass
@@ -318,7 +419,7 @@ class PowerManager:
         try:
             if self.app.context:
                 self.log("正在以防残影模式重绘当前界面...")
-                self.app.context.show(is_flashing=True)
+                self.app.context.show(is_flashing=True, force=True)
         except Exception as exc:
             self.log(f"重绘当前界面失败: {exc}")
 

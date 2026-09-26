@@ -11,6 +11,9 @@ from kinnovel.power import (
     write_paused_pids,
 )
 
+SIGCONT = getattr(signal, "SIGCONT", 18)
+SIGSTOP = getattr(signal, "SIGSTOP", 19)
+
 
 class TestPowerManagement(unittest.TestCase):
     def setUp(self):
@@ -51,8 +54,8 @@ class TestPowerManagement(unittest.TestCase):
             # Verify ungrab was called
             app.screen.input.device.ungrab.assert_called_once()
             # Verify SIGCONT was sent to pids
-            mock_kill.assert_any_call(10001, signal.SIGCONT)
-            mock_kill.assert_any_call(10002, signal.SIGCONT)
+            mock_kill.assert_any_call(10001, SIGCONT)
+            mock_kill.assert_any_call(10002, SIGCONT)
 
             # Redundant suspend should be no-op
             app.screen.input.device.ungrab.reset_mock()
@@ -65,12 +68,13 @@ class TestPowerManagement(unittest.TestCase):
             # Verify sleep delay
             mock_sleep.assert_called_with(0.35)
             # Verify SIGSTOP was sent to pids
-            mock_kill.assert_any_call(10001, signal.SIGSTOP)
-            mock_kill.assert_any_call(10002, signal.SIGSTOP)
+            mock_kill.assert_any_call(10001, SIGSTOP)
+            mock_kill.assert_any_call(10002, SIGSTOP)
             # Verify grab was called
             app.screen.input.device.grab.assert_called_once()
             # Verify context.show was called with is_flashing=True
-            app.context.show.assert_called_once_with(is_flashing=True)
+            app.context.show.assert_called_once_with(is_flashing=True, force=True)
+            self.assertEqual(app.screen.input.reset_gesture_state.call_count, 2)
 
             # Redundant resume should be no-op
             app.context.show.reset_mock()
@@ -82,33 +86,74 @@ class TestPowerManagement(unittest.TestCase):
         mgr = PowerManager(app, pause_file=self.pause_file)
 
         with patch.object(mgr, "_suspend_locked") as mock_suspend, \
-             patch("shutil.which", return_value="/usr/bin/lipc-set-prop"), \
              patch("subprocess.run") as mock_run:
             mgr.handle_power_key()
             mock_suspend.assert_called_once()
-            mock_run.assert_called_once_with(
-                ["lipc-set-prop", "com.lab126.powerd", "state", "screenSaver"],
-                timeout=2.0,
-                stdout=unittest.mock.ANY,
-                stderr=unittest.mock.ANY,
-            )
+            mock_run.assert_not_called()
 
-    def test_power_key_press_when_sleeping(self):
+    def test_power_key_press_when_sleeping_state_is_active(self):
         app = MagicMock()
         mgr = PowerManager(app, pause_file=self.pause_file)
         mgr.is_sleeping = True
 
-        # When lipc-wait-event is available, it should wait for system event
         with patch.object(mgr, "_resume_locked") as mock_resume, \
-             patch("shutil.which", return_value="/usr/bin/lipc-wait-event"):
+             patch("shutil.which", return_value="/usr/bin/lipc-get-prop"), \
+             patch.object(mgr, "_read_powerd_state", return_value="active"):
+            mgr.handle_power_key()
+            mock_resume.assert_called_once()
+
+    def test_power_key_press_when_sleeping_waits_in_screen_saver(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        mgr.is_sleeping = True
+
+        with patch.object(mgr, "_resume_locked") as mock_resume, \
+             patch("shutil.which", return_value="/usr/bin/lipc-get-prop"), \
+             patch.object(mgr, "_read_powerd_state", return_value="screenSaver"):
             mgr.handle_power_key()
             mock_resume.assert_not_called()
 
-        # When lipc-wait-event is not available, it should resume directly
+    def test_power_key_press_when_sleeping_query_failure_waits(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        mgr.is_sleeping = True
+
         with patch.object(mgr, "_resume_locked") as mock_resume, \
-             patch("shutil.which", return_value=None):
+             patch("shutil.which", return_value="/usr/bin/lipc-get-prop"), \
+             patch.object(mgr, "_read_powerd_state", return_value=None):
             mgr.handle_power_key()
-            mock_resume.assert_called_once()
+            mock_resume.assert_not_called()
+
+    def test_sleep_watchdog_first_active_sends_power_button(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        mgr.is_sleeping = True
+
+        with patch.object(mgr, "_read_powerd_state", return_value="active"), \
+             patch("subprocess.run") as mock_run:
+            streak = mgr._sleep_watchdog_check(0)
+
+        self.assertEqual(streak, 1)
+        mock_run.assert_called_once_with(
+            ["lipc-set-prop", "-i", "com.lab126.powerd", "powerButton", "1"],
+            timeout=2.0,
+            stdout=unittest.mock.ANY,
+            stderr=unittest.mock.ANY,
+        )
+
+    def test_sleep_watchdog_second_active_resumes(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        mgr.is_sleeping = True
+
+        with patch.object(mgr, "_read_powerd_state", return_value="active"), \
+             patch.object(mgr, "handle_resume") as mock_resume, \
+             patch("subprocess.run") as mock_run:
+            streak = mgr._sleep_watchdog_check(1)
+
+        self.assertEqual(streak, 0)
+        mock_resume.assert_called_once()
+        mock_run.assert_not_called()
 
     def test_stop_cleans_up_if_sleeping(self):
         app = MagicMock()
@@ -121,7 +166,22 @@ class TestPowerManagement(unittest.TestCase):
         with patch("os.kill") as mock_kill:
             mgr.stop()
             self.assertTrue(mgr._stopped)
-            mock_kill.assert_called_once_with(10001, signal.SIGCONT)
+            mock_kill.assert_called_once_with(10001, SIGCONT)
+
+    def test_stop_terminates_waits_and_joins_threads(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        lipc_proc = MagicMock()
+        lipc_proc.poll.return_value = None
+        listener = MagicMock()
+        mgr._lipc_proc = lipc_proc
+        mgr._threads = [listener]
+
+        mgr.stop()
+
+        lipc_proc.terminate.assert_called_once()
+        lipc_proc.wait.assert_called_once_with(timeout=2)
+        listener.join.assert_called_once_with(timeout=1.0)
 
 
 if __name__ == "__main__":

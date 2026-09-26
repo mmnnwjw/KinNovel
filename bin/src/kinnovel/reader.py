@@ -28,6 +28,7 @@ class Block:
     text: str = ""
     level: int = 0
     path: str = "."
+    offset: int = 0
     source_url: str = ""
     footnotes: list = field(default_factory=list)
 
@@ -88,6 +89,11 @@ def _relative_xpath(element, root):
 _INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\ufeff\u00ad\u2060]")
 
 
+def _clean_text(text):
+    text = _INVISIBLE_RE.sub("", str(text or ""))
+    return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
+
+
 def _plain_text(element):
     parts = []
     for node in element.iter():
@@ -98,41 +104,63 @@ def _plain_text(element):
             parts.append(node.text)
         if node.tail:
             parts.append(node.tail)
-    text = _INVISIBLE_RE.sub("", "".join(parts))
-    return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
+    return _clean_text("".join(parts))
 
 
 def extract_blocks(content, base_url=""):
     root = sanitize_html(content)
     blocks = []
-    seen = set()
-    for element in root.iter():
-        if not isinstance(element.tag, str):
-            continue
-        if element is root:
-            continue
-        tag = element.tag.lower()
-        if element in seen:
-            continue
-        if tag == "img":
-            src = absolute_url(base_url, element.get("src") or element.get("data-system-image-url") or "")
-            if src:
-                blocks.append(Block("image", source_url=src, path=_relative_xpath(element, root)))
-            seen.add(element)
-            continue
-        if tag not in BLOCK_TAGS:
-            continue
-        if any(isinstance(child.tag, str) and child.tag.lower() in BLOCK_TAGS
-               for child in element):
-            continue
-        direct_text = _plain_text(element)
-        if not direct_text:
-            continue
-        kind = "heading" if tag in HEADING_TAGS else ("footnote" if tag == "aside" else "text")
-        level = int(tag[1]) if kind == "heading" else 0
-        blocks.append(Block(kind, text=direct_text, level=level,
-                            path=_relative_xpath(element, root)))
-        seen.add(element)
+
+    def flush_text(buffer, offset, kind, level, path):
+        text = _clean_text("".join(buffer))
+        del buffer[:]
+        if not text:
+            return offset
+        blocks.append(Block(kind, text=text, level=level, path=path,
+                            offset=offset))
+        return offset + len(text)
+
+    def append_node(node, kind, level, path, buffer, offset):
+        if node.text:
+            buffer.append(node.text)
+        for child in node:
+            if not isinstance(child.tag, str):
+                continue
+            tag = child.tag.lower()
+            if tag == "img":
+                offset = flush_text(buffer, offset, kind, level, path)
+                src = absolute_url(
+                    base_url,
+                    child.get("src") or child.get("data-system-image-url") or "",
+                )
+                if src:
+                    blocks.append(Block(
+                        "image", path=_relative_xpath(child, root),
+                        offset=offset, source_url=src,
+                    ))
+            elif tag == "br":
+                buffer.append("\n")
+            elif tag in BLOCK_TAGS:
+                offset = flush_text(buffer, offset, kind, level, path)
+                child_kind = ("heading" if tag in HEADING_TAGS else
+                              ("footnote" if tag == "aside" else "text"))
+                child_level = int(tag[1]) if child_kind == "heading" else 0
+                child_path = _relative_xpath(child, root)
+                child_offset = append_node(
+                    child, child_kind, child_level,
+                    child_path, buffer, 0,
+                )
+                flush_text(
+                    buffer, child_offset, child_kind, child_level, child_path)
+            else:
+                offset = append_node(child, kind, level, path, buffer, offset)
+            if child.tail:
+                buffer.append(child.tail)
+        return offset
+
+    buffer = []
+    offset = append_node(root, "text", 0, ".", buffer, 0)
+    flush_text(buffer, offset, "text", 0, ".")
     if not blocks:
         text = _plain_text(root)
         if text:
@@ -202,7 +230,18 @@ def normalize_font(path):
                 return None
             payload = data[table_offset:table_offset + compressed_length]
             if compressed_length < original_length:
-                payload = zlib.decompress(payload)
+                decompressor = zlib.decompressobj()
+                payload = decompressor.decompress(payload, original_length + 1)
+                if len(payload) > original_length:
+                    return None
+                if decompressor.unconsumed_tail:
+                    remaining = original_length + 1 - len(payload)
+                    payload += decompressor.decompress(
+                        decompressor.unconsumed_tail, remaining)
+                if len(payload) > original_length:
+                    return None
+                remaining = original_length + 1 - len(payload)
+                payload += decompressor.flush(max(1, remaining))
             if len(payload) != original_length:
                 return None
             tables.append((tag, checksum, payload))
@@ -212,17 +251,17 @@ def normalize_font(path):
         range_shift = num_tables * 16 - search_range
         header = struct.pack(">IHHHH", struct.unpack(">I", flavor)[0], num_tables,
                              search_range, entry_selector, range_shift)
-        offset = 12 + num_tables * 16
+        body = bytearray()
         records = []
-        payloads = []
         for tag, checksum, payload in tables:
-            records.append(struct.pack(">4sIII", tag, checksum, offset, len(payload)))
-            payloads.append(payload)
-            offset += len(payload)
-            offset += (-offset) % 4
+            table_offset = 12 + num_tables * 16 + len(body)
+            records.append(struct.pack(
+                ">4sIII", tag, checksum, table_offset, len(payload)))
+            body.extend(payload)
+            body.extend(b"\0" * ((-len(body)) % 4))
         suffix = ".otf" if flavor == b"OTTO" else ".ttf"
         target = path.with_suffix(path.suffix + suffix)
-        atomic_write(target, header + b"".join(records) + b"".join(payloads))
+        atomic_write(target, header + b"".join(records) + bytes(body))
         return target
     except (OSError, ValueError, struct.error, zlib.error):
         return None
@@ -344,46 +383,105 @@ _LINE_START_FORBIDDEN = "，。、；：？！,.!?;:'\")]】》”’%…—·"
 _LINE_END_FORBIDDEN = "（《【「『“‘([{"
 
 
-def wrap_line(draw, text, font, max_width, fallback_font=None,
-              remove_trailing_spaces=True):
+def _wrap_line_parts(draw, text, font, max_width, fallback_font=None,
+                     remove_trailing_spaces=True):
     text = str(text or "").replace("\u00a0", " ")
     if not text:
-        return [""]
+        return [("", 0)]
     lines = []
     current = ""
+    current_start = 0
     current_width = 0.0
-    for character in text:
+
+    def measure(value):
+        return sum(
+            text_width(draw, character,
+                       char_font(font, fallback_font, character))
+            for character in value
+        )
+
+    def rendered(value):
+        return value.rstrip() if remove_trailing_spaces else value
+
+    index = 0
+    while index < len(text):
+        character = text[index]
         if character == "\n":
-            lines.append(current.rstrip() if remove_trailing_spaces else current)
+            lines.append((rendered(current), current_start))
             current = ""
             current_width = 0.0
+            index += 1
+            current_start = index
+            continue
+        if character in _LINE_START_FORBIDDEN:
+            run_end = index + 1
+            while (run_end < len(text) and
+                   text[run_end] in _LINE_START_FORBIDDEN):
+                run_end += 1
+            run = text[index:run_end]
+            run_width = measure(run)
+            if current and current_width + run_width > max_width:
+                if len(run) == 1:
+                    # 保留单字符闭标点的悬挂语义
+                    current += run
+                    lines.append((rendered(current), current_start))
+                    current = ""
+                    current_width = 0.0
+                    index = run_end
+                    continue
+                cut = current
+                carry_start = len(cut)
+                while (carry_start > 0 and
+                       cut[carry_start - 1] in _LINE_END_FORBIDDEN):
+                    carry_start -= 1
+                carry = cut[carry_start:]
+                cut = cut[:carry_start]
+                if cut:
+                    lines.append((rendered(cut), current_start))
+                current_start += carry_start
+                current = carry + run
+                current_width = measure(current)
+            else:
+                if not current:
+                    current_start = index
+                current += run
+                current_width += run_width
+            index = run_end
             continue
         character_width = text_width(
             draw, character, char_font(font, fallback_font, character))
         if current and current_width + character_width > max_width:
-            if character in _LINE_START_FORBIDDEN:
-                # 闭标点挤压到上一行行尾,允许轻微溢出
-                current += character
-                lines.append(current.rstrip() if remove_trailing_spaces else current)
-                current = ""
-                current_width = 0.0
-                continue
             cut = current
-            carry = ""
-            if len(cut) > 1 and cut[-1] in _LINE_END_FORBIDDEN:
-                # 开标点不允许留在行尾,随下一行移动
-                cut, carry = cut[:-1], cut[-1]
-            lines.append(cut.rstrip() if remove_trailing_spaces else cut)
+            carry_start = len(cut)
+            while (carry_start > 0 and
+                   cut[carry_start - 1] in _LINE_END_FORBIDDEN):
+                carry_start -= 1
+            carry = cut[carry_start:]
+            cut = cut[:carry_start]
+            if cut:
+                lines.append((rendered(cut), current_start))
+            current_start += carry_start
             current = carry + character
-            current_width = sum(
-                text_width(draw, c, char_font(font, fallback_font, c))
-                for c in current
-            )
+            current_width = measure(current)
         else:
+            if not current:
+                current_start = index
             current += character
             current_width += character_width
-    lines.append(current.rstrip() if remove_trailing_spaces else current)
+        index += 1
+    lines.append((rendered(current), current_start))
     return lines
+
+
+def wrap_line(draw, text, font, max_width, fallback_font=None,
+              remove_trailing_spaces=True):
+    return [
+        line for line, _offset in _wrap_line_parts(
+            draw, text, font, max_width,
+            fallback_font=fallback_font,
+            remove_trailing_spaces=remove_trailing_spaces,
+        )
+    ]
 
 
 class ReaderDocument:
@@ -442,7 +540,7 @@ class ReaderDocument:
             y = 0
 
         def add_line(text, font=None, fallback_font=None, indent=False,
-                     gap_before=0, gap_after=0):
+                     gap_before=0, gap_after=0, base_offset=0):
             nonlocal y, current
             font = font or self.body_font
             fallback_font = fallback_font or self.body_fallback
@@ -453,8 +551,9 @@ class ReaderDocument:
                 new_page()
             y += gap_before
             prefix = "　　" if indent and self.config.get("first_line_indent") else ""
-            for line in wrap_line(draw, prefix + text, font, usable_width,
-                                  fallback_font=fallback_font):
+            for line, line_start in _wrap_line_parts(
+                    draw, prefix + text, font, usable_width,
+                    fallback_font=fallback_font):
                 if y + actual_height > usable_height and current:
                     new_page()
                 current.append({
@@ -466,6 +565,7 @@ class ReaderDocument:
                     "fallback_font": fallback_font,
                     "size": getattr(font, "size", 28),
                     "path": path,
+                    "offset": base_offset + max(0, line_start - len(prefix)),
                 })
                 y += actual_height
             y += gap_after
@@ -484,11 +584,12 @@ class ReaderDocument:
                     "width": usable_width,
                     "height": image_height,
                     "path": path,
+                    "offset": block.offset,
                 })
                 y += image_height + int(line_height * 0.5)
                 continue
             if block.kind == "footnote":
-                footnote_lines.append((block.text, path))
+                footnote_lines.append((block.text, path, block.offset))
                 continue
             if block.kind == "heading":
                 font = self.font_resolver.resolve(
@@ -503,28 +604,66 @@ class ReaderDocument:
                                  1.08, 1.30 - block.level * 0.05))),
                          indent=False,
                          gap_before=heading_gap if current else 0,
-                         gap_after=int(line_height * 0.35))
+                         gap_after=int(line_height * 0.35),
+                         base_offset=block.offset)
             else:
                 add_line(block.text, indent=self.config.get("first_line_indent", True),
-                         gap_after=int(line_height * 0.22))
+                         gap_after=int(line_height * 0.22),
+                         base_offset=block.offset)
         if footnote_lines:
             add_line("注释", font=self.small_font,
                      fallback_font=self.small_fallback, gap_before=heading_gap)
-            for text, path in footnote_lines:
+            for text, path, offset in footnote_lines:
                 add_line(text, font=self.small_font,
                          fallback_font=self.small_fallback,
-                         gap_after=int(line_height * 0.15))
+                         gap_after=int(line_height * 0.15),
+                         base_offset=offset)
         if current or not pages:
             pages.append(current)
         return pages
 
-    def page_for_path(self, xpath):
+    def page_for_path(self, xpath, offset=None):
         if not xpath:
             return 0
+        if offset is not None:
+            try:
+                target_offset = int(offset)
+            except (TypeError, ValueError):
+                target_offset = None
+            if target_offset is not None:
+                first_page = None
+                best_page = None
+                best_offset = None
+                for index, page in enumerate(self.pages):
+                    for item in page:
+                        if item.get("path") != xpath:
+                            continue
+                        if first_page is None:
+                            first_page = index
+                        item_offset = int(item.get("offset") or 0)
+                        if item_offset > target_offset:
+                            continue
+                        if best_offset is None or item_offset > best_offset:
+                            best_page = index
+                            best_offset = item_offset
+                if best_page is not None:
+                    return best_page
+                if first_page is not None:
+                    return first_page
+                return 0
         for index, page in enumerate(self.pages):
             if any(item.get("path") == xpath for item in page):
                 return index
         return 0
+
+    def first_anchor_on_page(self, page_index):
+        if not self.pages:
+            return (".", 0)
+        page_index = max(0, min(int(page_index), len(self.pages) - 1))
+        for item in self.pages[page_index]:
+            if item.get("path"):
+                return item["path"], int(item.get("offset") or 0)
+        return (".", 0)
 
     def first_path_on_page(self, page_index):
         if not self.pages:

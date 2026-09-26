@@ -236,35 +236,48 @@ class EInkDisplay:
                 ioctl_timeout=5.0, temp=25, is_reagl=False, night_mode=False, alignment=8):
         self.fb_path = fb_path
         self.fd = os.open(fb_path, os.O_RDWR)
-        if protocol == "mtk":
-            self.update_data_cls = MxcfbUpdateDataMtk
-            self.ioctls = _mtk_ioctls()
-            self.W = WAVEFORM_MTK
-            self.FLAG = FLAG_MTK
-            self.flash_invalid_waveforms = (WAVEFORM_MTK.AUTO, WAVEFORM_MTK.DU,
-                                            WAVEFORM_MTK.A2, WAVEFORM_MTK.DU4)
-            self.reagl_waveform = WAVEFORM_MTK.REAGL
-        elif protocol == "mxcfb":
-            self.update_data_cls = MxcfbUpdateData
-            self.ioctls = _mxcfb_ioctls()
-            self.W = WAVEFORM
-            self.FLAG = FLAG
-            self.flash_invalid_waveforms = (WAVEFORM.AUTO, WAVEFORM.DU,
-                                            WAVEFORM.A2, WAVEFORM.DU4)
-            self.reagl_waveform = WAVEFORM.REAGL
-        else:
-            raise ValueError(f"未知协议: {protocol}")
-        self.wait_for_submission_before = wait_for_submission_before
-        self.wait_for_completion = wait_for_completion
-        self.ioctl_timeout = ioctl_timeout
-        self.temp = temp
-        self.is_reagl = is_reagl
-        self.night_mode = night_mode
-        self.alignment = alignment
-        self._marker = 0
-        self._pending_marker = None
-        self._read_screeninfo()
-        self._init_epdc()
+        try:
+            if protocol == "mtk":
+                self.update_data_cls = MxcfbUpdateDataMtk
+                self.ioctls = _mtk_ioctls()
+                self.W = WAVEFORM_MTK
+                self.FLAG = FLAG_MTK
+                self.flash_invalid_waveforms = (WAVEFORM_MTK.AUTO, WAVEFORM_MTK.DU,
+                                                WAVEFORM_MTK.A2, WAVEFORM_MTK.DU4)
+                self.reagl_waveform = WAVEFORM_MTK.REAGL
+            elif protocol == "mxcfb":
+                self.update_data_cls = MxcfbUpdateData
+                self.ioctls = _mxcfb_ioctls()
+                self.W = WAVEFORM
+                self.FLAG = FLAG
+                self.flash_invalid_waveforms = (WAVEFORM.AUTO, WAVEFORM.DU,
+                                                WAVEFORM.A2, WAVEFORM.DU4)
+                self.reagl_waveform = WAVEFORM.REAGL
+            else:
+                raise ValueError(f"未知协议: {protocol}")
+            self.wait_for_submission_before = wait_for_submission_before
+            self.wait_for_completion = wait_for_completion
+            self.ioctl_timeout = ioctl_timeout
+            self.temp = temp
+            self.is_reagl = is_reagl
+            self.night_mode = night_mode
+            self.alignment = alignment
+            self._marker = 0
+            self._pending_marker = None
+            self._read_screeninfo()
+            self._init_epdc()
+        except Exception:
+            mem = getattr(self, "mem", None)
+            if mem is not None:
+                try:
+                    mem.close()
+                except Exception:
+                    pass
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            raise
     def _init_epdc(self):
         print("[输出] EPDC 初始化:设置 powerdown 延迟 + 等待排空")
         self._ioctl(self.ioctls["set_pwrdown_delay"], ctypes.c_uint32(0), timeout=1.0)
@@ -293,13 +306,19 @@ class EInkDisplay:
     # 屏幕信息
     def _read_screeninfo(self):
         vbuf = ctypes.create_string_buffer(160)
-        self._ioctl(FBIOGET_VSCREENINFO, vbuf, timeout=1.0)
+        if self._ioctl(FBIOGET_VSCREENINFO, vbuf, timeout=1.0) is None:
+            raise OSError("读取 framebuffer 可变屏幕信息失败 (FBIOGET_VSCREENINFO)")
         self.width, self.height, self.xres_virtual, self.yres_virtual, \
             _, _, self.bpp = struct.unpack_from("<7I", vbuf.raw, 0)
+        if self.width <= 0 or self.height <= 0:
+            raise OSError(f"framebuffer 分辨率无效: {self.width}x{self.height}")
         print(f"[输出] framebuffer: {self.width}x{self.height} bpp={self.bpp}")
         fix = FbFixScreeninfo()
-        self._ioctl(FBIOGET_FSCREENINFO, fix, timeout=1.0)
+        if self._ioctl(FBIOGET_FSCREENINFO, fix, timeout=1.0) is None:
+            raise OSError("读取 framebuffer 固定屏幕信息失败 (FBIOGET_FSCREENINFO)")
         self.smem_len = fix.smem_len
+        if self.smem_len <= 0:
+            raise OSError(f"framebuffer smem_len 无效: {self.smem_len}")
         self.line_length = fix.line_length or self.width * (self.bpp // 8)
         print(f"[输出] smem_len={self.smem_len} line_length={self.line_length}")
         self.mem = mmap.mmap(self.fd, self.smem_len, access=mmap.ACCESS_WRITE)
@@ -405,7 +424,11 @@ class EInkDisplay:
             for row in range(ih):
                 src = row * stride
                 dst = (y + row) * self.line_length + x_byte
-                self.mem[dst:dst + stride] = data[src:src + stride]
+                copy_len = min(stride, (x % 8 + iw + 7) // 8,
+                               self.line_length - x_byte)
+                if copy_len <= 0:
+                    continue
+                self.mem[dst:dst + copy_len] = data[src:src + copy_len]
             return
         img = image.convert("L")
         data = img.tobytes()
@@ -414,7 +437,7 @@ class EInkDisplay:
             self.mem[start:start + iw * ih] = data[:iw * ih]
             return
         for row in range(ih):
-            src = row * iw
+            src = row * image.width
             dst = (y + row) * self.line_length + x
             self.mem[dst:dst + iw] = data[src:src + iw]
 
