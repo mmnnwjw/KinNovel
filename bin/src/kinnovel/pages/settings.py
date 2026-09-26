@@ -127,7 +127,7 @@ def _clear(ctx):
 
 
 ABOUT_LINES = [
-    "KinNovel 0.3.1",
+    "KinNovel 0.3.2",
     "运行于 Kindle 原生系统的轻书架客户端",
     "",
     "开发参考",
@@ -136,7 +136,7 @@ ABOUT_LINES = [
     "kComics",
     "framebuffer、EPDC、evdev、启动和恢复流程",
     "KOReader",
-    "内置 FreeType 与 WOFF2 章节字体支持",
+    "休眠与电源事件调度、内置 FreeType 与 WOFF2 字体支持",
     "",
     "主要依赖",
     "Python 3.14、Pillow、lxml、python-evdev",

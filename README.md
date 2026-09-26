@@ -19,7 +19,7 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：`0.3.1`
+当前版本：`0.3.2`
 
 ## 界面预览
 
@@ -73,6 +73,7 @@ Qt 或桌面环境。
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
 | 显示 | MTK 与 MXCFB EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
+| 电源与休眠 | 监听物理电源键与原生 LIPC 休眠/唤醒事件（goingToScreenSaver / outOfScreenSaver）；休眠自动让渡屏幕与触控，唤醒全刷无损恢复上次阅读界面 |
 
 ## 参考项目
 
@@ -105,8 +106,9 @@ Qt 或桌面环境。
 ### KOReader
 
 - 项目：<https://github.com/koreader/koreader>
-- 用途：提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
+- 用途：休眠与电源事件调度机制参考；提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
 - 使用方式：
+  - 休眠与唤醒流程参考了 KOReader 对 Kindle LIPC 电源事件与进程状态的协调管理。
   - Release 包内置 KOReader `v2026.03` 的 FreeType 与匹配 zlib：
 
 ```text
@@ -125,7 +127,7 @@ Qt 或桌面环境。
 |---|---|---|
 | [Pillow](https://github.com/python-pillow/Pillow) | 图像、字体和 framebuffer 渲染 | MIT-CMU |
 | [lxml](https://github.com/lxml/lxml) | 章节 HTML 解析 | BSD |
-| [python-evdev](https://github.com/gvalkov/python-evdev) | Kindle 触摸事件 | BSD |
+| [python-evdev](https://github.com/gvalkov/python-evdev) | Kindle 触摸与按键事件 | BSD |
 
 完整第三方说明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
@@ -147,7 +149,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 `KinNovel-v0.3.1.zip`。
+1. 下载 Release 中的 `KinNovel-v0.3.2.zip`。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -176,7 +178,6 @@ mkdir -p /mnt/us/extensions/kinnovel
 cp -R KinNovel/bin /mnt/us/extensions/kinnovel/
 cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
    /mnt/us/extensions/kinnovel/
-chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
 ```
 
 直接启动：
