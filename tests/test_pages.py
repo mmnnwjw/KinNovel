@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageFont
 
-from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, settings, shelf
+from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import ImageCache, PageContext
 
 
@@ -89,6 +89,7 @@ class PageSmokeTests(unittest.TestCase):
             "browse": browse,
             "rank": rank,
             "book": book,
+            "series": series,
             "history": history,
             "reader": reader,
             "shelf": shelf,
@@ -175,6 +176,91 @@ class PageSmokeTests(unittest.TestCase):
         with patch("kinnovel.pages.reader.prefetch_chapter") as prefetch:
             book._prefetch_reading_target(context, info)
         prefetch.assert_called_once_with(context, 1, 10)
+
+    def test_book_series_button_opens_series_page(self):
+        book.STATE.update({
+            "book_id": 1,
+            "data": {
+                "Book": {
+                    "Id": 1,
+                    "Title": "第一卷",
+                    "Chapters": [],
+                },
+                "SeriesTitle": "测试系列",
+                "Series": [
+                    {"Id": 1, "Title": "第一卷", "Cover": ""},
+                    {"Id": 2, "Title": "第二卷", "Cover": ""},
+                ],
+            },
+            "chapter_page": 0,
+            "bound": False,
+        })
+        self.context.page_name = "book"
+        self.context.render()
+        rect = book.STATE["rects"][("series", 0)]
+        calls = []
+        self.context.navigate = lambda name, **params: calls.append((name, params))
+        self.context.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        })
+        self.assertEqual(calls[0][0], "series")
+        self.assertEqual(calls[0][1]["title"], "测试系列")
+        self.assertEqual(len(calls[0][1]["books"]), 2)
+
+    def test_book_series_button_renders_on_small_screen(self):
+        self.context.screen.output.resolution = (758, 1024)
+        book.STATE.update({
+            "book_id": 1,
+            "data": {
+                "Book": {
+                    "Id": 1,
+                    "Title": "测试系列第一卷",
+                    "Author": "作者",
+                    "Introduction": "简介",
+                    "Chapters": [],
+                },
+                "SeriesTitle": "测试系列",
+                "Series": [
+                    {"Id": 1, "Title": "第一卷", "Cover": ""},
+                    {"Id": 2, "Title": "第二卷", "Cover": ""},
+                ],
+            },
+            "chapter_page": 0,
+            "bound": False,
+        })
+        self.context.page_name = "book"
+        image = self.context.render()
+        self.assertEqual(image.size, (758, 1024))
+        self.assertIn(("series", 0), book.STATE["rects"])
+
+    def test_series_page_opens_other_book(self):
+        series.STATE.update({
+            "title": "测试系列",
+            "series_name": "测试系列",
+            "items": [
+                {"Id": 1, "Title": "第一卷", "Cover": ""},
+                {"Id": 2, "Title": "第二卷", "Cover": ""},
+            ],
+            "current_id": 1,
+            "page": 0,
+            "rects": {},
+            "loading": False,
+            "loaded": True,
+        })
+        self.context.page_name = "series"
+        self.context.params = {}
+        self.context.render()
+        rect = series.STATE["rects"][("item", 1)]
+        calls = []
+        self.context.navigate = lambda name, **params: calls.append((name, params))
+        self.context.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        })
+        self.assertEqual(calls, [("book", {"book_id": 2})])
 
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
