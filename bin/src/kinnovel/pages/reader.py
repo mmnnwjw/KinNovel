@@ -146,6 +146,31 @@ STATE = {
 }
 
 
+_GUIDE_LINES = [
+    "点击左侧：上一页",
+    "点击右侧：下一页",
+    "顶端下滑：呼出控件",
+    "点击中间：回到阅读",
+    "点击图片：全屏预览",
+    "再次点击：退出预览",
+]
+
+
+def _maybe_show_guide(ctx):
+    if ctx.config.get("reader_guide_dismissed"):
+        return
+    # 章间切换走 replace，previous_page 仍是 reader，不重复弹指引
+    if getattr(ctx, "previous_page", None) == "reader":
+        return
+    ctx.confirm(
+        _GUIDE_LINES,
+        lambda: None,
+        lambda: ctx.config.set("reader_guide_dismissed", True),
+        yes="感觉会忘记",
+        no="不再提示",
+    )
+
+
 def _configure_swipe(ctx, delta):
     if not ctx.config.get("page_turn_animation"):
         return
@@ -223,6 +248,7 @@ def enter(ctx):
     swipe_delta = int(ctx.params.get("swipe_delta") or 0)
     # 进入阅读器一律从 compact 视图开始，控件层需由顶端下滑唤出
     STATE["chrome_visible"] = False
+    _maybe_show_guide(ctx)
     # 一次性意图，消费后移除，防止从目录/设置返回时重置页码
     ctx.params.pop("fresh", None)
     ctx.params.pop("at_last", None)
@@ -529,6 +555,13 @@ def handle(data, ctx):
     top, _ = _layout_metrics(ctx)
     if y < top:
         return
+    # 仅命中插图实际渲染区域才进预览；控件层可见时上面已优先收起控件
+    for rect in STATE["image_rects"].values():
+        rx, ry, width, height, url = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            STATE["fullscreen_image"] = url
+            ctx.show()
+            return
     if x < int(ctx.width * 0.25):
         _turn(ctx, -1)
         return

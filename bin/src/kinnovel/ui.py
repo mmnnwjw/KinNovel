@@ -298,6 +298,7 @@ class PageContext:
         self.pages = {}
         self.stack = []
         self.page_name = "home"
+        self.previous_page = None
         self.params = {}
         self.modal = None
         self.status = ""
@@ -324,6 +325,7 @@ class PageContext:
             self.stack.append((self.page_name, self.params))
             if len(self.stack) > 20:
                 self.stack.pop(0)
+        self.previous_page = self.page_name
         self.page_name = name
         self.params = dict(params)
         self.modal = None
@@ -331,6 +333,7 @@ class PageContext:
         self.show()
 
     def replace(self, name, **params):
+        self.previous_page = self.page_name
         self.page_name = name
         self.params = dict(params)
         self.modal = None
@@ -347,14 +350,17 @@ class PageContext:
             return
         self._last_back_at = now
         if self.stack:
+            self.previous_page = self.page_name
             self.page_name, self.params = self.stack.pop()
         else:
+            self.previous_page = self.page_name
             self.page_name, self.params = "home", {}
         _call_enter(self.pages[self.page_name], self)
         self.show()
 
     def home(self):
         self.stack = []
+        self.previous_page = self.page_name
         self.page_name = "home"
         self.params = {}
         self.modal = None
@@ -456,9 +462,11 @@ class PageContext:
                 self.show()
         threading.Thread(target=clear, daemon=True).start()
 
-    def confirm(self, title, on_yes, on_no=None, yes="确定", no="取消"):
+    def confirm(self, lines, on_yes, on_no=None, yes="确定", no="取消"):
         # The popup rects are computed during render, so store the desired actions.
-        self.modal = {"lines": [title], "buttons": [yes, no],
+        if isinstance(lines, str):
+            lines = [lines]
+        self.modal = {"lines": list(lines), "buttons": [yes, no],
                       "actions": {yes: on_yes, no: on_no}}
         self.show()
 

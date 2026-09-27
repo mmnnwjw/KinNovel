@@ -94,8 +94,9 @@ def _load_categories(ctx):
 
 
 def enter(ctx):
-    if not STATE["loaded"]:
-        _load(ctx, 1)
+    # 每次进入都回到第一页：离开模块后不应保留上次的翻页位置
+    _load(ctx, 1)
+    if not STATE["categories"]:
         _load_categories(ctx)
 
 

@@ -14,8 +14,8 @@ STATE = {
 
 
 def enter(ctx):
-    if not STATE["loaded"]:
-        _load(ctx, 1)
+    # 每次进入都回到第一页，不保留上次的翻页位置
+    _load(ctx, 1)
 
 
 def _load(ctx, page=1):

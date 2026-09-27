@@ -22,8 +22,8 @@ def _layout(ctx):
 
 
 def enter(ctx):
-    if not STATE["loaded"]:
-        _load(ctx)
+    # 每次进入都重新拉第一页，不保留上次的翻页位置
+    _load(ctx)
 
 
 def _load(ctx):
