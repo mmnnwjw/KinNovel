@@ -19,7 +19,7 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：`0.5.2`
+当前版本：[`0.5.2`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.5.2)
 
 ## 界面预览
 
@@ -93,7 +93,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 `KinNovel-v0.5.2.zip`。
+1. 下载 Release 中的 [`KinNovel-v0.5.2.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.5.2/KinNovel-v0.5.2.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -113,7 +113,7 @@ Qt 或桌面环境。
 
 5. 在 `/mnt/us/extensions/kinnovel/bin/config.json` 中填写 `account_email`
    和 `account_password`（详见下方「配置」）。
-6. 打开 KUAL，进入 `KinNovel`，点击 `KinNovel` 启动。
+6. 打开 KUAL，点击 `KinNovel` 启动。
 
 ### SSH 安装
 
@@ -170,13 +170,13 @@ Git，也不要分享带有真实凭据的 `config.json`。
   "reader_margin": 34,
   "page_flash": false,
   "page_turn_animation": true,
+  "reader_guide_dismissed": false,
   "night_mode": false,
   "justify": false,
   "first_line_indent": true,
   "convert": null,
   "ignore_japanese": false,
   "ignore_ai": false,
-  "prefetch_chapters": false,
   "request_limit": 9,
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
@@ -233,6 +233,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
 | `prefetch_chapters` | 预加载前后各一章的正文与字体；章节正文始终写入磁盘缓存，离线时自动回退 | `false` |
 | `ignore_japanese` | 列表过滤日文作品 | `false` |
 | `ignore_ai` | 列表过滤 AI 作品 | `false` |
+| `reader_guide_dismissed` | 是否不再显示阅读页操作指引 | `false` |
 
 ### 首页模块
 
@@ -308,11 +309,11 @@ Git，也不要分享带有真实凭据的 `config.json`。
 进入阅读页默认是 compact 视图：顶部一条细状态栏显示书名、页码、时间和电量，正文占满屏幕。
 
 - 点击左右边缘：上一页或下一页。
-- 从屏幕顶端向下滑：唤出完整控件层。控件层覆盖在正文上方，不会重新排版正文，翻页位置保持不变。
+- 从屏幕顶端向下滑：唤出完整控件层。
 - 控件层顶栏显示书名，左侧返回图标回到上一级，右侧主页图标回到首页。
-- 控件层底栏：上一章、目录、设置、下一章，最下方是阅读进度条。
-- 收起控件层：点击顶栏中部或正文任意位置（含左右边缘）回到 compact 视图，此时不翻页。
-- 点击正文插图：进入全屏预览；预览中点击任意位置退出。控件层可见时点击图片优先收起控件层，不进预览。
+- 控件层底栏：上一章、目录、设置、下一章，最下方是章节进度条。
+- 收起控件层：点击顶栏中部或正文任意位置回到 compact 视图。
+- 点击正文插图：进入全屏预览；预览中点击任意位置退出。
 - 首次进入阅读页显示操作指引弹窗；选择"不再提示"后不再显示，选择"感觉会忘记"则下次进入继续显示。
 
 ### 章节跳转
