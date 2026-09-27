@@ -17,8 +17,6 @@ from kinnovel.transport import (
     WebSocketConnection,
     gunzip_limited,
 )
-
-
 def _load_framebuffer_module():
     try:
         __import__("fcntl")
@@ -36,6 +34,32 @@ def _load_framebuffer_module():
 
 
 _FRAMEBUFFER = _load_framebuffer_module()
+
+
+def _load_screen_output_module():
+    path = (Path(__file__).resolve().parents[1] /
+            "bin" / "src" / "screen" / "output" / "__init__.py")
+    package = types.ModuleType("_test_screen_output")
+    package.__path__ = []
+    sys.modules["_test_screen_output"] = package
+    framebuffer = types.ModuleType("_test_screen_output.framebuffer")
+    framebuffer.EInkDisplay = object
+    framebuffer.FLAG = object
+    framebuffer.UPDATE = object
+    framebuffer.WAVEFORM = object
+    sys.modules["_test_screen_output.framebuffer"] = framebuffer
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_test_screen_output", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+_SCREEN_OUTPUT = _load_screen_output_module()
 
 
 class TransportTests(unittest.TestCase):
@@ -222,6 +246,19 @@ class TransportTests(unittest.TestCase):
 
 @unittest.skipIf(_FRAMEBUFFER is None, "framebuffer module unavailable")
 class FramebufferInitializationTests(unittest.TestCase):
+    @unittest.skipIf(_SCREEN_OUTPUT is None, "screen output module unavailable")
+    def test_screen_output_forwards_swipe_animation(self):
+        output = _SCREEN_OUTPUT.ScreenOutput(None)
+        output.display = mock.Mock()
+        output.display.supports_swipe_animation = True
+
+        self.assertTrue(output.supports_swipe_animation)
+        output.set_swipe_animations(True)
+        output.set_swipe_direction(True)
+
+        output.display.set_swipe_animations.assert_called_once_with(True)
+        output.display.set_swipe_direction.assert_called_once_with(True)
+
     def test_screeninfo_ioctl_failure_raises_before_mmap(self):
         display = _FRAMEBUFFER.EInkDisplay.__new__(_FRAMEBUFFER.EInkDisplay)
         display.fd = 123
@@ -249,6 +286,101 @@ class FramebufferInitializationTests(unittest.TestCase):
         open_.assert_called_once_with("/dev/fb0", _FRAMEBUFFER.os.O_RDWR)
         fake_mem.close.assert_called_once_with()
         close_.assert_called_once_with(123)
+
+    def test_mtk_swipe_animation_sets_flag_and_resets(self):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.update_data_cls = module.MxcfbUpdateDataMtk
+        display.ioctls = {"send_update": 1}
+        display.W = module.WAVEFORM_MTK
+        display.FLAG = module.FLAG_MTK
+        display.width = 1000
+        display.height = 1000
+        display.alignment = 8
+        display.temp = 25
+        display.is_reagl = False
+        display.night_mode = False
+        display.flash_invalid_waveforms = (
+            module.WAVEFORM_MTK.AUTO,
+            module.WAVEFORM_MTK.DU,
+            module.WAVEFORM_MTK.A2,
+            module.WAVEFORM_MTK.DU4,
+        )
+        display.reagl_waveform = module.WAVEFORM_MTK.REAGL
+        display.wait_for_submission_before = False
+        display.wait_for_completion = False
+        display._pending_marker = None
+        display._marker = 0
+        display.supports_swipe_animation = True
+        display.swipe_steps = 12
+        display._swipe_animation = True
+        display._swipe_direction = module.SWIPE_MTK.LEFT
+        captured = {}
+
+        def send_update(x, y, w, h, waveform, update_mode, flags, marker,
+                        swipe_direction=None):
+            captured.update({
+                "flags": flags,
+                "waveform": waveform,
+                "swipe_direction": swipe_direction,
+                "marker": marker,
+            })
+            return True
+
+        display._send_update = send_update
+        display._get_next_marker = lambda: 7
+        marker = display.mxc_update(
+            0, 0, 100, 100, False, module.WAVEFORM_MTK.GC16
+        )
+
+        self.assertEqual(marker, 7)
+        self.assertTrue(captured["flags"] & module.FLAG_MTK.ENABLE_SWIPE)
+        self.assertEqual(captured["swipe_direction"], module.SWIPE_MTK.LEFT)
+        self.assertFalse(display._swipe_animation)
+
+    def test_mtk_swipe_animation_is_skipped_for_tiny_region(self):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.update_data_cls = module.MxcfbUpdateDataMtk
+        display.ioctls = {"send_update": 1}
+        display.W = module.WAVEFORM_MTK
+        display.FLAG = module.FLAG_MTK
+        display.width = 1000
+        display.height = 1000
+        display.alignment = 8
+        display.temp = 25
+        display.is_reagl = False
+        display.night_mode = False
+        display.flash_invalid_waveforms = (
+            module.WAVEFORM_MTK.AUTO,
+            module.WAVEFORM_MTK.DU,
+            module.WAVEFORM_MTK.A2,
+            module.WAVEFORM_MTK.DU4,
+        )
+        display.reagl_waveform = module.WAVEFORM_MTK.REAGL
+        display.wait_for_submission_before = False
+        display.wait_for_completion = False
+        display._pending_marker = None
+        display._marker = 0
+        display.supports_swipe_animation = True
+        display.swipe_steps = 12
+        display._swipe_animation = True
+        display._swipe_direction = module.SWIPE_MTK.LEFT
+        captured = {}
+        display._send_update = (
+            lambda x, y, w, h, waveform, update_mode, flags, marker,
+            swipe_direction=None: captured.update({
+                "flags": flags,
+                "swipe_direction": swipe_direction,
+            }) or True
+        )
+        display._get_next_marker = lambda: 8
+
+        display.mxc_update(0, 0, 8, 8, False, module.WAVEFORM_MTK.GC16)
+
+        self.assertFalse(captured["flags"] & module.FLAG_MTK.ENABLE_SWIPE)
+        self.assertIsNone(captured["swipe_direction"])
+        self.assertFalse(display._swipe_animation)
 
 
 if __name__ == "__main__":

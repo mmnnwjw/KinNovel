@@ -98,6 +98,13 @@ class FLAG_MTK:
     COLOR_NON_REGAL = 0x20000
 
 
+class SWIPE_MTK:
+    DOWN = 0
+    UP = 1
+    LEFT = 2
+    RIGHT = 3
+
+
 class UPDATE:
     PARTIAL = 0x0
     FULL = 0x1
@@ -262,6 +269,10 @@ class EInkDisplay:
             self.is_reagl = is_reagl
             self.night_mode = night_mode
             self.alignment = alignment
+            self.supports_swipe_animation = protocol == "mtk"
+            self.swipe_steps = 12
+            self._swipe_animation = False
+            self._swipe_direction = SWIPE_MTK.LEFT
             self._marker = 0
             self._pending_marker = None
             self._read_screeninfo()
@@ -332,7 +343,18 @@ class EInkDisplay:
         return self._marker
 
     # 基础 ioctl
-    def _send_update(self, x, y, w, h, waveform, update_mode, flags, marker):
+    def set_swipe_animations(self, enabled):
+        if self.supports_swipe_animation:
+            self._swipe_animation = bool(enabled)
+
+    def set_swipe_direction(self, left):
+        if self.supports_swipe_animation:
+            self._swipe_direction = (
+                SWIPE_MTK.LEFT if left else SWIPE_MTK.RIGHT
+            )
+
+    def _send_update(self, x, y, w, h, waveform, update_mode, flags, marker,
+                     swipe_direction=None):
         data = self.update_data_cls()
         data.update_region.top = y
         data.update_region.left = x
@@ -347,6 +369,9 @@ class EInkDisplay:
         data.hist_gray_waveform_mode = self.W.REAGL if waveform == self.W.REAGL else self.W.GC16
         if self.update_data_cls is MxcfbUpdateDataMtk:
             data.dither_mode = 1  # EPDC_FLAG_USE_DITHERING_PASSTHROUGH
+            if swipe_direction is not None:
+                data.swipe_data.direction = swipe_direction
+                data.swipe_data.steps = self.swipe_steps
         return self._ioctl(self.ioctls["send_update"], data) is not None
 
     # 等待更新完成
@@ -383,6 +408,12 @@ class EInkDisplay:
             return None
         update_mode = UPDATE.FULL if is_flashing else UPDATE.PARTIAL
         flags = 0
+        swipe_direction = None
+        if self.update_data_cls is MxcfbUpdateDataMtk and self._swipe_animation:
+            if w >= self.swipe_steps and h >= self.swipe_steps:
+                flags |= self.FLAG.ENABLE_SWIPE
+                swipe_direction = self._swipe_direction
+            self._swipe_animation = False
         # 2. 波形决策(对齐 FBInk):update_mode 只由 is_flashing 决定,
         #    flashing 强制 GC16 类波形;非闪屏保持请求波形(GC16+PARTIAL 无闪刷新)
         if is_flashing:
@@ -401,7 +432,9 @@ class EInkDisplay:
             self.wait_update_submission(self._pending_marker)
         # 5. 提交本次更新
         marker = self._get_next_marker()
-        if not self._send_update(x, y, w, h, waveform_mode, update_mode, flags, marker):
+        if not self._send_update(
+                x, y, w, h, waveform_mode, update_mode, flags, marker,
+                swipe_direction=swipe_direction):
             return None
         self._pending_marker = marker
         # 6. 等待完成
@@ -448,6 +481,9 @@ class EInkDisplay:
         返回 marker,失败返回 None.
         """
         with EInkDisplay._show_lock:
+            if self.supports_swipe_animation and self._swipe_animation:
+                is_flashing = False
+                waveform_mode = WAVEFORM_MTK.REAGL
             if region:
                 rx, ry, rw, rh = region
                 image = image.crop((rx, ry, rx + rw, ry + rh))

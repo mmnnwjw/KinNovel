@@ -9,6 +9,7 @@
   "line_spacing": 1.42,
   "reader_margin": 34,
   "page_flash": false,
+  "page_turn_animation": true,
   "night_mode": false,
   "justify": false,
   "first_line_indent": true,
