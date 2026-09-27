@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "bin" / "src"))
 from kinnovel.api import ApiClient, SessionStore
 from kinnovel.config import Config
 from kinnovel.pages import book, home, rank, reader
-from kinnovel.reader import ReaderDocument, ensure_font
+from kinnovel.reader import ensure_font
 from kinnovel.ui import ImageCache, PageContext
 from kinnovel.utils import sha256_text
 
@@ -182,7 +182,15 @@ def render_reader(api, response, document):
     return context.render()
 
 
-def main():
+ALL_PAGES = ("home", "rank", "book", "reader")
+
+
+def main(argv=None):
+    # 用法: generate_readme_previews.py [home rank book reader ...]，缺省全部
+    wanted = set(argv if argv is not None else sys.argv[1:]) or set(ALL_PAGES)
+    unknown = wanted - set(ALL_PAGES)
+    if unknown:
+        raise RuntimeError("unknown preview pages: %s" % ", ".join(sorted(unknown)))
     email, password = load_credentials()
     session_path = ROOT / "build" / "readme-preview-session.json"
     try:
@@ -198,77 +206,78 @@ def main():
         }))
         api._store_credentials(credentials)
         api.session.set_many({"TokenUpdatedAt": time.time() + 3600})
-        user = request("GetMyInfo", api.get_my_info)
-        display_user = dict(user or {})
-        display_user["UserName"] = "已登录"
-        display_user["Email"] = ""
-        api.session.set_many({"User": display_user})
 
-        rank_items = request("GetRank(daily)", lambda: api.get_rank(1))
-        book_info = request("GetBookInfo(1854)", lambda: api.get_book_info(BOOK_ID))
-        chapters = ((book_info.get("Book") or {}).get("Chapters") or [])
-        if len(chapters) <= CHAPTER_INDEX:
-            raise RuntimeError("book 1854 has fewer than five chapters")
-        chapter = chapters[CHAPTER_INDEX]
-        sort_num = int(chapter.get("SortNum") or CHAPTER_INDEX + 1)
-        novel = request(
-            "GetNovelContent(1854, chapter 5)",
-            lambda: api.get_novel_content(BOOK_ID, sort_num),
-        )
+        if wanted & {"home", "rank"}:
+            user = request("GetMyInfo", api.get_my_info)
+            display_user = dict(user or {})
+            display_user["UserName"] = "已登录"
+            display_user["Email"] = ""
+            api.session.set_many({"User": display_user})
+        rank_items = None
+        if "rank" in wanted:
+            rank_items = request("GetRank(daily)", lambda: api.get_rank(1))
 
-        cover_url = (book_info.get("Book") or {}).get("Cover") or ""
-        if cover_url:
-            cache = ImageCache(maximum=4)
-            if cache.get(cover_url) is None:
-                request("download book cover",
-                        lambda: cache.prefetch(cover_url, strict_tls=True))
+        book_info = None
+        if wanted & {"book", "reader"}:
+            book_info = request("GetBookInfo(1854)", lambda: api.get_book_info(BOOK_ID))
 
-        chapter_data = novel.get("Chapter") or {}
-        font_url = chapter_data.get("Font") or ""
-        font_path = ""
-        if font_url:
-            font_path = request(
-                "download chapter font",
-                lambda: ensure_font(font_url, api.server, strict_tls=True),
+        novel = None
+        document = None
+        if "reader" in wanted:
+            chapters = ((book_info.get("Book") or {}).get("Chapters") or [])
+            if len(chapters) <= CHAPTER_INDEX:
+                raise RuntimeError("book 1854 has fewer than five chapters")
+            chapter = chapters[CHAPTER_INDEX]
+            sort_num = int(chapter.get("SortNum") or CHAPTER_INDEX + 1)
+            novel = request(
+                "GetNovelContent(1854, chapter 5)",
+                lambda: api.get_novel_content(BOOK_ID, sort_num),
             )
-            if font_path:
-                print("[font] chapter font ready", flush=True)
-            else:
-                print("[font] chapter font unavailable; system fallback", flush=True)
+            font_url = (novel.get("Chapter") or {}).get("Font") or ""
+            if font_url:
+                font_path = request(
+                    "download chapter font",
+                    lambda: ensure_font(font_url, api.server, strict_tls=True),
+                )
+                if font_path:
+                    print("[font] chapter font ready", flush=True)
+                else:
+                    print("[font] chapter font unavailable; system fallback", flush=True)
 
-        reader_config = PreviewConfig(config)
-        document = ReaderDocument(
-            chapter_data,
-            api.server,
-            reader_config.get("font_path"),
-            reader_config,
-        )
-        image = Image.new("L", (8, 8), 255)
-        top = max(72, int(SIZE[1] * 0.085))
-        document.prepare(
-            ImageDraw.Draw(image),
-            SIZE[0],
-            SIZE[1] - top - 92,
-        )
-        if document.page_count <= 0:
-            raise RuntimeError("reader produced no pages")
-        print(
-            "[reader] pages=%s body_font=%s fallback_used=%s" % (
-                document.page_count,
-                bool(getattr(document.body_font, "path", "")),
-                not document.font_resolver.custom_font_loaded,
-            ),
-            flush=True,
-        )
+        if "book" in wanted:
+            cover_url = (book_info.get("Book") or {}).get("Cover") or ""
+            if cover_url:
+                cache = ImageCache(maximum=4)
+                if cache.get(cover_url) is None:
+                    request("download book cover",
+                            lambda: cache.prefetch(cover_url, strict_tls=True))
+
+        if "reader" in wanted:
+            # 走页面真实的排版入口，保证截图几何与设备上一致(compact 视图)
+            document = reader._prepare_document(
+                make_context(api), novel.get("Chapter") or {})
+            if document.page_count <= 0:
+                raise RuntimeError("reader produced no pages")
+            print(
+                "[reader] pages=%s body_font=%s fallback_used=%s" % (
+                    document.page_count,
+                    bool(getattr(document.body_font, "path", "")),
+                    not document.font_resolver.custom_font_loaded,
+                ),
+                flush=True,
+            )
 
         output = ROOT / "docs" / "images" / "readme"
         output.mkdir(parents=True, exist_ok=True)
-        pages = {
-            "home.png": render_home(api),
-            "rank.png": render_rank(api, rank_items),
-            "book-1854.png": render_book(api, book_info),
-            "reader-1854-chapter-5.png": render_reader(api, novel, document),
-        }
+        pages = {}
+        if "home" in wanted:
+            pages["home.png"] = render_home(api)
+        if "rank" in wanted:
+            pages["rank.png"] = render_rank(api, rank_items)
+        if "book" in wanted:
+            pages["book-1854.png"] = render_book(api, book_info)
+        if "reader" in wanted:
+            pages["reader-1854-chapter-5.png"] = render_reader(api, novel, document)
         for name, page in pages.items():
             path = output / name
             page.save(path, optimize=True)
