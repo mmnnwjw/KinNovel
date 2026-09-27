@@ -26,23 +26,8 @@ def enter(ctx):
         for item in STATE["items"]
     )
     STATE["loaded"] = has_other or not STATE["series_name"]
-    if has_other:
-        _prefetch_covers(ctx)
-    elif STATE["series_name"]:
+    if not has_other and STATE["series_name"]:
         _load(ctx)
-
-
-def _prefetch_covers(ctx):
-    for book in STATE["items"][:12]:
-        url = book.get("Cover")
-        if not url:
-            continue
-        ctx.run_async(
-            "series",
-            lambda url=url: ctx.images.prefetch(
-                url, ctx.config.get("strict_tls")
-            ),
-        )
 
 
 def _load(ctx):
@@ -58,7 +43,6 @@ def _load(ctx):
         STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
         STATE["loading"] = False
         STATE["loaded"] = True
-        _prefetch_covers(ctx)
 
     def error(exc):
         if generation != STATE["generation"]:
@@ -83,7 +67,7 @@ def _load(ctx):
 def render(ctx, canvas):
     top = canvas.header(STATE["title"] or "系列", left="返回", right="主页")
     margin = int(canvas.width * 0.035)
-    row_height = max(84, int(canvas.height * 0.066))
+    row_height = max(76, int(canvas.height * 0.063))
     start_y = top + 12
     rows = max(1, (canvas.height - start_y - 92) // row_height)
     items = STATE["items"]
@@ -91,8 +75,6 @@ def render(ctx, canvas):
     STATE["page"] = min(STATE["page"], pages - 1)
     start = STATE["page"] * rows
     STATE["rects"] = {}
-    cover_width = max(44, int(row_height * 0.60))
-    cover_height = max(62, int(cover_width * 1.45))
     for row in range(rows):
         index = start + row
         y = start_y + row * row_height
@@ -109,36 +91,21 @@ def render(ctx, canvas):
             fill=canvas.theme.inverse_bg if current else canvas.theme.background,
             width=1,
         )
-        cover_x = rect[0] + 10
-        cover_y = y + max(4, (rect[3] - cover_height) // 2)
-        cover = ctx.images.cover(
-            item.get("Cover"),
-            cover_width,
-            cover_height,
-            strict_tls=ctx.config.get("strict_tls"),
-        )
-        if cover is not None:
-            canvas.image.paste(cover, (cover_x, cover_y))
-        canvas.draw.rectangle(
-            [cover_x, cover_y, cover_x + cover_width, cover_y + cover_height],
-            outline=canvas.theme.mid,
-            width=1,
-        )
-        text_x = cover_x + cover_width + 14
+        text_x = rect[0] + 14
         fill = canvas.theme.inverse_fg if current else canvas.theme.foreground
         canvas.text(
-            (text_x, y + 13),
+            (text_x, y + 9),
             canvas.fit_text(
                 item.get("Title") or "未知",
                 ctx.fonts["small"],
-                rect[2] - (text_x - rect[0]) - 12,
+                rect[2] - 28,
             ),
             font=ctx.fonts["small"],
             fill=fill,
         )
         if current:
             canvas.text(
-                (text_x, y + 47),
+                (text_x, y + 42),
                 "当前书籍",
                 font=ctx.fonts["tiny"],
                 fill=canvas.theme.muted,
@@ -195,7 +162,7 @@ def handle(data, ctx):
             STATE["page"] -= 1
             ctx.show()
         elif action == "next":
-            row_height = max(84, int(ctx.height * 0.066))
+            row_height = max(76, int(ctx.height * 0.063))
             top = max(72, int(ctx.height * 0.085))
             rows = max(1, (ctx.height - top - 12 - 92) // row_height)
             pages = max(1, (len(STATE["items"]) + rows - 1) // rows)
