@@ -122,11 +122,13 @@ class MultiTouchParser:
                 self.btn_touch = ev.value
 
     def _ensure_slot(self, slot):
-        if slot not in self.slots:
-            self.slots[slot] = {"tracking_id": -1, "x": None, "y": None}
+        return self.slots.setdefault(
+            slot, {"tracking_id": -1, "x": None, "y": None})
 
     def _update_pos(self, slot, x, y, set_x):
-        s = self.slots[slot]
+        # 电源线程在挂起/唤醒时会并发 reset() 清空 slots；setdefault 在 GIL 下
+        # 是原子的，避免输入线程抛 KeyError 后触摸彻底失效
+        s = self._ensure_slot(slot)
         if set_x:
             s["x"] = x
         else:

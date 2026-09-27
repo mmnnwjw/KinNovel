@@ -80,7 +80,11 @@ class Config:
                             self._data[key][child_key] = child_value
                             changed = True
             if changed:
-                self.save()
+                try:
+                    self.save()
+                except OSError:
+                    # 配置目录只读时也要能启动，缺省值已补进内存
+                    pass
             return dict(self._data)
 
     def save(self):

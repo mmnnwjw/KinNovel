@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
 from .reader import _INVISIBLE_RE, split_font_runs, text_width
-from .utils import battery_level, prune_cache
+from .utils import battery_level, prune_cache, touch
 
 
 class Theme:
@@ -243,6 +243,7 @@ class ImageCache:
             image = image.convert("L")
         except (OSError, ValueError):
             return None
+        touch(path)
         with self._lock:
             self._memory[url] = image
             self._memory.move_to_end(url)

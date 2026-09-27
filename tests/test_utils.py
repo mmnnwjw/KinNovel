@@ -1,3 +1,6 @@
+import os
+import tempfile
+import time
 import unittest
 import subprocess
 import sys
@@ -25,6 +28,26 @@ class UtilityTests(unittest.TestCase):
                 path.unlink()
             except OSError:
                 pass
+
+    def test_prune_cache_evicts_least_recently_used(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = []
+            now = time.time()
+            for index in range(3):
+                path = Path(root) / ("f%d.bin" % index)
+                path.write_bytes(b"x" * 100)
+                stamp = now - (3 - index) * 100
+                os.utime(path, (stamp, stamp))
+                paths.append(path)
+
+            # 最旧的文件刚被读过，touch 后不应再被优先淘汰
+            utils.touch(paths[0])
+            removed = utils.prune_cache(Path(root), 250)
+
+            self.assertEqual(removed, 100)
+            self.assertTrue(paths[0].exists())
+            self.assertFalse(paths[1].exists())
+            self.assertTrue(paths[2].exists())
 
     def test_atomic_write_is_serialized_per_path(self):
         path = APP_DIR / "build" / "atomic-concurrent.bin"

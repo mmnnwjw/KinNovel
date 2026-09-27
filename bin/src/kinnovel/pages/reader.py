@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from ..config import CACHE_DIR
 from ..reader import ReaderDocument, ensure_font
-from ..utils import atomic_write, read_json, stable_cache_name
+from ..utils import atomic_write, read_json, stable_cache_name, touch
 
 
 _CHAPTER_CACHE_TTL = 12 * 3600
@@ -61,6 +61,7 @@ def _load_chapter(ctx, book_id, sort_num):
         except OSError:
             fresh = False
     if cached and fresh:
+        touch(path)
         return cached
     lock = _chapter_lock(book_id, sort_num, convert)
     with lock:
@@ -68,6 +69,7 @@ def _load_chapter(ctx, book_id, sort_num):
         if cached:
             try:
                 if (time.time() - path.stat().st_mtime) < _CHAPTER_CACHE_TTL:
+                    touch(path)
                     return cached
             except OSError:
                 pass
@@ -139,7 +141,7 @@ STATE = {
     "fullscreen_image": None,
     "last_turn_at": 0.0,
     "fitted_cache": {},
-    "chrome_visible": True,
+    "chrome_visible": False,
     "layout_generation": 0,
 }
 
@@ -167,14 +169,18 @@ def _fit_image(url, image, width, height):
     return fitted
 
 
+_CHROME_FOOTER = 92
+
+
 def _layout_metrics(ctx):
-    if STATE.get("chrome_visible", True):
-        top = max(72, int(ctx.height * 0.085))
-        footer = 92
-    else:
-        top = max(40, int(ctx.height * 0.035))
-        footer = 0
-    return top, max(160, int(ctx.height) - top - footer)
+    # 正文永远按 compact 几何分页：控件层是覆盖式浮层，显隐不触发重排
+    top = max(40, int(ctx.height * 0.035))
+    return top, max(160, int(ctx.height) - top)
+
+
+def _chrome_header_height(ctx):
+    # 与 Canvas.header 的高度公式保持一致，用于控件层的点击判定
+    return max(72, int(ctx.height * 0.085))
 
 
 def _signature(ctx, book_id, sort_num):
@@ -184,8 +190,9 @@ def _signature(ctx, book_id, sort_num):
         float(ctx.config.get("line_spacing") or 1.42),
         int(ctx.config.get("reader_margin") or 34),
         int(ctx.width), int(ctx.height), top,
-        bool(STATE.get("chrome_visible", True)),
         str(ctx.config.get("font_path") or ""),
+        str(ctx.config.get("convert") or ""),
+        bool(ctx.config.get("first_line_indent")),
     )
 
 
@@ -201,38 +208,10 @@ def _prepare_document(ctx, chapter):
 
 def _set_chrome_visible(ctx, visible):
     visible = bool(visible)
-    if bool(STATE.get("chrome_visible", True)) == visible:
+    if bool(STATE.get("chrome_visible")) == visible:
         return
-    document = STATE.get("doc")
-    data = STATE.get("data") or {}
-    if document is not None:
-        path, offset = document.first_anchor_on_page(STATE["page"])
-    else:
-        path, offset = ".", 0
     STATE["chrome_visible"] = visible
-    STATE["layout_generation"] += 1
-    generation = STATE["layout_generation"]
-    signature = _signature(ctx, STATE["book_id"], STATE["sort_num"])
-    # Render immediately with the new header geometry, then repaginate in the
-    # background while preserving the current reading anchor.
     ctx.show()
-    if document is None or not data:
-        return
-
-    def success(new_document):
-        if generation != STATE["layout_generation"]:
-            return
-        STATE["doc"] = new_document
-        STATE["page"] = new_document.page_for_path(path, offset)
-        STATE["signature"] = signature
-        STATE["last_saved"] = -1
-
-    ctx.run_async(
-        "reader",
-        lambda: _prepare_document(ctx, data.get("Chapter") or {}),
-        success,
-        lambda exc: ctx.message(["重新排版失败", str(exc)]),
-    )
 
 
 def enter(ctx):
@@ -242,8 +221,8 @@ def enter(ctx):
     fresh = bool(ctx.params.get("fresh"))
     at_last = bool(ctx.params.get("at_last"))
     swipe_delta = int(ctx.params.get("swipe_delta") or 0)
-    if STATE["book_id"] != book_id:
-        STATE["chrome_visible"] = True
+    # 进入阅读器一律从 compact 视图开始，控件层需由顶端下滑唤出
+    STATE["chrome_visible"] = False
     # 一次性意图，消费后移除，防止从目录/设置返回时重置页码
     ctx.params.pop("fresh", None)
     ctx.params.pop("at_last", None)
@@ -427,21 +406,18 @@ def render(ctx, canvas):
         return
     doc = STATE["doc"]
     title = (STATE["data"] or {}).get("Chapter", {}).get("Title") or "阅读"
-    chrome_visible = bool(STATE.get("chrome_visible", True))
-    if chrome_visible:
-        top = canvas.header(title, left="返回", right="主页")
-    else:
-        page_label = "1/1"
-        if doc:
-            page_label = "%s/%s" % (
-                STATE["page"] + 1, doc.page_count
-            )
+    chrome_visible = bool(STATE.get("chrome_visible"))
+    top, content_height = _layout_metrics(ctx)
+    if not chrome_visible:
+        page_label = "%s/%s" % (STATE["page"] + 1, doc.page_count) if doc else "1/1"
         top = canvas.compact_header(title, page_label)
+    STATE["rects"] = {}
     if not doc:
         canvas.centered_text("正在下载并排版…" if STATE["loading"] else "暂无正文",
                              ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
+        if chrome_visible:
+            _render_chrome(ctx, canvas, title, None)
         return
-    content_height = canvas.height - top - (92 if chrome_visible else 0)
     page = doc.pages[max(0, min(STATE["page"], len(doc.pages) - 1))]
     STATE["image_rects"] = {}
     for item in page:
@@ -476,20 +452,29 @@ def render(ctx, canvas):
                 canvas.centered_text("[图片]", ctx.fonts["small"],
                                      canvas.width // 2, top + item["y"] + item["height"] // 2,
                                      fill=canvas.theme.muted)
-    STATE["rects"] = {}
-    if not chrome_visible:
-        return
+    if chrome_visible:
+        # 控件层画在正文之上：正文分页几何不随控件显隐变化
+        _render_chrome(ctx, canvas, title, doc)
+
+
+def _render_chrome(ctx, canvas, title, doc):
+    canvas.header(title, left="返回", right="主页")
+    footer_top = canvas.height - _CHROME_FOOTER
+    canvas.draw.rectangle([0, footer_top, canvas.width, canvas.height],
+                          fill=canvas.theme.background)
     bar_y = canvas.height - 76
     margin = int(canvas.width * 0.025)
     gap = 6
     button_width = (canvas.width - 2 * margin - 3 * gap) // 4
-    page_label = "%s/%s" % (STATE["page"] + 1, doc.page_count)
+    page_label = "%s/%s" % (STATE["page"] + 1, doc.page_count) if doc else "1/1"
     buttons = [("prev", "上一章"), ("catalog", page_label),
                ("settings", "设置"), ("next", "下一章")]
     for index, (action, label) in enumerate(buttons):
         rect = (margin + index * (button_width + gap), bar_y, button_width, 56)
         canvas.button(rect, label, font=ctx.fonts["tiny"])
         STATE["rects"][(action, 0)] = rect
+    if not doc:
+        return
     progress = int(
         (STATE["page"] + 1) / max(1, doc.page_count)
         * (canvas.width - 2 * margin)
@@ -504,7 +489,7 @@ def handle(data, ctx):
     gesture = data.get("gesture")
     if gesture == "down":
         start = data.get("start") or {}
-        if (not STATE.get("chrome_visible", True)
+        if (not STATE.get("chrome_visible")
                 and float(start.get("y-ratio") or 1.0) < 0.16):
             _set_chrome_visible(ctx, True)
         return
@@ -515,37 +500,34 @@ def handle(data, ctx):
         STATE["fullscreen_image"] = None
         ctx.show()
         return
-    top, _ = _layout_metrics(ctx)
-    if (STATE.get("chrome_visible", True)
-            and y < top
-            and int(ctx.width * 0.25) < x < int(ctx.width * 0.75)):
+    if STATE.get("chrome_visible"):
+        # 控件层可见时只有顶栏（返回/主页由 PageContext 拦截）和底栏可操作，
+        # 点中间正文区仅收起控件层，不翻页
+        if y >= ctx.height - _CHROME_FOOTER:
+            for key, rect in STATE["rects"].items():
+                rx, ry, width, height = rect
+                if not (rx <= x < rx + width and ry <= y < ry + height):
+                    continue
+                action = key[0]
+                if action == "prev":
+                    _change_chapter(ctx, -1, at_last=True)
+                elif action == "next":
+                    _change_chapter(ctx, 1)
+                elif action == "catalog":
+                    STATE["catalog_page"] = 0
+                    ctx.navigate(
+                        "catalog",
+                        book_id=STATE["book_id"],
+                        sort_num=STATE["sort_num"],
+                    )
+                elif action == "settings":
+                    ctx.navigate("settings")
+                return
+            return
         _set_chrome_visible(ctx, False)
         return
+    top, _ = _layout_metrics(ctx)
     if y < top:
-        return
-    if STATE.get("chrome_visible", True) and y >= ctx.height - 92:
-        for key, rect in STATE["rects"].items():
-            rx, ry, width, height = rect
-            if not (rx <= x < rx + width and ry <= y < ry + height):
-                continue
-            action = key[0]
-            if action == "prev":
-                _change_chapter(ctx, -1, at_last=True)
-            elif action == "next":
-                _change_chapter(ctx, 1)
-            elif action == "catalog":
-                STATE["catalog_page"] = 0
-                ctx.navigate(
-                    "catalog",
-                    book_id=STATE["book_id"],
-                    sort_num=STATE["sort_num"],
-                )
-            elif action == "settings":
-                ctx.navigate("settings")
-            return
-        return
-    page_bottom = ctx.height - 92 if STATE.get("chrome_visible", True) else ctx.height
-    if y >= page_bottom:
         return
     if x < int(ctx.width * 0.25):
         _turn(ctx, -1)
@@ -554,12 +536,17 @@ def handle(data, ctx):
         _turn(ctx, 1)
 
 
+def _catalog_layout(ctx):
+    row_height = max(62, int(ctx.height * 0.052))
+    rows = max(1, (ctx.height - _chrome_header_height(ctx) - 100) // row_height)
+    return row_height, rows
+
+
 def render_catalog(ctx, canvas):
     top = canvas.header("章节目录", left="返回", right="主页")
     chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
     margin = int(canvas.width * 0.035)
-    row_height = max(62, int(canvas.height * 0.052))
-    rows = max(1, (canvas.height - top - 100) // row_height)
+    row_height, rows = _catalog_layout(ctx)
     pages = max(1, (len(chapters) + rows - 1) // rows)
     STATE["catalog_page"] = min(STATE["catalog_page"], pages - 1)
     start = STATE["catalog_page"] * rows
@@ -602,6 +589,10 @@ def handle_catalog(data, ctx):
         if not (rx <= x < rx + width and ry <= y < ry + height):
             continue
         if key[0] == "catalog":
+            # 目录是 reader 压栈进来的；replace 前先丢掉栈里那个旧 reader，
+            # 否则返回键会回到跳转前的章节而不是书籍详情
+            if ctx.stack and ctx.stack[-1][0] == "reader":
+                ctx.stack.pop()
             ctx.replace("reader", book_id=STATE["book_id"],
                         sort_num=key[1] + 1, fresh=True)
         elif key[0] == "prev" and STATE["catalog_page"] > 0:
@@ -609,8 +600,7 @@ def handle_catalog(data, ctx):
             ctx.show()
         elif key[0] == "next":
             chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
-            row_height = max(62, int(ctx.height * 0.052))
-            rows = max(1, (ctx.height - int(ctx.height * 0.085) - 100) // row_height)
+            _, rows = _catalog_layout(ctx)
             pages = max(1, (len(chapters) + rows - 1) // rows)
             if STATE["catalog_page"] < pages - 1:
                 STATE["catalog_page"] += 1
