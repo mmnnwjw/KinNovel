@@ -22,6 +22,7 @@ DEFAULTS = {
     "reader_margin": 34,
     "page_flash": False,
     "page_turn_animation": True,
+    "reader_guide_dismissed": False,
     "night_mode": False,
     "justify": False,
     "first_line_indent": True,

@@ -162,7 +162,8 @@ NOTIFICATION_STATE = {
 
 
 def enter_notifications(ctx):
-    _load_notifications(ctx)
+    # 每次进入都回到第一页，不保留上次的翻页位置
+    _load_notifications(ctx, 1)
 
 
 def _load_notifications(ctx, page=None):

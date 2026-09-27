@@ -10,6 +10,7 @@
   "reader_margin": 34,
   "page_flash": false,
   "page_turn_animation": true,
+  "reader_guide_dismissed": false,
   "night_mode": false,
   "justify": false,
   "first_line_indent": true,

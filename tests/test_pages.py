@@ -54,6 +54,9 @@ class Config:
     def get(self, key, default=None):
         return self.values.get(key, default)
 
+    def set(self, key, value, save=True):
+        self.values[key] = value
+
 
 class Api:
     server = "https://api.lightnovel.life"
@@ -99,6 +102,8 @@ class PageSmokeTests(unittest.TestCase):
             "announcements": announcements,
         }.items():
             self.context.register(name, module)
+        # 默认关闭阅读指引弹窗，避免干扰其它用例；指引用例自行打开
+        self.context.config.values["reader_guide_dismissed"] = True
 
     def _prime_reader(self, **params):
         class Catalog:
@@ -416,6 +421,63 @@ class PageSmokeTests(unittest.TestCase):
         from kinnovel import VERSION
         self.assertEqual(settings.ABOUT_LINES[0], "KinNovel " + VERSION)
 
+    def test_reader_image_tap_opens_and_closes_preview(self):
+        self._prime_reader()
+        reader.STATE["image_rects"] = {
+            ("./p[2]", 40): (100, 400, 200, 150, "https://img/1.jpg"),
+        }
+        reader.handle({
+            "gesture": "tap", "x-pixel": 150, "y-pixel": 450,
+        }, self.context)
+        self.assertEqual(reader.STATE["fullscreen_image"], "https://img/1.jpg")
+
+        reader.handle({
+            "gesture": "tap", "x-pixel": 10, "y-pixel": 10,
+        }, self.context)
+        self.assertIsNone(reader.STATE["fullscreen_image"])
+
+    def test_reader_image_tap_behind_chrome_dismisses_chrome_first(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        reader.STATE["image_rects"] = {
+            ("./p[2]", 40): (100, 400, 200, 150, "https://img/1.jpg"),
+        }
+        reader.handle({
+            "gesture": "tap", "x-pixel": 150, "y-pixel": 450,
+        }, self.context)
+        self.assertFalse(reader.STATE["chrome_visible"])
+        self.assertIsNone(reader.STATE["fullscreen_image"])
+
+    def test_reader_guide_shown_until_dismissed(self):
+        self.context.config.values["reader_guide_dismissed"] = False
+        self.context.previous_page = "book"
+        self._prime_reader()
+        self.assertIsNotNone(self.context.modal)
+        self.assertIn("不再提示", self.context.modal["buttons"])
+
+        self.context.modal["actions"]["不再提示"]()
+        self.context.modal = None
+        self.assertTrue(self.context.config.get("reader_guide_dismissed"))
+
+        self._prime_reader()
+        self.assertIsNone(self.context.modal)
+
+    def test_reader_guide_skipped_on_chapter_turn(self):
+        self.context.config.values["reader_guide_dismissed"] = False
+        self.context.previous_page = "reader"
+        self._prime_reader()
+        self.assertIsNone(self.context.modal)
+
+    def test_browse_enter_resets_to_first_page(self):
+        self.context.api.get_book_list = lambda **_kw: {
+            "Data": [], "Page": 1, "TotalPages": 3}
+        self.context.api.get_book_categories = lambda _kind: []
+        browse.STATE.update({"loaded": True, "page": 3, "categories": []})
+
+        browse.enter(self.context)
+
+        self.assertEqual(browse.STATE["page"], 1)
+
     def test_reader_swipe_down_from_top_restores_chrome(self):
         self._prime_reader()
         reader.STATE["chrome_visible"] = False
@@ -663,8 +725,9 @@ class PageSmokeTests(unittest.TestCase):
         self.assertEqual(replace_context.call[1]["sort_num"], 1)
         self.assertTrue(replace_context.call[1]["at_last"])
 
-    def test_reader_image_tap_no_longer_opens_preview(self):
+    def test_reader_image_tap_opens_preview(self):
         reader.STATE["fullscreen_image"] = None
+        reader.STATE["chrome_visible"] = False
         reader.STATE["image_rects"] = {
             ("p", 0): (100, 100, 200, 200, "image-url"),
         }
@@ -674,7 +737,7 @@ class PageSmokeTests(unittest.TestCase):
         self.context.handle({
             "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
         })
-        self.assertIsNone(reader.STATE["fullscreen_image"])
+        self.assertEqual(reader.STATE["fullscreen_image"], "image-url")
 
     def test_reader_image_hit_rect_matches_fitted_image(self):
         class Doc:
