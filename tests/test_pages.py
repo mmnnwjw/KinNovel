@@ -30,6 +30,7 @@ class Config:
             "reader_margin": 30,
             "first_line_indent": True,
             "page_flash": False,
+            "page_turn_animation": True,
             "strict_tls": False,
             "font_path": "C:/Windows/Fonts/simhei.ttf",
             "convert": None,
@@ -276,6 +277,181 @@ class PageSmokeTests(unittest.TestCase):
             series.enter(self.context)
         run_async.assert_not_called()
 
+    def test_reader_configures_native_swipe_animation(self):
+        class Output:
+            supports_swipe_animation = True
+
+            def __init__(self):
+                self.calls = []
+
+            def set_swipe_direction(self, left):
+                self.calls.append(("direction", left))
+
+            def set_swipe_animations(self, enabled):
+                self.calls.append(("enabled", enabled))
+
+        class Context:
+            config = self.context.config
+            screen = type("Screen", (), {"output": Output()})()
+
+        reader._configure_swipe(Context(), 1)
+        self.assertEqual(Context.screen.output.calls, [
+            ("direction", True),
+            ("enabled", True),
+        ])
+
+    def test_reader_top_tap_toggles_chrome(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        with patch.object(self.context, "show") as show:
+            reader.handle({
+                "gesture": "tap",
+                "x-pixel": self.context.width // 2,
+                "y-pixel": 8,
+            }, self.context)
+        self.assertFalse(reader.STATE["chrome_visible"])
+        show.assert_called_once()
+
+    def test_reader_chrome_toggle_repaginates(self):
+        class ImmediateContext:
+            config = self.context.config
+            api = self.context.api
+            width = self.context.width
+            height = self.context.height
+            show = MagicMock()
+
+            @staticmethod
+            def run_async(_owner, operation, on_success=None, on_error=None):
+                result = operation()
+                if on_success:
+                    on_success(result)
+
+        chapter = {
+            "Title": "测试",
+            "Font": None,
+            "Chapters": ["测试"],
+            "Content": "<p>" + ("测试正文。" * 400) + "</p>",
+        }
+        reader.STATE.update({
+            "book_id": 1,
+            "sort_num": 1,
+            "data": {"Chapter": chapter},
+            "chrome_visible": True,
+            "layout_generation": 0,
+        })
+        context = ImmediateContext()
+        old_document = reader._prepare_document(context, chapter)
+        reader.STATE.update({
+            "doc": old_document,
+            "page": 1,
+            "signature": reader._signature(context, 1, 1),
+            "last_saved": -1,
+        })
+
+        reader._set_chrome_visible(context, False)
+
+        self.assertFalse(reader.STATE["chrome_visible"])
+        self.assertIsNot(reader.STATE["doc"], old_document)
+        self.assertLess(reader.STATE["doc"].page_count,
+                        old_document.page_count)
+
+    def test_reader_swipe_down_from_top_restores_chrome(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        with patch.object(self.context, "show") as show:
+            reader.handle({
+                "gesture": "down",
+                "start": {"y-ratio": 0.04},
+                "end": {"y-ratio": 0.20},
+                "distance": 240,
+            }, self.context)
+        self.assertTrue(reader.STATE["chrome_visible"])
+        show.assert_called_once()
+
+    def test_page_context_forwards_down_gesture(self):
+        class DownPage:
+            @staticmethod
+            def render(_context, _canvas):
+                return None
+
+            @staticmethod
+            def handle(data, _context):
+                return data.get("gesture")
+
+        self.context.register("down", DownPage)
+        self.context.page_name = "down"
+        self.assertEqual(
+            self.context.handle({
+                "gesture": "down",
+                "start": {"y-ratio": 0.04},
+                "end": {"y-ratio": 0.20},
+            }),
+            "down",
+        )
+
+    def test_reader_bottom_previous_chapter_button_works(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        self.context.render()
+        rect = reader.STATE["rects"][("prev", 0)]
+        calls = []
+        self.context.replace = lambda name, **params: calls.append((name, params))
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        }, self.context)
+        self.assertEqual(calls[0][0], "reader")
+        self.assertEqual(calls[0][1]["sort_num"], 1)
+        self.assertTrue(calls[0][1]["at_last"])
+
+    def test_reader_bottom_catalog_button_works(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        self.context.render()
+        rect = reader.STATE["rects"][("catalog", 0)]
+        calls = []
+        self.context.navigate = lambda name, **params: calls.append((name, params))
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        }, self.context)
+        self.assertEqual(calls[0][0], "catalog")
+
+    def test_reader_compact_header_uses_page_background(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        image = self.context.render()
+        self.assertEqual(image.getpixel((5, 5)), 255)
+
+    def test_reader_expanded_header_restores_actions(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        self.context.render()
+        self.assertEqual(
+            self.context._header_state,
+            {"height": max(72, int(self.context.height * 0.085)),
+             "left": "返回", "right": "主页"},
+        )
+
+    def test_reader_tap_sides_turn_pages(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        reader.STATE["page"] = 5
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": 10,
+            "y-pixel": self.context.height // 2,
+        }, self.context)
+        self.assertEqual(reader.STATE["page"], 4)
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": self.context.width - 10,
+            "y-pixel": self.context.height // 2,
+        }, self.context)
+        self.assertEqual(reader.STATE["page"], 5)
+
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
             "Book": {
@@ -426,7 +602,7 @@ class PageSmokeTests(unittest.TestCase):
         self.assertEqual(replace_context.call[1]["sort_num"], 1)
         self.assertTrue(replace_context.call[1]["at_last"])
 
-    def test_reader_image_preview_toggles(self):
+    def test_reader_image_tap_no_longer_opens_preview(self):
         reader.STATE["fullscreen_image"] = None
         reader.STATE["image_rects"] = {
             ("p", 0): (100, 100, 200, 200, "image-url"),
@@ -434,10 +610,6 @@ class PageSmokeTests(unittest.TestCase):
         self.context.images._memory["image-url"] = Image.new("L", (200, 200), 255)
         self.context.page_name = "reader"
         self.context.params = {}
-        self.context.handle({
-            "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
-        })
-        self.assertEqual(reader.STATE["fullscreen_image"], "image-url")
         self.context.handle({
             "gesture": "tap", "x-pixel": 150, "y-pixel": 150,
         })

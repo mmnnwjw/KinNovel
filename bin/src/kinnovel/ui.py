@@ -103,9 +103,51 @@ class Canvas:
         title_width = max(120, self.width - 360 - status_width)
         self.centered_text(self.fit_text(title, self.fonts["title"], title_width),
                            self.fonts["title"], self.width // 2, height // 2)
-        self._draw_back_icon(height)
-        self._draw_home_icon(height)
+        if left:
+            self._draw_back_icon(height)
+        if right:
+            self._draw_home_icon(height)
         self.header_state = {"height": height, "left": left, "right": right}
+        return height
+
+    def compact_header(self, title, progress=""):
+        height = max(40, int(self.height * 0.035))
+        self.draw.rectangle(
+            [0, 0, self.width, height], fill=self.theme.background
+        )
+        status = time.strftime("%H:%M")
+        level = battery_level()
+        if level is not None:
+            status += " · %d%%" % level
+        font = self.fonts["tiny"]
+        margin = max(10, int(self.width * 0.012))
+        status_bbox = self.draw.textbbox((0, 0), status, font=font)
+        status_width = status_bbox[2] - status_bbox[0]
+        status_x = self.width - margin - status_width
+        self.draw.text(
+            (status_x, (height - font.size) // 2),
+            status,
+            font=font,
+            fill=self.theme.foreground,
+        )
+        label = str(title or "阅读")
+        if progress:
+            label += "  " + str(progress)
+        max_width = max(
+            80, status_x - margin * 3
+        )
+        self.draw.text(
+            (margin, (height - font.size) // 2),
+            self.fit_text(label, font, max_width),
+            font=font,
+            fill=self.theme.foreground,
+        )
+        self.draw.line(
+            [0, height - 1, self.width, height - 1],
+            fill=self.theme.mid,
+            width=1,
+        )
+        self.header_state = {"height": height, "left": "", "right": ""}
         return height
 
     def _draw_back_icon(self, header_height):
@@ -358,14 +400,15 @@ class PageContext:
 
     def handle(self, data):
         gesture = data.get("gesture")
-        if gesture not in ("tap", "long"):
+        if gesture not in ("tap", "long", "down"):
             return None
-        x = int(data.get("x-pixel") or 0)
-        y = int(data.get("y-pixel") or 0)
-        if x == 0 and y == 0:
-            return None
-        if x < 0 or y < 0 or x >= self.width or y >= self.height:
-            return None
+        if gesture in ("tap", "long"):
+            x = int(data.get("x-pixel") or 0)
+            y = int(data.get("y-pixel") or 0)
+            if x == 0 and y == 0:
+                return None
+            if x < 0 or y < 0 or x >= self.width or y >= self.height:
+                return None
         if self.modal:
             if gesture != "tap":
                 return None
@@ -377,10 +420,12 @@ class PageContext:
                 blocker = getattr(self.pages[self.page_name], "header_blocked", None)
                 if callable(blocker) and blocker():
                     return None
-                if x < int(self.width * 0.16):
+                if (x < int(self.width * 0.16)
+                        and self._header_state.get("left")):
                     self.back()
                     return None
-                if x > int(self.width * 0.84) and self._header_state.get("right") == "主页":
+                if (x > int(self.width * 0.84)
+                        and self._header_state.get("right") == "主页"):
                     self.home()
                     return None
         return self.pages[self.page_name].handle(data, self)

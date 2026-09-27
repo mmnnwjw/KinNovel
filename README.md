@@ -177,6 +177,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
   "line_spacing": 1.42,
   "reader_margin": 34,
   "page_flash": false,
+  "page_turn_animation": true,
   "night_mode": false,
   "justify": false,
   "first_line_indent": true,
@@ -212,6 +213,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
 | `screen_protocol` | EPDC 协议；`auto` 自动探测 `mtk`、`mxcfb` | `auto` |
 | `framebuffer` | Kindle framebuffer 路径 | `/dev/fb0` |
 | `page_flash` | 翻页时是否强制全屏刷新 | `false` |
+| `page_turn_animation` | KPW5 及更新 MTK 平台使用原生 EPDC 翻页动画 | `true` |
 | `night_mode` | 是否使用黑白反转的夜间模式 | `false` |
 
 屏幕无法显示或刷新异常时，可手动指定：

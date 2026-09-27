@@ -25,6 +25,21 @@ class ScreenOutput:
         assert self.display is not None
         return (self.display.width, self.display.height)
 
+    @property
+    def supports_swipe_animation(self):
+        return bool(
+            self.display is not None
+            and getattr(self.display, "supports_swipe_animation", False)
+        )
+
+    def set_swipe_animations(self, enabled):
+        if self.display is not None:
+            self.display.set_swipe_animations(enabled)
+
+    def set_swipe_direction(self, left):
+        if self.display is not None:
+            self.display.set_swipe_direction(left)
+
     # 显示图像 默认全屏 GC16 刷新
     def show(self, image, is_flashing=True, waveform_mode=WAVEFORM.GC16,
             dither=False, region=None):

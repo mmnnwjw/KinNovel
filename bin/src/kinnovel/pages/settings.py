@@ -10,7 +10,7 @@ def render(ctx, canvas):
     margin = int(canvas.width * 0.05)
     y = top + 18
     # 行高随屏幕高度自适应,低分辨率设备(如 600x800)不溢出
-    row_count = 12
+    row_count = 13
     available = canvas.height - top - 30
     gap = 14 if available >= 12 * 64 + 11 * 14 else 8
     height = max(44, min(64, (available - gap * (row_count - 1)) // row_count))
@@ -74,6 +74,15 @@ def render(ctx, canvas):
     row("忽略日文", "开" if ctx.config.get("ignore_japanese") else "关", "ignore_japanese")
     row("忽略 AI", "开" if ctx.config.get("ignore_ai") else "关", "ignore_ai")
     row("预加载章节", "开" if ctx.config.get("prefetch_chapters") else "关", "prefetch")
+    animation_supported = bool(
+        getattr(ctx.screen.output, "supports_swipe_animation", False)
+    )
+    row(
+        "翻页动画（仅较新型号支持）",
+        ("开" if ctx.config.get("page_turn_animation") else "关")
+        if animation_supported else "不支持",
+        "animation" if animation_supported else None,
+    )
     row("翻页闪屏", "开" if ctx.config.get("page_flash") else "关", "flash")
     size_text = "%.1f MB" % (cache_size(CACHE_DIR) / 1024.0 / 1024.0)
     row("缓存", size_text, "clear_cache")
@@ -106,9 +115,11 @@ def handle(data, ctx):
             index = values.index(current) if current in values else 0
             ctx.config.set("convert", values[(index + 1) % len(values)])
             ctx.show()
-        elif action in ("night", "indent", "flash", "ignore_japanese", "ignore_ai", "prefetch"):
+        elif action in ("night", "indent", "flash", "ignore_japanese",
+                        "ignore_ai", "prefetch", "animation"):
             mapping = {"night": "night_mode", "indent": "first_line_indent",
-                       "flash": "page_flash", "prefetch": "prefetch_chapters"}
+                       "flash": "page_flash", "prefetch": "prefetch_chapters",
+                       "animation": "page_turn_animation"}
             key = mapping.get(action, action)
             ctx.config.set(key, not bool(ctx.config.get(key)))
             ctx.show()
