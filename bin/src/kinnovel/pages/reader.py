@@ -484,7 +484,9 @@ def render(ctx, canvas):
 
 
 def _render_chrome(ctx, canvas, title, doc):
-    canvas.header(title, left="返回", right="主页")
+    # 控件层顶栏显示书名而非章节名，章节位置由底栏进度条表达
+    book_name = (STATE["data"] or {}).get("Chapter", {}).get("BookName") or title
+    canvas.header(book_name, left="返回", right="主页")
     footer_top = canvas.height - _CHROME_FOOTER
     canvas.draw.rectangle([0, footer_top, canvas.width, canvas.height],
                           fill=canvas.theme.background)
@@ -492,8 +494,7 @@ def _render_chrome(ctx, canvas, title, doc):
     margin = int(canvas.width * 0.025)
     gap = 6
     button_width = (canvas.width - 2 * margin - 3 * gap) // 4
-    page_label = "%s/%s" % (STATE["page"] + 1, doc.page_count) if doc else "1/1"
-    buttons = [("prev", "上一章"), ("catalog", page_label),
+    buttons = [("prev", "上一章"), ("catalog", "目录"),
                ("settings", "设置"), ("next", "下一章")]
     for index, (action, label) in enumerate(buttons):
         rect = (margin + index * (button_width + gap), bar_y, button_width, 56)
