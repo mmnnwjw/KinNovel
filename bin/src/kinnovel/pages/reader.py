@@ -11,11 +11,23 @@ from ..utils import atomic_write, read_json, stable_cache_name
 
 
 _CHAPTER_CACHE_TTL = 12 * 3600
+_CHAPTER_LOCKS = {}
+_CHAPTER_LOCKS_GUARD = threading.Lock()
 
 
 def _chapter_cache_path(book_id, sort_num, convert):
     key = "%s:%s:%s" % (int(book_id), int(sort_num), convert or "")
     return CACHE_DIR / "content" / (stable_cache_name(key) + ".json")
+
+
+def _chapter_lock(book_id, sort_num, convert):
+    key = (int(book_id), int(sort_num), convert or "")
+    with _CHAPTER_LOCKS_GUARD:
+        lock = _CHAPTER_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _CHAPTER_LOCKS[key] = lock
+        return lock
 
 
 def _progress_path(book_id, sort_num):
@@ -50,14 +62,36 @@ def _load_chapter(ctx, book_id, sort_num):
             fresh = False
     if cached and fresh:
         return cached
-    try:
-        response = ctx.api.get_novel_content(book_id, sort_num, convert=convert)
-    except Exception:
+    lock = _chapter_lock(book_id, sort_num, convert)
+    with lock:
+        cached = read_json(path)
         if cached:
-            return cached
-        raise
-    atomic_write(path, json.dumps(response, ensure_ascii=False))
-    return response
+            try:
+                if (time.time() - path.stat().st_mtime) < _CHAPTER_CACHE_TTL:
+                    return cached
+            except OSError:
+                pass
+        try:
+            response = ctx.api.get_novel_content(
+                book_id, sort_num, convert=convert)
+        except Exception:
+            if cached:
+                return cached
+            raise
+        atomic_write(path, json.dumps(response, ensure_ascii=False))
+        return response
+
+
+def prefetch_chapter(ctx, book_id, sort_num):
+    try:
+        response = _load_chapter(ctx, book_id, sort_num)
+    except Exception:
+        return False
+    font_url = (response.get("Chapter") or {}).get("Font")
+    if font_url:
+        ensure_font(font_url, ctx.api.server,
+                    strict_tls=bool(ctx.config.get("strict_tls")))
+    return True
 
 
 def _prefetch_images(ctx, document):
@@ -84,11 +118,7 @@ def _prefetch_neighbors(ctx, book_id, sort_num, chapters):
             continue
 
         def task(target=target):
-            response = _load_chapter(ctx, book_id, target)
-            font_url = (response.get("Chapter") or {}).get("Font")
-            if font_url:
-                ensure_font(font_url, ctx.api.server,
-                            strict_tls=bool(ctx.config.get("strict_tls")))
+            prefetch_chapter(ctx, book_id, target)
 
         ctx.run_async("reader", task, lambda _result: None, lambda _exc: None)
 

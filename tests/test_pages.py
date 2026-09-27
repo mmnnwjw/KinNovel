@@ -1,6 +1,6 @@
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageFont
 
@@ -149,6 +149,32 @@ class PageSmokeTests(unittest.TestCase):
         self.context.back()
         self.assertEqual(reader.STATE["page"], 5)
         self.assertNotIn("at_last", self.context.params)
+
+    def test_book_prefetches_server_reading_target(self):
+        class ImmediateContext:
+            config = self.context.config
+            api = self.context.api
+
+            @staticmethod
+            def run_async(_owner, operation, on_success=None, on_error=None):
+                result = operation()
+                if on_success:
+                    on_success(result)
+
+        book.STATE["book_id"] = 1
+        info = {
+            "Book": {
+                "Chapters": [
+                    {"Id": 10, "SortNum": 1},
+                    {"Id": 11, "SortNum": 10},
+                ],
+            },
+            "ReadPosition": {"ChapterId": 11},
+        }
+        context = ImmediateContext()
+        with patch("kinnovel.pages.reader.prefetch_chapter") as prefetch:
+            book._prefetch_reading_target(context, info)
+        prefetch.assert_called_once_with(context, 1, 10)
 
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
