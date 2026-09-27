@@ -111,6 +111,14 @@ def cache_size(path):
     return total
 
 
+def touch(path):
+    """刷新缓存文件 mtime，让 prune_cache 的淘汰顺序成为真正的 LRU"""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
 def prune_cache(path, limit_bytes):
     path = Path(path)
     if not path.exists():

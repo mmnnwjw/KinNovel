@@ -324,8 +324,22 @@ def _char_bitmap_bytes(font, character):
     return image.tobytes()
 
 
-def _notdef_bytes(font):
+_FONT_REFS = {}
+
+
+def _font_key(font):
+    # 不能用裸 id(font)：对象被回收后 id 会复用，缺字判定会串到别的字体上
+    path = getattr(font, "path", None)
+    if path:
+        return (str(path), int(getattr(font, "size", 0) or 0))
     key = id(font)
+    # 无 path 的字体(如 load_default)只能按 id 区分，持强引用防止 id 复用
+    _FONT_REFS[key] = font
+    return (key, 0)
+
+
+def _notdef_bytes(font):
+    key = _font_key(font)
     if key not in _NOTDEF_BYTES:
         _NOTDEF_BYTES[key] = _char_bitmap_bytes(font, "\U0010FFFF")
     return _NOTDEF_BYTES[key]
@@ -336,7 +350,7 @@ def glyph_available(font, character):
         return True
     if character.isspace():
         return True
-    key = (id(font), character)
+    key = (_font_key(font), character)
     cached = _GLYPH_CACHE.get(key)
     if cached is not None:
         return cached

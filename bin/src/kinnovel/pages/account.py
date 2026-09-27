@@ -179,8 +179,9 @@ def _load_notifications(ctx, page=None):
         NOTIFICATION_STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
         NOTIFICATION_STATE["loading"] = False
 
+    _top, _row_height, per_page = _notification_layout(ctx)
     ctx.run_async("notifications", lambda: ctx.api.get_notifications(
-        NOTIFICATION_STATE["page"], 16), success,
+        NOTIFICATION_STATE["page"], per_page), success,
         lambda exc: _notification_error(generation, exc, ctx))
 
 
@@ -190,11 +191,18 @@ def _notification_error(generation, exc, ctx):
         ctx.message(["通知加载失败", str(exc)])
 
 
+def _notification_layout(ctx):
+    # 同公告页：拉取条数必须等于可渲染行数，否则每页尾部通知永远翻不到
+    top = max(72, int(ctx.height * 0.085))
+    row_height = max(76, int(ctx.height * 0.063))
+    per_page = max(1, (ctx.height - top - 90) // row_height)
+    return top, row_height, per_page
+
+
 def render_notifications(ctx, canvas):
-    top = canvas.header("通知", left="返回", right="主页")
+    canvas.header("通知", left="返回", right="主页")
+    top, row_height, per_page = _notification_layout(ctx)
     margin = int(canvas.width * 0.035)
-    row_height = max(76, int(canvas.height * 0.063))
-    per_page = max(1, (canvas.height - top - 90) // row_height)
     items = NOTIFICATION_STATE["items"]
     pages = NOTIFICATION_STATE["total_pages"]
     NOTIFICATION_STATE["rects"] = {}

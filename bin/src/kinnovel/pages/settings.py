@@ -1,3 +1,4 @@
+from .. import VERSION
 from ..config import CACHE_DIR
 from ..utils import cache_size, clear_cache
 
@@ -138,7 +139,7 @@ def _clear(ctx):
 
 
 ABOUT_LINES = [
-    "KinNovel 0.4.3",
+    "KinNovel " + VERSION,
     "运行于 Kindle 原生系统的轻书架客户端",
     "",
     "开发参考",

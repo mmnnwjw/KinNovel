@@ -312,7 +312,7 @@ class PageSmokeTests(unittest.TestCase):
         self.assertFalse(reader.STATE["chrome_visible"])
         show.assert_called_once()
 
-    def test_reader_chrome_toggle_repaginates(self):
+    def test_reader_chrome_toggle_keeps_pagination(self):
         class ImmediateContext:
             config = self.context.config
             api = self.context.api
@@ -322,9 +322,7 @@ class PageSmokeTests(unittest.TestCase):
 
             @staticmethod
             def run_async(_owner, operation, on_success=None, on_error=None):
-                result = operation()
-                if on_success:
-                    on_success(result)
+                raise AssertionError("切换控件层不应触发重新排版")
 
         chapter = {
             "Title": "测试",
@@ -341,19 +339,82 @@ class PageSmokeTests(unittest.TestCase):
         })
         context = ImmediateContext()
         old_document = reader._prepare_document(context, chapter)
+        signature = reader._signature(context, 1, 1)
         reader.STATE.update({
             "doc": old_document,
             "page": 1,
-            "signature": reader._signature(context, 1, 1),
+            "signature": signature,
             "last_saved": -1,
         })
 
         reader._set_chrome_visible(context, False)
 
         self.assertFalse(reader.STATE["chrome_visible"])
-        self.assertIsNot(reader.STATE["doc"], old_document)
-        self.assertLess(reader.STATE["doc"].page_count,
-                        old_document.page_count)
+        self.assertIs(reader.STATE["doc"], old_document)
+        self.assertEqual(reader.STATE["page"], 1)
+        self.assertEqual(reader.STATE["signature"], signature)
+        context.show.assert_called_once()
+
+    def test_reader_enters_in_compact_mode(self):
+        self._prime_reader()
+        self.assertFalse(reader.STATE["chrome_visible"])
+        self.context.render()
+        self.assertEqual(self.context._header_state["left"], "")
+
+    def test_reader_middle_tap_hides_chrome_without_turning_page(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        reader.STATE["page"] = 5
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": self.context.width // 2,
+            "y-pixel": self.context.height // 2,
+        }, self.context)
+        self.assertFalse(reader.STATE["chrome_visible"])
+        self.assertEqual(reader.STATE["page"], 5)
+
+    def test_catalog_jump_drops_stale_reader_from_stack(self):
+        self._prime_reader()
+        self.context.navigate("catalog", book_id=1, sort_num=2)
+        self.assertEqual(self.context.stack[-1][0], "reader")
+        reader.STATE["rects"] = {("catalog", 4): (0, 0, 200, 60)}
+        calls = []
+        self.context.replace = lambda name, **params: calls.append((name, params))
+
+        reader.handle_catalog(
+            {"gesture": "tap", "x-pixel": 20, "y-pixel": 20}, self.context)
+
+        self.assertEqual(calls[0][0], "reader")
+        self.assertEqual(calls[0][1]["sort_num"], 5)
+        self.assertEqual([name for name, _ in self.context.stack], [])
+
+    def test_paged_lists_request_only_what_they_render(self):
+        cases = [
+            (announcements._load, announcements._layout, "get_announcement_list"),
+            (account._load_notifications, account._notification_layout,
+             "get_notifications"),
+        ]
+        for loader, layout, method in cases:
+            with self.subTest(method=method):
+                captured = {}
+                sizes = []
+                setattr(self.context.api, method,
+                        lambda page, size: sizes.append(size) or {"Data": []})
+                with patch.object(
+                    self.context, "run_async",
+                    lambda _owner, operation, _s=None, _e=None:
+                        captured.setdefault("operation", operation),
+                ):
+                    loader(self.context)
+                captured["operation"]()
+                _top, _row_height, per_page = layout(self.context)
+                # 拉取条数必须等于可渲染行数，否则每页尾部条目永远翻不到
+                self.assertEqual(sizes, [per_page])
+                self.assertLess(per_page, 16)
+
+    def test_about_page_reports_current_version(self):
+        from kinnovel import VERSION
+        self.assertEqual(settings.ABOUT_LINES[0], "KinNovel " + VERSION)
 
     def test_reader_swipe_down_from_top_restores_chrome(self):
         self._prime_reader()

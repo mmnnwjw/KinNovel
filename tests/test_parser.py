@@ -48,5 +48,21 @@ class TestMultiTouchParser(unittest.TestCase):
         self.assertEqual(gestures, [])
 
 
+    def test_position_event_after_reset_does_not_raise(self):
+        parser = MultiTouchParser(on_gesture=lambda _gesture: None)
+        parser.handle_event(event(ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 0))
+        parser.handle_event(event(ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, 7))
+
+        # 电源线程在两个坐标事件之间清空触摸状态（挂起/唤醒）
+        parser.reset()
+
+        parser.handle_event(event(ecodes.EV_ABS, ecodes.ABS_MT_POSITION_X, 100))
+        parser.handle_event(event(ecodes.EV_ABS, ecodes.ABS_MT_POSITION_Y, 200))
+
+        self.assertIn(0, parser.slots)
+        self.assertIsNotNone(parser.slots[0]["x"])
+        self.assertIsNotNone(parser.slots[0]["y"])
+
+
 if __name__ == "__main__":
     unittest.main()

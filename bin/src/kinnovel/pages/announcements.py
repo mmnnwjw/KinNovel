@@ -38,15 +38,23 @@ def _load(ctx, page=1):
         STATE["loading"] = False
         ctx.message(["公告加载失败", str(exc)])
 
+    _top, _row_height, per_page = _layout(ctx)
     ctx.run_async("announcements", lambda: ctx.api.get_announcement_list(
-        STATE["page"], 16), success, error)
+        STATE["page"], per_page), success, error)
+
+
+def _layout(ctx):
+    # 服务器分页大小必须等于实际可渲染行数，否则每页尾部条目永远翻不到
+    top = max(72, int(ctx.height * 0.085))
+    row_height = max(74, int(ctx.height * 0.061))
+    per_page = max(1, (ctx.height - top - 150) // row_height)
+    return top, row_height, per_page
 
 
 def render(ctx, canvas):
-    top = canvas.header("公告", left="返回", right="主页")
+    canvas.header("公告", left="返回", right="主页")
+    top, row_height, per_page = _layout(ctx)
     margin = int(canvas.width * 0.035)
-    row_height = max(74, int(canvas.height * 0.061))
-    per_page = max(1, (canvas.height - top - 150) // row_height)
     STATE["rects"] = {}
     for row in range(per_page):
         index = row
