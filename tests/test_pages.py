@@ -262,6 +262,20 @@ class PageSmokeTests(unittest.TestCase):
         })
         self.assertEqual(calls, [("book", {"book_id": 2})])
 
+    def test_series_page_does_not_prefetch_covers(self):
+        self.context.params = {
+            "title": "测试系列",
+            "series_name": "测试系列",
+            "current_id": 1,
+            "books": [
+                {"Id": 1, "Title": "第一卷", "Cover": "cover-1"},
+                {"Id": 2, "Title": "第二卷", "Cover": "cover-2"},
+            ],
+        }
+        with patch.object(self.context, "run_async") as run_async:
+            series.enter(self.context)
+        run_async.assert_not_called()
+
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
             "Book": {
