@@ -54,7 +54,15 @@ def _load(ctx, force=False):
                         continue
                 STATE["bound"] = book_id in ids
                 ctx.show()
-            ctx.run_async("book", ctx.api.get_book_shelf, shelf_result, lambda _: None)
+                _prefetch_reading_target(ctx, result)
+            ctx.run_async(
+                "book",
+                ctx.api.get_book_shelf,
+                shelf_result,
+                lambda _: _prefetch_reading_target(ctx, result),
+            )
+        else:
+            _prefetch_reading_target(ctx, result)
 
     def error(exc):
         if generation != STATE["generation"] or book_id != STATE["book_id"]:
@@ -63,6 +71,33 @@ def _load(ctx, force=False):
         ctx.message(["加载书籍失败", str(exc)])
 
     ctx.run_async("book", operation, success, error)
+
+
+def _prefetch_reading_target(ctx, book_info):
+    chapters = ((book_info or {}).get("Book") or {}).get("Chapters") or []
+    if not chapters:
+        return
+    position = (book_info or {}).get("ReadPosition") or {}
+    try:
+        chapter_id = int(position.get("ChapterId") or 0)
+    except (TypeError, ValueError):
+        chapter_id = 0
+    target = None
+    for index, chapter in enumerate(chapters):
+        if int(chapter.get("Id") or 0) == chapter_id:
+            target = chapter
+            break
+    target = target or chapters[0]
+    try:
+        sort_num = int(target.get("SortNum") or 1)
+    except (TypeError, ValueError):
+        sort_num = 1
+
+    def operation():
+        from . import reader
+        reader.prefetch_chapter(ctx, STATE["book_id"], sort_num)
+
+    ctx.run_async("book", operation, lambda _: None, lambda _: None)
 
 
 def enter(ctx):
