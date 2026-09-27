@@ -242,6 +242,17 @@ class ApiClient:
             params["Type"] = book_type
         return self.invoke("GetBookListByIds", params)
 
+    def get_books_by_series(self, series_name, page=1, size=24, order="latest",
+                            ignore_japanese=False, ignore_ai=False):
+        return self.invoke("GetBooksBySeries", {
+            "SeriesName": str(series_name or ""),
+            "Page": int(page),
+            "Size": int(size),
+            "Order": order,
+            "IgnoreJapanese": bool(ignore_japanese),
+            "IgnoreAI": bool(ignore_ai),
+        })
+
     def get_novel_content(self, book_id, sort_num, convert=None):
         params = {"Bid": int(book_id), "SortNum": int(sort_num)}
         if convert:

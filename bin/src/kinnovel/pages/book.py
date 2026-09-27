@@ -147,6 +147,7 @@ def render(ctx, canvas):
         canvas.centered_text("加载中…" if STATE["loading"] else "暂无数据",
                              ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
         return
+    STATE["rects"] = {}
     data = STATE["data"]
     book = data.get("Book") or {}
     classification = (book.get("Extra") or {}).get("classification") or {}
@@ -167,6 +168,20 @@ def render(ctx, canvas):
     for line in title_lines:
         canvas.text((info_x, y), line, font=ctx.fonts["title"])
         y += ctx.fonts["title"].size + 8
+    series = data.get("Series") or []
+    series_name = str(data.get("SeriesTitle") or "").strip()
+    classification = (book.get("Extra") or {}).get("classification") or {}
+    if not series_name:
+        series_name = str(
+            classification.get("series_name_cn")
+            or classification.get("series_name")
+            or ""
+        ).strip()
+    if series_name or len(series) > 1:
+        rect = (info_x, y + 2, min(150, info_width), 44)
+        canvas.button(rect, "系列", font=ctx.fonts["tiny"])
+        STATE["rects"][("series", 0)] = rect
+        y += 50
     author = book.get("Author") or classification.get("author") or "未知"
     details = [
         "作者: " + str(author),
@@ -178,7 +193,7 @@ def render(ctx, canvas):
         canvas.text((info_x, y), canvas.fit_text(line, ctx.fonts["small"], info_width),
                     font=ctx.fonts["small"], fill=canvas.theme.muted)
         y += ctx.fonts["small"].size + 8
-    summary_y = cover_y + cover_height + 12
+    summary_y = max(cover_y + cover_height + 12, y + 8)
     tags = classification.get("tags") or []
     if tags:
         canvas.text((margin, summary_y), "标签: " + "、".join(tags[:6]),
@@ -249,6 +264,24 @@ def handle(data, ctx):
             _toggle_shelf(ctx)
         elif action == "comments":
             ctx.navigate("comments", comment_type="Book", target_id=STATE["book_id"])
+        elif action == "series":
+            classification = (
+                (STATE["data"].get("Book") or {}).get("Extra") or {}
+            ).get("classification") or {}
+            series_name = str(STATE["data"].get("SeriesTitle") or "").strip()
+            if not series_name:
+                series_name = str(
+                    classification.get("series_name_cn")
+                    or classification.get("series_name")
+                    or ""
+                ).strip()
+            ctx.navigate(
+                "series",
+                title=series_name or "系列",
+                series_name=series_name,
+                books=STATE["data"].get("Series") or [],
+                current_id=STATE["book_id"],
+            )
         elif action == "prev" and STATE["chapter_page"] > 0:
             STATE["chapter_page"] -= 1
             ctx.show()
