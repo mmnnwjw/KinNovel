@@ -382,6 +382,37 @@ class FramebufferInitializationTests(unittest.TestCase):
         self.assertIsNone(captured["swipe_direction"])
         self.assertFalse(display._swipe_animation)
 
+    def test_rex_and_zelda_struct_sizes_and_ioctls(self):
+        import ctypes
+        module = _FRAMEBUFFER
+        self.assertEqual(ctypes.sizeof(module.MxcfbUpdateDataRex), 80)
+        self.assertEqual(ctypes.sizeof(module.MxcfbUpdateDataZelda), 88)
+
+        rex_ioctls = module._rex_ioctls()
+        zelda_ioctls = module._zelda_ioctls()
+        # 0x4050462E = _IOW('F', 0x2E, 80)
+        self.assertEqual(rex_ioctls["send_update"], 0x4050462E)
+        # 0x4058462E = _IOW('F', 0x2E, 88)
+        self.assertEqual(zelda_ioctls["send_update"], 0x4058462E)
+
+    def test_rex_and_zelda_protocol_init(self):
+        module = _FRAMEBUFFER
+        display_cls = module.EInkDisplay
+
+        with mock.patch.object(display_cls, "_read_screeninfo"), \
+                mock.patch.object(display_cls, "_init_epdc"), \
+                mock.patch.object(module.os, "open", return_value=100), \
+                mock.patch.object(module.os, "close"):
+            display_rex = display_cls("/dev/fb0", protocol="rex")
+            self.assertIs(display_rex.update_data_cls, module.MxcfbUpdateDataRex)
+            self.assertEqual(display_rex.ioctls["send_update"], 0x4050462E)
+            self.assertFalse(display_rex.supports_swipe_animation)
+
+            display_zelda = display_cls("/dev/fb0", protocol="zelda")
+            self.assertIs(display_zelda.update_data_cls, module.MxcfbUpdateDataZelda)
+            self.assertEqual(display_zelda.ioctls["send_update"], 0x4058462E)
+            self.assertFalse(display_zelda.supports_swipe_animation)
+
 
 if __name__ == "__main__":
     unittest.main()

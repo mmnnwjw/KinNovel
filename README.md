@@ -19,7 +19,7 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：[`0.5.3`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.5.3)
+当前版本：[`0.6.0`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.6.0)
 
 ## 界面预览
 
@@ -93,7 +93,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 [`KinNovel-v0.5.3.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.5.3/KinNovel-v0.5.3.zip)。
+1. 下载 Release 中的 [`KinNovel-v0.6.0.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.6.0/KinNovel-v0.6.0.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -202,21 +202,27 @@ Git，也不要分享带有真实凭据的 `config.json`。
 
 | 字段 | 说明 | 默认值 |
 |---|---|---|
-| `screen_protocol` | EPDC 协议；`auto` 自动探测 `mtk`、`mxcfb` | `auto` |
+| `screen_protocol` | EPDC 刷新协议；`auto` 自动探测（按 `mtk`、`rex`、`zelda`、`mxcfb` 顺序）；支持手动指定 | `auto` |
 | `framebuffer` | Kindle framebuffer 路径 | `/dev/fb0` |
 | `page_flash` | 翻页时是否强制全屏刷新 | `false` |
 | `page_turn_animation` | KPW5 及更新 MTK 平台使用原生 EPDC 翻页动画 | `true` |
 | `reader_guide_dismissed` | 是否不再显示阅读页首次操作指引 | `false` |
 | `night_mode` | 是否使用黑白反转的夜间模式 | `false` |
 
-屏幕无法显示或刷新异常时，可手动指定：
+各协议支持机型：
+
+- `mtk`：Paperwhite 5 (PW5 / Bellatrix)、Kindle 11 等联发科芯片机型
+- `rex`：Paperwhite 4 (KPW4 / Rex)、Kindle Touch 4 (KT4) 等 i.MX6SLL 芯片机型
+- `zelda`：Kindle Oasis 2 (KOA2)、Kindle Oasis 3 (KOA3) 等 i.MX7D 芯片机型
+- `mxcfb`：Paperwhite 2/3、Kindle Voyage、Kindle Touch 2/3 等经典 i.MX6SL 芯片机型
+
+> [!NOTE]
+> 目前除 **KPW5** 经开发机完整实机测试外，其余机型（KPW4/KT4、KOA2/3、老款 PW2/3 等）刷新协议已参照 KOReader / FBInk 严格对齐结构体尺寸与 ioctl 实现，处于**待实机测试反馈状态**，欢迎使用对应设备的读者测试并提交反馈！
+
+屏幕无法显示或刷新异常时，可手动指定协议（写入 `bin/config.json`）：
 
 ```json
-{"screen_protocol": "mtk"}
-```
-
-```json
-{"screen_protocol": "mxcfb"}
+{"screen_protocol": "rex"}
 ```
 
 ### 阅读
@@ -382,15 +388,12 @@ rm -rf /tmp/kinnovel.lock
 
 ### 屏幕刷新异常
 
-依次尝试：
+根据你的设备机型，在 `bin/config.json` 中明确指定：
 
-```json
-{"screen_protocol": "mtk"}
-```
-
-```json
-{"screen_protocol": "mxcfb"}
-```
+- **PW5 / Kindle 11**：`{"screen_protocol": "mtk"}`
+- **KPW4 / KT4**：`{"screen_protocol": "rex"}`
+- **KOA2 / KOA3**：`{"screen_protocol": "zelda"}`
+- **PW2 / PW3 / Voyage / KT2/3**：`{"screen_protocol": "mxcfb"}`
 
 ### 字体异常
 

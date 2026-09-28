@@ -1,11 +1,17 @@
 """e-ink 屏幕输出:Pillow 图像渲染与 EPDC framebuffer 刷新.
 实现参考:KOReader,fbink,感谢原仓库的贡献者
-    - mxcfb:Kindle lab126 内核 EPDC(KOA/KT/KP/PW2/PW3 等),
+    - mxcfb:Kindle lab126 内核 EPDC(PW2/PW3/KT2/KT3/Voyage 等 i.MX6SL),
         MXCFB_SEND_UPDATE = _IOW('F', 0x2E, 68)
         MXCFB_WAIT_FOR_UPDATE_COMPLETE = _IOWR('F', 0x2F, 8) (marker_data)
         结构体含 hist_bw/hist_gray 波形字段,与 NXP 上游 mxcfb.h 不同.
         定义来源:KOReader koreader-base ffi-cdecl/include/mxcfb-kindle.h
-    - mtk:MTK hwtcon(Paperwhite 4 = Bellatrix 等),ioctl 号相同但结构体 96 字节:
+    - rex:Kindle Paperwhite 4 (PW4 = Rex), KT4 (i.MX6SLL), 80 字节:
+        MXCFB_SEND_UPDATE_REX          = _IOW('F', 0x2E, 80)
+        定义来源:KOReader mxcfb_update_data_rex / FBInk
+    - zelda:Kindle Oasis 2, Oasis 3 (KOA2/KOA3 = Zelda, i.MX7D), 88 字节:
+        MXCFB_SEND_UPDATE_ZELDA        = _IOW('F', 0x2E, 88)
+        定义来源:KOReader mxcfb_update_data_zelda / FBInk
+    - mtk:MTK hwtcon(Paperwhite 5 = Bellatrix, K11 等),ioctl 号相同但结构体 96 字节:
         MXCFB_SEND_UPDATE_MTK          = _IOW('F', 0x2E, 96)
         MXCFB_WAIT_FOR_UPDATE_COMPLETE = _IOWR('F', 0x2F, 8)
         MXCFB_SET_PWRDOWN_DELAY        = _IOW('F', 0x30, 4)
@@ -183,6 +189,40 @@ class MxcfbUpdateDataMtk(ctypes.Structure):
         ("ts_epdc", ctypes.c_uint32),
     ]
 
+# Rex 设备的 update_data 结构体(80 字节) - Paperwhite 4 (Rex), KT4
+class MxcfbUpdateDataRex(ctypes.Structure):
+    _fields_ = [
+        ("update_region", MxcfbRectMtk),
+        ("waveform_mode", ctypes.c_uint32),
+        ("update_mode", ctypes.c_uint32),
+        ("update_marker", ctypes.c_uint32),
+        ("temp", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+        ("dither_mode", ctypes.c_int32),
+        ("quant_bit", ctypes.c_int32),
+        ("alt_buffer_data", MxcfbAltBufferDataMtk),
+        ("hist_bw_waveform_mode", ctypes.c_uint32),
+        ("hist_gray_waveform_mode", ctypes.c_uint32),
+    ]
+
+# Zelda 设备的 update_data 结构体(88 字节) - Oasis 2, Oasis 3
+class MxcfbUpdateDataZelda(ctypes.Structure):
+    _fields_ = [
+        ("update_region", MxcfbRectMtk),
+        ("waveform_mode", ctypes.c_uint32),
+        ("update_mode", ctypes.c_uint32),
+        ("update_marker", ctypes.c_uint32),
+        ("temp", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+        ("dither_mode", ctypes.c_int32),
+        ("quant_bit", ctypes.c_int32),
+        ("alt_buffer_data", MxcfbAltBufferDataMtk),
+        ("hist_bw_waveform_mode", ctypes.c_uint32),
+        ("hist_gray_waveform_mode", ctypes.c_uint32),
+        ("ts_pxp", ctypes.c_uint32),
+        ("ts_epdc", ctypes.c_uint32),
+    ]
+
 # MTK 设备的 update_marker_data 结构体(8 字节)
 class MxcfbUpdateMarkerData(ctypes.Structure):
     _fields_ = [
@@ -223,6 +263,22 @@ def _mxcfb_ioctls():
         "set_pwrdown_delay": _iow("F", 0x30, 4),
     }
 
+def _rex_ioctls():
+    return {
+        "send_update": _iow("F", 0x2E, ctypes.sizeof(MxcfbUpdateDataRex)),
+        "wait_complete": _iowr("F", 0x2F, ctypes.sizeof(MxcfbUpdateMarkerData)),
+        "wait_submission": _iow("F", 0x37, 4),
+        "set_pwrdown_delay": _iow("F", 0x30, 4),
+    }
+
+def _zelda_ioctls():
+    return {
+        "send_update": _iow("F", 0x2E, ctypes.sizeof(MxcfbUpdateDataZelda)),
+        "wait_complete": _iowr("F", 0x2F, ctypes.sizeof(MxcfbUpdateMarkerData)),
+        "wait_submission": _iow("F", 0x37, 4),
+        "set_pwrdown_delay": _iow("F", 0x30, 4),
+    }
+
 def _mtk_ioctls():
     return {
         "send_update": _iow("F", 0x2E, ctypes.sizeof(MxcfbUpdateDataMtk)),
@@ -234,7 +290,8 @@ def _mtk_ioctls():
 # EPDC framebuffer 封装
 class EInkDisplay:
     """EPDC framebuffer 封装:ioctl 提交更新 + Pillow 图像写入.
-    protocol 可选 "mtk"(Paperwhite 4 等)或 "mxcfb"(标准 i.MX).
+    protocol 可选 "mtk"(Paperwhite 5 等)、"rex"(Paperwhite 4 等)、
+    "zelda"(Oasis 2/3) 或 "mxcfb"(标准 i.MX).
     MXCFB ioctl 是 32 位编码,c_uint32 对齐到 4 字节
     """
     _show_lock = threading.Lock()
@@ -247,6 +304,22 @@ class EInkDisplay:
             if protocol == "mtk":
                 self.update_data_cls = MxcfbUpdateDataMtk
                 self.ioctls = _mtk_ioctls()
+                self.W = WAVEFORM_MTK
+                self.FLAG = FLAG_MTK
+                self.flash_invalid_waveforms = (WAVEFORM_MTK.AUTO, WAVEFORM_MTK.DU,
+                                                WAVEFORM_MTK.A2, WAVEFORM_MTK.DU4)
+                self.reagl_waveform = WAVEFORM_MTK.REAGL
+            elif protocol == "rex":
+                self.update_data_cls = MxcfbUpdateDataRex
+                self.ioctls = _rex_ioctls()
+                self.W = WAVEFORM_MTK
+                self.FLAG = FLAG_MTK
+                self.flash_invalid_waveforms = (WAVEFORM_MTK.AUTO, WAVEFORM_MTK.DU,
+                                                WAVEFORM_MTK.A2, WAVEFORM_MTK.DU4)
+                self.reagl_waveform = WAVEFORM_MTK.REAGL
+            elif protocol == "zelda":
+                self.update_data_cls = MxcfbUpdateDataZelda
+                self.ioctls = _zelda_ioctls()
                 self.W = WAVEFORM_MTK
                 self.FLAG = FLAG_MTK
                 self.flash_invalid_waveforms = (WAVEFORM_MTK.AUTO, WAVEFORM_MTK.DU,
@@ -372,6 +445,9 @@ class EInkDisplay:
             if swipe_direction is not None:
                 data.swipe_data.direction = swipe_direction
                 data.swipe_data.steps = self.swipe_steps
+        elif hasattr(data, "dither_mode"):
+            data.dither_mode = 0  # EPDC_FLAG_USE_DITHERING_PASSTHROUGH
+            data.quant_bit = 0
         return self._ioctl(self.ioctls["send_update"], data) is not None
 
     # 等待更新完成
