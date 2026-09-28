@@ -88,7 +88,7 @@ class KinNovelApp:
         fb_path = self.config.get("framebuffer") or "/dev/fb0"
         protocols = [self.config.get("screen_protocol") or "auto"]
         if protocols[0] in ("auto", "", None):
-            protocols = ["mtk", "mxcfb"]
+            protocols = ["mtk", "rex", "zelda", "mxcfb"]
         initialized = False
         for protocol in protocols:
             try:

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(_BIN, "src"))
 from screen.output.framebuffer import EInkDisplay  # noqa: E402
 
 FB_PATH = "/dev/fb0"
-PROTOCOLS = ("mtk", "mxcfb")
+PROTOCOLS = ("mtk", "rex", "zelda", "mxcfb")
 
 
 def _configured_protocols():
