@@ -338,7 +338,8 @@ class EInkDisplay:
             self.wait_for_submission_before = wait_for_submission_before
             self.wait_for_completion = wait_for_completion
             self.ioctl_timeout = ioctl_timeout
-            self.temp = temp
+            # Rex / Zelda 硬件默认使用板载环境温度传感器 (TEMP_USE_AMBIENT = 0x1000)
+            self.temp = 0x1000 if (protocol in ("rex", "zelda") and temp == 25) else temp
             self.is_reagl = is_reagl
             self.night_mode = night_mode
             self.alignment = alignment
