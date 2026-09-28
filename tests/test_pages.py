@@ -62,6 +62,9 @@ class Api:
     server = "https://api.lightnovel.life"
     user = {"Id": 1, "UserName": "测试用户", "Growth": {}}
 
+    def save_read_position(self, book_id, chapter_id, xpath):
+        return None
+
 
 class App:
     def __init__(self):
@@ -557,6 +560,30 @@ class PageSmokeTests(unittest.TestCase):
             {"height": max(72, int(self.context.height * 0.085)),
              "left": "返回", "right": "主页"},
         )
+
+    def test_reader_turn_page_does_not_upload_progress(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        reader.STATE["page"] = 2
+        with patch.object(self.context.api, "save_read_position") as save_pos:
+            reader._turn(self.context, 1)
+            self.assertEqual(reader.STATE["page"], 3)
+            save_pos.assert_not_called()
+
+    def test_reader_header_back_and_home_upload_progress(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        reader.STATE["last_turn_at"] = 0.0
+        self.context.render()
+        reader.STATE["page"] = 4
+        with patch.object(self.context.api, "save_read_position") as save_pos:
+            self.context.handle({
+                "gesture": "tap",
+                "x-pixel": 50,
+                "y-pixel": 20,
+            })
+            time.sleep(0.05)
+            self.assertTrue(save_pos.called)
 
     def test_reader_tap_sides_turn_pages(self):
         self._prime_reader()
