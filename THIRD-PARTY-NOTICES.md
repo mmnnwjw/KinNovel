@@ -21,6 +21,14 @@ The complete license text is included in `LICENSE`.
   snapshot, and Python packaging layout.
 - License: GPLv3.
 
+### FBInk
+
+- URL: https://github.com/NiLuJe/FBInk
+- Used for: Kindle EPDC driver interface references, hardware platform quirks
+  (MTK, Rex, Zelda, and legacy MXCFB), ambient temperature constants, and
+  screen update alignment specifications.
+- License: AGPLv3 / GPLv3.
+
 ### KOReader
 
 - URL: https://github.com/koreader/koreader

@@ -72,7 +72,7 @@ Qt 或桌面环境。
 | 图片 | 正文插图、服务端缩放图、全章插图预取、点击全屏预览与再次点击退出 |
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
-| 显示 | MTK 与 MXCFB EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
+| 显示 | MTK、Rex、Zelda 与 MXCFB 多机型 EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
 | 电源与休眠 | 监听物理电源键与原生 LIPC 休眠/唤醒事件（goingToScreenSaver / outOfScreenSaver）；休眠自动让渡屏幕与触控，唤醒全刷无损恢复上次阅读界面；电源状态看门狗在事件丢失时自动恢复，避免卡死在休眠态 |
 
 ## 环境要求
@@ -450,11 +450,21 @@ rm -rf /mnt/us/extensions/kinnovel
   - KUAL 启动、系统进程暂停、屏幕快照和恢复流程。
   - Kindle ARM 运行库的组织和启动方式。
 
+### FBInk
+
+- 项目：<https://github.com/NiLuJe/FBInk>
+- 用途：Kindle 各代硬件电子墨水屏控制器（EPDC）底层驱动接口与平台特性（Quirks）参考。
+- 借鉴内容：
+  - 各硬件平台（MTK hwtcon、Rex i.MX6SLL、Zelda i.MX7D、经典 MXCFB i.MX6SL）ioctl 命令字与波形参数规范。
+  - 板载环境温度传感器常量（`TEMP_USE_AMBIENT = 0x1000`）及波形温度补偿机制。
+  - 刷新区域边界对齐算法（8 像素步长对齐）与防残影策略。
+
 ### KOReader
 
 - 项目：<https://github.com/koreader/koreader>
-- 用途：休眠与电源事件调度机制参考；提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
+- 用途：休眠与电源事件调度机制参考；多机型（Rex / Zelda / MTK / MXCFB）EPDC 驱动结构体与 ioctl 定义参考；提供章节 WOFF2 字体所需的 FreeType/Brotli 运行时。
 - 使用方式：
+  - 借鉴 KOReader 对多平台 `mxcfb-kindle.h` 驱动结构体（如 `mxcfb_update_data_rex` 与 `mxcfb_update_data_zelda`）的逆向与封装。
   - 休眠与唤醒流程参考了 KOReader 对 Kindle LIPC 电源事件与进程状态的协调管理。
   - Release 包内置 KOReader `v2026.03` 的 FreeType 与匹配 zlib：
 
