@@ -361,7 +361,6 @@ def _save_progress(ctx):
     STATE["last_saved"] = page
     chapter = (STATE["data"].get("Chapter") or {})
     book_id = int(chapter.get("BookId") or STATE["book_id"])
-    chapter_id = int(chapter.get("Id") or 0)
     path, offset = STATE["doc"].first_anchor_on_page(page)
     try:
         atomic_write(
@@ -373,6 +372,15 @@ def _save_progress(ctx):
         )
     except OSError:
         pass
+
+
+def upload_progress(ctx):
+    if not ctx.api.user or not STATE["doc"] or not STATE["data"]:
+        return
+    page = int(STATE["page"])
+    chapter = (STATE["data"].get("Chapter") or {})
+    book_id = int(chapter.get("BookId") or STATE["book_id"])
+    chapter_id = int(chapter.get("Id") or 0)
     xpath = STATE["doc"].first_path_on_page(page)
     ctx.run_async("reader", lambda: ctx.api.save_read_position(book_id, chapter_id, xpath),
                   lambda _: None, lambda _: None)

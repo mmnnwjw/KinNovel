@@ -429,10 +429,16 @@ class PageContext:
                     return None
                 if (x < int(self.width * 0.16)
                         and self._header_state.get("left")):
+                    callback = getattr(self.pages[self.page_name], "upload_progress", None)
+                    if callable(callback):
+                        callback(self)
                     self.back()
                     return None
                 if (x > int(self.width * 0.84)
                         and self._header_state.get("right") == "主页"):
+                    callback = getattr(self.pages[self.page_name], "upload_progress", None)
+                    if callable(callback):
+                        callback(self)
                     self.home()
                     return None
         return self.pages[self.page_name].handle(data, self)
