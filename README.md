@@ -217,13 +217,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
 - `mxcfb`：Paperwhite 2/3、Kindle Voyage、Kindle Touch 2/3 等经典 i.MX6SL 芯片机型
 
 > [!NOTE]
-> 目前除 **KPW5** 经开发机完整实机测试外，其余机型（KPW4/KT4、KOA2/3、老款 PW2/3 等）刷新协议已参照 KOReader / FBInk 严格对齐结构体尺寸与 ioctl 实现，处于**待实机测试反馈状态**，欢迎使用对应设备的读者测试并提交反馈！
-
-屏幕无法显示或刷新异常时，可手动指定协议（写入 `bin/config.json`）：
-
-```json
-{"screen_protocol": "rex"}
-```
+> 目前除 **KPW5** **KPW4**经实机测试外，其余机型（KT4、KOA2/3、老款 PW2/3 等）刷新协议已参照 KOReader / FBInk 严格对齐结构体尺寸与 ioctl 实现，处于**待实机测试反馈状态**，欢迎使用对应设备的用户测试并提交反馈！
 
 ### 阅读
 
