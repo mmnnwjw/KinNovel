@@ -140,6 +140,23 @@ target_include_directories(kinnovel_ui PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Main Executable
+add_executable(kinnovel
+    src/main.cpp
+)
+target_link_libraries(kinnovel PRIVATE
+    kinnovel_ui
+    kinnovel_network
+    kinnovel_reader
+    kinnovel_hal
+    kinnovel_core
+)
+target_include_directories(kinnovel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+)
+
 # Tools
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)
     add_executable(live_smoke ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)

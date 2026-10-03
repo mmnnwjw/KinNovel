@@ -81,12 +81,20 @@ resume_fb_users() {
 }
 
 save_snapshot() {
-  "$PYTHON" "$SCRIPT_DIR/fb_snapshot.py" save "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+  if [ -x "$SCRIPT_DIR/kinnovel" ]; then
+    "$SCRIPT_DIR/kinnovel" snapshot save "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+  elif [ -x "$PYTHON" ] && [ -f "$SCRIPT_DIR/fb_snapshot.py" ]; then
+    "$PYTHON" "$SCRIPT_DIR/fb_snapshot.py" save "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+  fi
 }
 
 restore_snapshot() {
   if [ -f "$FB_SNAPSHOT" ]; then
-    "$PYTHON" "$SCRIPT_DIR/fb_snapshot.py" restore "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+    if [ -x "$SCRIPT_DIR/kinnovel" ]; then
+      "$SCRIPT_DIR/kinnovel" snapshot restore "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+    elif [ -x "$PYTHON" ] && [ -f "$SCRIPT_DIR/fb_snapshot.py" ]; then
+      "$PYTHON" "$SCRIPT_DIR/fb_snapshot.py" restore "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
+    fi
     rm -f "$FB_SNAPSHOT"
   fi
 }
@@ -109,8 +117,18 @@ log "starting KinNovel"
 pause_fb_users
 save_snapshot
 usleep 300000 2>/dev/null || sleep 1
-"$PYTHON" "$SCRIPT_DIR/app.py" >>"$LOG_FILE" 2>&1
-RET=$?
+
+if [ -x "$SCRIPT_DIR/kinnovel" ]; then
+  "$SCRIPT_DIR/kinnovel" "$@" >>"$LOG_FILE" 2>&1
+  RET=$?
+elif [ -x "$PYTHON" ] && [ -f "$SCRIPT_DIR/app.py" ]; then
+  "$PYTHON" "$SCRIPT_DIR/app.py" "$@" >>"$LOG_FILE" 2>&1
+  RET=$?
+else
+  log "error: neither C++ binary ($SCRIPT_DIR/kinnovel) nor python runtime found"
+  RET=1
+fi
+
 trap - INT TERM EXIT
 on_exit
 exit $RET

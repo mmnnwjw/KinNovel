@@ -27,6 +27,7 @@ cp "$SCRIPT_DIR/manifest.json" "$TARGET/"
 cp "$SCRIPT_DIR/LICENSE" "$TARGET/"
 cp "$SCRIPT_DIR/THIRD-PARTY-NOTICES.md" "$TARGET/"
 chmod +x "$TARGET/bin/start.sh"
+[ -f "$TARGET/bin/kinnovel" ] && chmod +x "$TARGET/bin/kinnovel" || true
 
 mkdir -p /mnt/us/documents/kinnovel
 echo "KinNovel installed to $TARGET"
