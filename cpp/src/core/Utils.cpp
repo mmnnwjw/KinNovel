@@ -284,6 +284,11 @@ std::optional<int> Utils::batteryLevel() {
     return std::nullopt;
 }
 
+double Utils::monotonicSeconds() {
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
+}
+
 void Utils::ensureDirectories(const std::string& appDir) {
     try {
         fs::create_directories(appDir);

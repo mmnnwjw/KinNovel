@@ -39,3 +39,17 @@ add_executable(test_network
 )
 target_link_libraries(test_network PRIVATE kinnovel_network kinnovel_core)
 add_test(NAME test_network COMMAND test_network)
+
+# UI Unit Test
+add_executable(test_ui
+    unit/test_ui.cpp
+)
+target_link_libraries(test_ui PRIVATE
+    kinnovel_ui
+    kinnovel_network
+    kinnovel_reader
+    kinnovel_hal
+    kinnovel_core
+)
+add_test(NAME test_ui COMMAND test_ui)
+

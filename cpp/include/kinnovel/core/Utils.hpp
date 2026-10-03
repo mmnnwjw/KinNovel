@@ -29,6 +29,7 @@ public:
     static void clearCache(const std::string& path);
 
     static std::optional<int> batteryLevel();
+    static double monotonicSeconds();
     static void ensureDirectories(const std::string& appDir);
 };
 

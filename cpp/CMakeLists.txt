@@ -111,6 +111,35 @@ target_include_directories(kinnovel_network PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# UI library
+set(UI_SOURCES
+    src/ui/Canvas.cpp
+    src/ui/ImageCache.cpp
+    src/ui/PageContext.cpp
+    src/ui/pages/HomePage.cpp
+    src/ui/pages/BrowsePage.cpp
+    src/ui/pages/RankPage.cpp
+    src/ui/pages/BookDetailPage.cpp
+    src/ui/pages/SeriesPage.cpp
+    src/ui/pages/ShelfPage.cpp
+    src/ui/pages/HistoryPage.cpp
+    src/ui/pages/ReaderPage.cpp
+    src/ui/pages/SettingsPage.cpp
+    src/ui/pages/AccountPage.cpp
+    src/ui/pages/AnnouncementsPage.cpp
+)
+add_library(kinnovel_ui STATIC ${UI_SOURCES})
+target_link_libraries(kinnovel_ui PUBLIC
+    kinnovel_reader
+    kinnovel_network
+    kinnovel_hal
+    kinnovel_core
+)
+target_include_directories(kinnovel_ui PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 # Tools
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)
     add_executable(live_smoke ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)
@@ -123,3 +152,4 @@ if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+

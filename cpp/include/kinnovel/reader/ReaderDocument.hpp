@@ -59,6 +59,14 @@ public:
                    std::string systemFont,
                    std::shared_ptr<core::Config> config);
 
+    ReaderDocument(std::string rawHtml,
+                   std::string fontUrl,
+                   std::string baseUrl,
+                   std::string systemFont,
+                   std::shared_ptr<core::Config> config,
+                   std::string title = "",
+                   std::vector<std::string> chapters = {});
+
     ~ReaderDocument();
 
     const std::vector<Page>& prepare(int width, int height);

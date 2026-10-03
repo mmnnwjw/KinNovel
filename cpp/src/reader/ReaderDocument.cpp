@@ -208,6 +208,24 @@ ReaderDocument::ReaderDocument(const yyjson_val* chapterVal,
     m_blocks = HtmlParser::extractBlocks(m_rawHtml, m_baseUrl);
 }
 
+ReaderDocument::ReaderDocument(std::string rawHtml,
+                               std::string fontUrl,
+                               std::string baseUrl,
+                               std::string systemFont,
+                               std::shared_ptr<core::Config> config,
+                               std::string title,
+                               std::vector<std::string> chapters)
+    : m_title(std::move(title)),
+      m_fontUrl(std::move(fontUrl)),
+      m_chapters(std::move(chapters)),
+      m_rawHtml(std::move(rawHtml)),
+      m_baseUrl(std::move(baseUrl)),
+      m_systemFont(std::move(systemFont)),
+      m_config(std::move(config)),
+      m_fontResolver(m_systemFont) {
+    m_blocks = HtmlParser::extractBlocks(m_rawHtml, m_baseUrl);
+}
+
 ReaderDocument::~ReaderDocument() = default;
 
 void ReaderDocument::parseChapterJson(const yyjson_val* chapterVal) {
