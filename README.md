@@ -488,7 +488,53 @@ rm -rf /mnt/us/extensions/kinnovel
 
 完整第三方说明见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
 
+---
+
+## C++17 重构版本 (rewrite/cpp)
+
+为彻底去除对 Kindle 越狱环境下 Python 3.14 运行时及众多共享库的依赖，KinNovel 已基于 C++17 重写为**单一独立静态链接的 ELF 二进制**。
+
+### 主要改进
+- **零 Python 依赖**：无需安装 πthon 或 Python 3.14 运行时。
+- **极小体积**：发布包从约 25MB 缩减至 **4.5MB**。
+- **毫秒级极速冷启动**：去除了 Python 模块导入和动态链接开销。
+- **内存占用更低**：基于 `yyjson` 高性能解析与精细控制的 LRU 缓存，完美适应 512MB RAM 老旧机型。
+- **100% 配置文件兼容**：无缝读取并写回现有 `config.json`。
+
+### 详细迁移文档
+- [架构分析与接口规范 (ANALYSIS.md)](docs/cpp-migration/ANALYSIS.md)
+- [功能对齐与兼容性对照矩阵 (PARITY.md)](docs/cpp-migration/PARITY.md)
+- [技术决策记录 (DECISIONS.md)](docs/cpp-migration/DECISIONS.md)
+
+### 构建与测试
+
+#### 1. 原生构建与测试（Linux x86_64 / Termux）
+```bash
+cd cpp
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+make -j4
+ctest --output-on-failure
+```
+
+#### 2. Kindle 交叉编译（koxtoolchain kindlehf）
+```bash
+cd cpp
+mkdir -p build-kindle && cd build-kindle
+cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/Toolchain-kindlehf.cmake -DCMAKE_BUILD_TYPE=Release
+make kinnovel -j4
+```
+
+#### 3. 打包 KUAL 扩展包
+```bash
+./tools/package_kual.sh cpp/build/kinnovel build/
+# 生成: build/KinNovel-v0.6.0-kual.zip (可直接解压至 Kindle /mnt/us/extensions/)
+```
+
+---
+
 ## 许可证
 
 KinNovel 使用 GPLv3 发布。LightNovelShelf 内容、封面、正文和字体归原站及
 对应权利人所有。使用前请阅读并遵守站点规则和内容许可。
+
