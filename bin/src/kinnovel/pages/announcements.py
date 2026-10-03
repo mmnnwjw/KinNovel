@@ -64,6 +64,8 @@ def render(ctx, canvas):
         if index >= len(STATE["items"]):
             continue
         item = STATE["items"][index]
+        if not isinstance(item, dict):
+            continue
         canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
                                       radius=8, outline=canvas.theme.mid, width=1)
         created = str(item.get("CreatedAt") or "")[:10]

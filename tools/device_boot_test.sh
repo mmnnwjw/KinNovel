@@ -45,5 +45,9 @@ if [ -d "/proc/$PID" ]; then
 fi
 echo "stopped"
 
+for _ in $(seq 1 15); do
+  [ -d /tmp/kinnovel.lock ] || break
+  sleep 1
+done
 [ -d /tmp/kinnovel.lock ] && echo "LOCK_LEFT" || echo "lock_removed"
 tail -8 "$APP/logs/kinnovel.log"

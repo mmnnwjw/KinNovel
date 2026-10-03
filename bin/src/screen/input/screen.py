@@ -199,7 +199,12 @@ class ScreenInput:
                 ready, _, _ = select.select([self.device], [], [], 0.05)
                 if ready:
                     for ev in self.device.read():
-                        self.parser.handle_event(ev)
+                        try:
+                            self.parser.handle_event(ev)
+                        except Exception:
+                            # 单个手势处理失败不应终止整个输入循环
+                            import traceback
+                            traceback.print_exc()
                 if on_idle is not None:
                     try:
                         on_idle()

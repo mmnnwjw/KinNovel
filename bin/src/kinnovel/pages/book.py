@@ -12,6 +12,17 @@ STATE = {
 }
 
 
+def _cover_ready(ctx, ok=True):
+    if not ok:
+        return
+
+    def apply():
+        if ctx.page_name == "book":
+            ctx.show()
+
+    ctx.post(apply)
+
+
 def _load(ctx, force=False):
     if not ctx.api.user:
         ctx.toast("查看详情需要登录")
@@ -37,12 +48,20 @@ def _load(ctx, force=False):
     def success(result):
         if generation != STATE["generation"] or book_id != STATE["book_id"]:
             return
+        result = result or {}
         STATE["data"] = result
         STATE["loading"] = False
         STATE["chapter_page"] = 0
         cover = (result.get("Book") or {}).get("Cover")
         if cover:
-            ctx.run_async("book", lambda: ctx.images.prefetch(cover, ctx.config.get("strict_tls")))
+            ctx.run_async(
+                "book",
+                lambda: ctx.images.prefetch(
+                    cover, ctx.config.get("strict_tls"),
+                    height=512, priority=1,
+                    callback=lambda ok: _cover_ready(ctx, ok)),
+                refresh=False,
+            )
         if ctx.api.user:
             def shelf_result(shelf):
                 if book_id != STATE["book_id"]:
@@ -87,10 +106,15 @@ def _prefetch_reading_target(ctx, book_info, book_id=None):
         chapter_id = 0
     target = None
     for index, chapter in enumerate(chapters):
+        if not isinstance(chapter, dict):
+            continue
         if int(chapter.get("Id") or 0) == chapter_id:
             target = chapter
             break
-    target = target or chapters[0]
+    target = target or next(
+        (chapter for chapter in chapters if isinstance(chapter, dict)), None)
+    if not isinstance(target, dict):
+        return
     try:
         sort_num = int(target.get("SortNum") or 1)
     except (TypeError, ValueError):

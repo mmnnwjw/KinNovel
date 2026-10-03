@@ -827,6 +827,44 @@ class PageSmokeTests(unittest.TestCase):
         result = self.context.handle({"gesture": "long", "x-pixel": 10, "y-pixel": 200})
         self.assertEqual(result, "long")
 
+    def test_history_render_survives_null_entries(self):
+        history.STATE.update({
+            "items": [None, {"Title": "正常", "UserName": "作者"}, "bad"],
+            "page": 0,
+            "loading": False,
+            "loaded": True,
+            "error": "",
+        })
+        self.context.register("history", history)
+        self.context.page_name = "history"
+        self.context.render()  # 不应抛出 AttributeError
+
+    def test_show_survives_broken_page_render(self):
+        class Broken:
+            @staticmethod
+            def render(context, canvas):
+                raise RuntimeError("boom")
+
+            @staticmethod
+            def handle(data, context):
+                return None
+
+        self.context.register("broken", Broken)
+        self.context.page_name = "broken"
+        self.context.show()  # 必须降级到错误页而不是让异常冒泡
+
+    def test_browse_render_survives_null_entries(self):
+        browse.STATE.update({
+            "items": [None, {"Title": "书", "UserName": "作者"}],
+            "page": 1,
+            "total_pages": 1,
+            "loading": False,
+            "loaded": True,
+        })
+        self.context.register("browse", browse)
+        self.context.page_name = "browse"
+        self.context.render()
+
 
 if __name__ == "__main__":
     unittest.main()

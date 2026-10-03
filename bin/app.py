@@ -185,7 +185,11 @@ class KinNovelApp:
                 raise
             except Exception:
                 self.log(traceback.format_exc())
-                self.context.message(["运行时错误", "请查看 logs/kinnovel.log"])
+                try:
+                    self.context.message(["运行时错误", "请查看 logs/kinnovel.log"])
+                except Exception:
+                    # 错误提示本身也不能把输入循环带崩
+                    self.log(traceback.format_exc())
 
         try:
             self.context._ui_loop_running = True

@@ -123,3 +123,22 @@ python -m unittest discover -s tests  -> Ran 101 tests, OK (skipped=1)
 live image bench: cover 512 -> 359x512 grayscale JPEG, 55 KB, RSS +1 MB
 device_boot_test.sh: SIGTERM -> exited in 3s, lock removed, screen restored
 ```
+
+## Fourth review round (2026-10, v0.7.1)
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P0 | 阅读历史/最近闪退：`GetBookListByIds` 对失效书籍返回 `null` 元素，页面 `item.get()` 抛异常，错误弹窗重绘同一破损页面，异常最终冲出输入循环终止应用。 | 列表接口统一过滤非 `dict` 元素（含裸数组返回）；`PageContext.show()` 渲染失败降级为错误页；`screen.listen` 单个手势异常不再终止循环；`app.on_gesture` 错误提示自身异常也被兜住。 |
+| P0 | 阅读历史一直加载不出内容：`GetBookListByIds` 传了 `Type=Novel`，服务端返回空列表。 | 小说省略 `Type`，仅漫画传 `Type=Comic`，与 Web 端一致。 |
+| P1 | 当前页/翻回页的插图会被排在大量后台预取之后，且失败后不会自动重试。 | ImageCache 改为优先队列（可见 0 / 邻近 3 / 后台 6），可见请求插队；失败按 2/4/8… 秒退避自动重试；失败不再触发重绘循环。 |
+| P1 | 长时间闲置后首个 Hub 调用可能等满 60 秒。 | 闲置超过 20 秒主动重连；Hub 调用超时收紧到 25 秒。 |
+| P2 | 关于页参考项目列表缺 FBInk。 | 已补上。 |
+
+Device verification (v0.7.1):
+
+```text
+python -m unittest discover -s tests  -> Ran 113 tests, OK (skipped=1)
+live_page_probe: history raw 24 ids, 1 null filtered -> render OK;
+                 browse 8 items, rank 48 items -> render OK
+device_boot_test.sh: started to touch-listening, SIGTERM -> 2s, lock removed
+```

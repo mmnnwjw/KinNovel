@@ -13,6 +13,38 @@ from .utils import atomic_write, read_json, sha256_text
 SESSION_PATH = APP_DIR / "cache" / "session.json"
 
 
+def dict_items(value):
+    """只保留 dict 元素,服务端对失效 ID 可能返回 null。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def int_items(value):
+    if not isinstance(value, (list, tuple)):
+        return []
+    output = []
+    for item in value:
+        try:
+            output.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return output
+
+
+def _normalize_data(envelope, key="Data"):
+    if isinstance(envelope, dict):
+        envelope[key] = dict_items(envelope.get(key))
+    return envelope
+
+
+def _normalize_list(value, key="Data"):
+    """兼容两种返回: 裸数组 BookInList[] 或 {Data: [...]}。"""
+    if isinstance(value, dict):
+        return _normalize_data(value, key)
+    return dict_items(value)
+
+
 class SessionStore:
     def __init__(self, path=SESSION_PATH):
         self.path = path
@@ -216,16 +248,19 @@ class ApiClient:
             params["KeyWords"] = keywords
         if category_id is not None:
             params["CategoryId"] = int(category_id)
-        return self.invoke("GetBookList", params)
+        return _normalize_data(self.invoke("GetBookList", params))
 
     def get_book_categories(self, book_type="Novel"):
-        return self.invoke("GetBookCategories", {"Type": book_type})
+        return _normalize_list(
+            self.invoke("GetBookCategories", {"Type": book_type}))
 
     def get_rank(self, days=1):
-        return self.invoke("GetRank", {"Days": int(days)})
+        return _normalize_list(self.invoke("GetRank", {"Days": int(days)}))
 
     def get_announcement_list(self, page=1, size=12):
-        return self.invoke("GetAnnouncementList", {"Page": int(page), "Size": int(size)})
+        return _normalize_data(
+            self.invoke("GetAnnouncementList",
+                        {"Page": int(page), "Size": int(size)}))
 
     def get_announcement_detail(self, announcement_id):
         return self.invoke("GetAnnouncementDetail", {"Id": int(announcement_id)})
@@ -237,21 +272,23 @@ class ApiClient:
     def get_book_list_by_ids(self, ids, book_type=None):
         if len(ids) > 24:
             raise ApiError("单次最多请求 24 本书", 400)
-        params = {"Ids": [int(value) for value in ids]}
-        if book_type:
+        params = {"Ids": int_items(ids)}
+        # 小说走默认分支: Web 端只在取漫画系列时传 Type=Comic。
+        # 传 Type=Novel 会让服务端返回空列表。
+        if book_type and str(book_type).lower() != "novel":
             params["Type"] = book_type
-        return self.invoke("GetBookListByIds", params)
+        return _normalize_list(self.invoke("GetBookListByIds", params))
 
     def get_books_by_series(self, series_name, page=1, size=24, order="latest",
                             ignore_japanese=False, ignore_ai=False):
-        return self.invoke("GetBooksBySeries", {
+        return _normalize_data(self.invoke("GetBooksBySeries", {
             "SeriesName": str(series_name or ""),
             "Page": int(page),
             "Size": int(size),
             "Order": order,
             "IgnoreJapanese": bool(ignore_japanese),
             "IgnoreAI": bool(ignore_ai),
-        })
+        }))
 
     def get_novel_content(self, book_id, sort_num, convert=None):
         params = {"Bid": int(book_id), "SortNum": int(sort_num)}
@@ -267,7 +304,10 @@ class ApiClient:
         })
 
     def get_read_history(self):
-        return self.invoke("GetReadHistory")
+        result = self.invoke("GetReadHistory")
+        if isinstance(result, dict):
+            result["Novel"] = int_items(result.get("Novel"))
+        return result
 
     def clear_read_history(self):
         return self.invoke("ClearReadHistory")
@@ -277,13 +317,15 @@ class ApiClient:
         return self.invoke("GetMyInfo")
 
     def get_notifications(self, page=1, size=12):
-        return self.invoke("GetNotifications", {"Page": int(page), "Size": int(size)})
+        return _normalize_data(
+            self.invoke("GetNotifications",
+                        {"Page": int(page), "Size": int(size)}))
 
     def mark_notifications(self, ids):
         return self.invoke("MarkNotifications", {"Ids": [int(value) for value in ids]})
 
     def get_book_shelf(self):
-        return self.invoke("GetBookShelf")
+        return _normalize_data(self.invoke("GetBookShelf"), "data")
 
     def save_book_shelf(self, items, version="20260921"):
         return self.invoke("SaveBookShelf", {"data": items, "ver": version})
@@ -292,10 +334,10 @@ class ApiClient:
         return self.invoke("SignIn", {})
 
     def get_shop(self):
-        return self.invoke("GetShop", {})
+        return _normalize_list(self.invoke("GetShop", {}))
 
     def get_my_items(self):
-        return self.invoke("GetMyItems", {})
+        return _normalize_list(self.invoke("GetMyItems", {}))
 
     def buy_shop_item(self, key, quantity=1):
         return self.invoke("BuyShopItem", {"Key": key, "Quantity": int(quantity)})

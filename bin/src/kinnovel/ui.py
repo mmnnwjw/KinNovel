@@ -1,3 +1,4 @@
+import heapq
 import os
 import queue
 import re
@@ -304,9 +305,15 @@ class ImageCache:
         self._fitted = OrderedDict()
         self._fitted_bytes = 0
         self._lock = threading.RLock()
-        self._inflight = {}
+        self._callbacks = {}
+        self._queued = {}
+        self._running = set()
         self._failures = {}
-        self._jobs = queue.Queue()
+        self._sequence = 0
+        self._jobs = queue.PriorityQueue()
+        self._retry_heap = []
+        self._retry_cv = threading.Condition()
+        self._closed = False
         self._worker_count = max(1, min(4, int(workers or 1)))
         self._workers = []
         for index in range(self._worker_count):
@@ -315,21 +322,74 @@ class ImageCache:
                 name="kinnovel-img-%d" % index)
             worker.start()
             self._workers.append(worker)
+        self._scheduler = threading.Thread(
+            target=self._retry_loop, daemon=True, name="kinnovel-img-retry")
+        self._scheduler.start()
 
     def _worker_loop(self):
         while True:
             job = self._jobs.get()
             if job is None:
                 return
+            _priority, _seq, key, url, height, strict_tls, priority = job
+            with self._lock:
+                if self._queued.get(key) != (_priority, _seq):
+                    # 已有更高优先级的请求取代了这条任务
+                    continue
+                self._queued.pop(key, None)
+                self._running.add(key)
             try:
-                job()
+                self._download(url, key, height, strict_tls, priority)
             except Exception:
                 pass
+            finally:
+                requeue = False
+                with self._lock:
+                    self._running.discard(key)
+                    if self._callbacks.get(key) and not self.is_cached(url, height):
+                        requeue = True
+                if requeue:
+                    with self._lock:
+                        self._enqueue_locked(
+                            url, key, height, strict_tls, priority)
 
     def close(self):
+        with self._retry_cv:
+            self._closed = True
+            self._retry_cv.notify_all()
         for _ in self._workers:
             self._jobs.put(None)
         self._workers = []
+
+    def _enqueue_locked(self, url, key, height, strict_tls, priority):
+        """把一个 key 放进优先队列; 更高优先级会取代已在排队的旧任务。"""
+        priority = int(priority)
+        current = self._queued.get(key)
+        if current is not None and current[0] <= priority:
+            return False
+        self._sequence += 1
+        self._queued[key] = (priority, self._sequence)
+        self._jobs.put((priority, self._sequence, key, url, height,
+                        bool(strict_tls), priority))
+        return True
+
+    def _retry_loop(self):
+        while True:
+            with self._retry_cv:
+                while not self._closed and not self._retry_heap:
+                    self._retry_cv.wait(1.0)
+                if self._closed:
+                    return
+                due = self._retry_heap[0][0]
+                now = time.monotonic()
+                if due > now:
+                    self._retry_cv.wait(min(due - now, 5.0))
+                    continue
+                (_due, _seq, url, _key, height, strict_tls,
+                 priority, callbacks) = heapq.heappop(self._retry_heap)
+            for callback in callbacks:
+                self.prefetch(url, strict_tls, height=height,
+                              callback=callback, priority=priority, retry=True)
 
     # ---- keys / paths -------------------------------------------------
     @staticmethod
@@ -426,10 +486,12 @@ class ImageCache:
                 return True
         return self._path(url, height).exists() or self._path(url).exists()
 
-    def prefetch(self, url, strict_tls=False, height=None, callback=None):
+    def prefetch(self, url, strict_tls=False, height=None, callback=None,
+                 priority=0, retry=False):
         """Schedule one download; never blocks, never raises.
 
-        返回 True 表示已缓存或已排队，False 表示该 URL 正处于失败退避期。
+        ``priority`` 越小越紧急：0 = 当前可见，3 = 邻近页预取，6 = 后台。
+        返回 True 表示已缓存/已排队，False 表示该 URL 正处于失败退避期。
         """
         if not url:
             return False
@@ -441,20 +503,17 @@ class ImageCache:
         now = time.monotonic()
         with self._lock:
             failure = self._failures.get(key)
-            if failure is not None and now < failure[1]:
+            if failure is not None and now < failure[1] and not retry:
                 return False
-            pending = self._inflight.get(key)
-            if pending is not None:
-                if callable(callback):
-                    pending.append(callback)
+            if callable(callback):
+                self._callbacks.setdefault(key, []).append(callback)
+            if key in self._running:
                 return True
-            self._inflight[key] = [callback] if callable(callback) else []
-        self._jobs.put(
-            lambda: self._download(url, key, height, bool(strict_tls)))
+            self._enqueue_locked(url, key, height, strict_tls, priority)
         return True
 
     # ---- worker -------------------------------------------------------
-    def _download(self, url, key, height, strict_tls):
+    def _download(self, url, key, height, strict_tls, priority=0):
         ok = False
         image = None
         try:
@@ -474,11 +533,22 @@ class ImageCache:
                 count += 1
                 self._failures[key] = (
                     count,
-                    time.monotonic() + min(300.0, 5.0 * (2 ** min(count, 6))),
+                    time.monotonic() + min(300.0, float(2 ** min(count, 8))),
                 )
                 if len(self._failures) > 512:
                     self._failures.clear()
-            callbacks = self._inflight.pop(key, [])
+            callbacks = self._callbacks.pop(key, [])
+            if not ok and callbacks and count <= 6:
+                # 失败不要立刻回调整屏重绘(会再次请求),而是按退避定时重试
+                with self._retry_cv:
+                    self._sequence += 1
+                    heapq.heappush(
+                        self._retry_heap,
+                        (self._failures[key][1], self._sequence, url, key,
+                         height, bool(strict_tls),
+                         min(int(priority), 3), callbacks))
+                    self._retry_cv.notify()
+                callbacks = []
         for callback in callbacks:
             try:
                 callback(ok)
@@ -690,7 +760,14 @@ class PageContext:
         if self._closed:
             return
         with self._show_lock:
-            image = self.render()
+            try:
+                image = self.render()
+            except Exception:
+                logger = getattr(self.app, "log", None)
+                if callable(logger):
+                    import traceback
+                    logger(traceback.format_exc())
+                image = self._fallback_image()
             flashing = bool(self.config.get("page_flash")) if is_flashing is None else bool(is_flashing)
             extra = {}
             if region:
@@ -703,6 +780,21 @@ class PageContext:
                 self.screen.output.show(image, is_flashing=flashing, **extra)
             except OSError:
                 pass
+
+    def _fallback_image(self):
+        """渲染失败时给出可恢复的错误页,而不是让异常冒泡终止应用。"""
+        image = Image.new("L", (self.width, self.height), 255)
+        draw = ImageDraw.Draw(image)
+        for offset, text in enumerate(("页面渲染失败", "请查看 logs/kinnovel.log")):
+            try:
+                font = self.fonts.get("body")
+                bbox = draw.textbbox((0, 0), text, font=font)
+                draw.text(((self.width - (bbox[2] - bbox[0])) // 2,
+                           self.height // 2 + offset * 60 - bbox[1]),
+                          text, font=font, fill=0)
+            except Exception:
+                draw.text((20, self.height // 2 + offset * 20), text, fill=0)
+        return image
 
     def post(self, callback):
         """Run ``callback`` on the input thread, or inline when no loop runs."""

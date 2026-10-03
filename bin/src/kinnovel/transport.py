@@ -261,6 +261,8 @@ class SignalRClient:
         self.notifications = deque(maxlen=100)
         self.last_error = ""
         self._record_buffer = bytearray()
+        self._last_used = 0.0
+        self._idle_reconnect = 20.0
 
     def set_server(self, server):
         with self._lock:
@@ -346,6 +348,11 @@ class SignalRClient:
         raise TransportError("SignalR 握手超时")
 
     def _ensure_connected_locked(self):
+        if (self._socket is not None and self._last_used
+                and time.monotonic() - self._last_used > self._idle_reconnect):
+            # 服务端 ClientTimeoutInterval(默认 30s) 会在客户端静默时关闭连接，
+            # 主动重连，避免下一次调用在死 socket 上等满超时。
+            self._close_locked()
         if self._socket is None:
             self._connect_locked()
 
@@ -410,6 +417,7 @@ class SignalRClient:
             self._ensure_connected_locked()
             self._socket.send_text(json.dumps(invocation, ensure_ascii=False, separators=(",", ":"))
                                    + self.RECORD_SEPARATOR)
+            self._last_used = time.monotonic()
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -418,6 +426,7 @@ class SignalRClient:
                     self.last_error = str(exc)
                     self._close_locked()
                     raise TransportError(str(exc))
+                self._last_used = time.monotonic()
                 for message in messages:
                     self._handle_server_message(message)
                     if message.get("invocationId") != invocation.get("invocationId"):
@@ -441,7 +450,7 @@ class SignalRClient:
             raise TransportError("Hub 调用超时: " + method)
 
     def invoke(self, method, params=None, use_gzip=True, timeout=None):
-        timeout = timeout or self.timeout * 2
+        timeout = timeout or min(self.timeout * 2, 25)
         self.rate_limit.wait()
         invocation_id = uuid.uuid4().hex
         invocation = {

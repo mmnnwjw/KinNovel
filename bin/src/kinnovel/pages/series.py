@@ -83,6 +83,8 @@ def render(ctx, canvas):
         if index >= len(items):
             continue
         item = items[index]
+        if not isinstance(item, dict):
+            continue
         current = int(item.get("Id") or 0) == STATE["current_id"]
         canvas.draw.rounded_rectangle(
             [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],

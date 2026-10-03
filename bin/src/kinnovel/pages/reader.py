@@ -97,8 +97,11 @@ def prefetch_chapter(ctx, book_id, sort_num):
     return True
 
 
-def _image_ready(ctx, url):
+def _image_ready(ctx, url, ok=True):
     """图片到达后只刷新当前页上该插图所在矩形，避免整屏重绘。"""
+    if not ok:
+        return
+
     def apply():
         if ctx.page_name != "reader" or STATE.get("fullscreen_image"):
             return
@@ -108,7 +111,10 @@ def _image_ready(ctx, url):
     ctx.post(apply)
 
 
-def _fullscreen_ready(ctx, url):
+def _fullscreen_ready(ctx, url, ok=True):
+    if not ok:
+        return
+
     def apply():
         if ctx.page_name == "reader" and STATE.get("fullscreen_image") == url:
             ctx.show()
@@ -140,7 +146,9 @@ def _prefetch_images(ctx, document, pages_ahead=2):
     if not pages:
         return
     first = max(0, min(int(STATE.get("page") or 0), len(pages) - 1))
-    for page in pages[first:first + max(0, int(pages_ahead)) + 1]:
+    window = pages[first:first + max(0, int(pages_ahead)) + 1]
+    for distance, page in enumerate(window):
+        priority = 0 if distance == 0 else (3 if distance == 1 else 6)
         for item in page:
             if item.get("type") != "image":
                 continue
@@ -152,7 +160,8 @@ def _prefetch_images(ctx, document, pages_ahead=2):
                 continue
             ctx.images.prefetch(
                 url, ctx.config.get("strict_tls"), height=target,
-                callback=lambda ok, url=url: _image_ready(ctx, url),
+                priority=priority,
+                callback=lambda ok, url=url: _image_ready(ctx, url, ok),
             )
 
 
@@ -506,7 +515,8 @@ def render(ctx, canvas):
         if image is None:
             ctx.images.prefetch(
                 url, ctx.config.get("strict_tls"), height=target,
-                callback=lambda ok, url=url: _fullscreen_ready(ctx, url),
+                priority=0,
+                callback=lambda ok, url=url: _fullscreen_ready(ctx, url, ok),
             )
         if image is not None:
             fitted = _fit_image("fullscreen:" + url, image,
@@ -550,7 +560,8 @@ def render(ctx, canvas):
             if image is None:
                 ctx.images.prefetch(
                     url, ctx.config.get("strict_tls"), height=target,
-                    callback=lambda ok, url=url: _image_ready(ctx, url),
+                    priority=0,
+                    callback=lambda ok, url=url: _image_ready(ctx, url, ok),
                 )
             if image is not None:
                 fitted = _fit_image(url, image, item["width"], item["height"])
