@@ -5,8 +5,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 from kinnovel.config import APP_DIR, Config
 from kinnovel.reader import (
+    FontResolver,
     ReaderDocument,
+    _glyph_available_raster,
+    cached_font,
+    cmap_available,
     extract_blocks,
+    glyph_available,
     normalize_font,
     sanitize_html,
     split_font_runs,
@@ -178,11 +183,28 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(blocks[0].text, "破折号测试文本。")
 
     def test_notdef_box_is_not_treated_as_available(self):
-        from kinnovel.reader import glyph_available
         font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 32)
         self.assertTrue(glyph_available(font, "中"))
         # 超出 Unicode 范围的探测字符必然映射到 .notdef
         self.assertFalse(glyph_available(font, "\U0010FFFF"))
+
+    def test_cmap_probe_agrees_with_raster_fallback(self):
+        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 24)
+        if cmap_available(font, "汉") is None:
+            self.skipTest("libfreetype.so.6 unavailable on this host")
+        for character in ["汉", "字", "。", "A", "1",
+                          "\U0010FFFF", "\uE000"]:
+            self.assertEqual(
+                cmap_available(font, character),
+                _glyph_available_raster(font, character),
+                "cmap/raster mismatch for %r" % character)
+
+    def test_cached_font_is_shared_across_resolvers(self):
+        path = "C:/Windows/Fonts/simhei.ttf"
+        first = FontResolver(path)
+        second = FontResolver(path)
+        self.assertIs(first.system_font(20), second.system_font(20))
+        self.assertIs(cached_font(path, 20), cached_font(path, 20))
 
     def test_missing_glyph_falls_back_per_character(self):
         class Mask:

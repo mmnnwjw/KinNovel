@@ -1,7 +1,9 @@
+import ctypes
 import html
 import math
 import re
 import struct
+import threading
 import urllib.error
 import urllib.request
 import zlib
@@ -278,6 +280,27 @@ def normalize_font(path):
         return None
 
 
+_FONT_OBJECTS = {}
+_FONT_OBJECTS_LOCK = threading.RLock()
+
+
+def cached_font(path, size):
+    """按 (路径, 字号) 全局复用 FreeTypeFont。
+
+    每章新建 ReaderDocument 时不再重复解析 1MB 级 WOFF2,
+    单章可省约 450ms 的 truetype 加载。
+    """
+    from PIL import ImageFont
+    key = (str(path), int(size))
+    with _FONT_OBJECTS_LOCK:
+        font = _FONT_OBJECTS.get(key)
+        if font is not None:
+            return font
+        font = ImageFont.truetype(path, int(size))
+        _FONT_OBJECTS[key] = font
+        return font
+
+
 class FontResolver:
     def __init__(self, system_font_path):
         self.system_font_path = system_font_path
@@ -291,7 +314,7 @@ class FontResolver:
         key = int(size)
         if key not in self._system_cache:
             try:
-                self._system_cache[key] = ImageFont.truetype(
+                self._system_cache[key] = cached_font(
                     self.system_font_path, key)
             except OSError:
                 self._system_cache[key] = ImageFont.load_default()
@@ -304,7 +327,7 @@ class FontResolver:
             if key not in self._cache:
                 path = ensure_font(chapter_font, base_url, strict_tls=strict_tls)
                 try:
-                    self._cache[key] = ImageFont.truetype(path, int(size)) if path else None
+                    self._cache[key] = cached_font(path, int(size)) if path else None
                 except OSError as exc:
                     self._cache[key] = None
                     self.last_error = str(exc)
@@ -356,15 +379,77 @@ def _notdef_bytes(font):
     return _NOTDEF_BYTES[key]
 
 
-def glyph_available(font, character):
+_FREETYPE_LOCK = threading.RLock()
+_FREETYPE = {"tried": False, "lib": None, "handle": None, "faces": {}}
+
+
+def _freetype_locked():
+    """初始化 FreeType 句柄;失败则返回 None(调用方需持有 _FREETYPE_LOCK)。"""
+    if _FREETYPE["tried"]:
+        return _FREETYPE if _FREETYPE["lib"] is not None else None
+    _FREETYPE["tried"] = True
+    try:
+        library = ctypes.CDLL("libfreetype.so.6")
+        library.FT_Init_FreeType.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        library.FT_Init_FreeType.restype = ctypes.c_int
+        library.FT_New_Face.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long,
+            ctypes.POINTER(ctypes.c_void_p)]
+        library.FT_New_Face.restype = ctypes.c_int
+        library.FT_Get_Char_Index.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        library.FT_Get_Char_Index.restype = ctypes.c_uint
+        handle = ctypes.c_void_p()
+        if library.FT_Init_FreeType(ctypes.byref(handle)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    _FREETYPE["lib"] = library
+    _FREETYPE["handle"] = handle
+    return _FREETYPE
+
+
+def _font_face(font):
+    """该字体文件的 FreeType face;不可用时返回 None。"""
+    path = getattr(font, "path", None)
+    if not path:
+        return None
+    with _FREETYPE_LOCK:
+        state = _freetype_locked()
+        if state is None:
+            return None
+        key = str(path)
+        if key in state["faces"]:
+            return state["faces"][key]
+        face = ctypes.c_void_p()
+        try:
+            result = state["lib"].FT_New_Face(
+                state["handle"], key.encode("utf-8"), 0, ctypes.byref(face))
+        except Exception:
+            result = -1
+        state["faces"][key] = face if (result == 0 and face) else None
+        return state["faces"][key]
+
+
+def cmap_available(font, character):
+    """FreeType cmap 覆盖查询, 与浏览器缺字回退是同一机制。
+
+    O(1) 查表, 替代逐字 getmask+位图比对;不可用时返回 None 交给栅格化兜底。
+    """
     if not character:
         return True
-    if character.isspace():
-        return True
-    key = (_font_key(font), character)
-    cached = _GLYPH_CACHE.get(key)
-    if cached is not None:
-        return cached
+    face = _font_face(font)
+    if face is None:
+        return None
+    with _FREETYPE_LOCK:
+        try:
+            return _FREETYPE["lib"].FT_Get_Char_Index(
+                face, ord(character)) != 0
+        except Exception:
+            return None
+
+
+def _glyph_available_raster(font, character):
+    """旧版栅格化判定, 仅在 cmap 不可用时兜底(含 notdef 方框识别)。"""
     try:
         mask = font.getmask(character)
         available = bool(mask.getbbox())
@@ -378,6 +463,21 @@ def glyph_available(font, character):
                 pass
     except (AttributeError, OSError, ValueError):
         available = False
+    return available
+
+
+def glyph_available(font, character):
+    if not character:
+        return True
+    if character.isspace():
+        return True
+    key = (_font_key(font), character)
+    cached = _GLYPH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    available = cmap_available(font, character)
+    if available is None:
+        available = _glyph_available_raster(font, character)
     if len(_GLYPH_CACHE) >= _GLYPH_CACHE_LIMIT:
         _GLYPH_CACHE.clear()
     _GLYPH_CACHE[key] = available

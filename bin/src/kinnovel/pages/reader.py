@@ -2,12 +2,13 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageOps
 
 from ..config import CACHE_DIR
 from ..reader import ReaderDocument, ensure_font
-from ..ui import height_bucket
+from ..ui import Canvas, height_bucket
 from ..utils import atomic_write, read_json, stable_cache_name, touch
 
 
@@ -101,6 +102,7 @@ def _image_ready(ctx, url, ok=True):
     """图片到达后只刷新当前页上该插图所在矩形，避免整屏重绘。"""
     if not ok:
         return
+    STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
 
     def apply():
         if ctx.page_name != "reader" or STATE.get("fullscreen_image"):
@@ -114,11 +116,19 @@ def _image_ready(ctx, url, ok=True):
 def _fullscreen_ready(ctx, url, ok=True):
     if not ok:
         return
+    STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
 
     def apply():
         if ctx.page_name == "reader" and STATE.get("fullscreen_image") == url:
             ctx.show()
     ctx.post(apply)
+
+
+def _set_document(document):
+    """换文档时让内容位图缓存失效。"""
+    STATE["doc"] = document
+    STATE["document_version"] = int(STATE.get("document_version") or 0) + 1
+    STATE["content_cache"] = OrderedDict()
 
 
 def _visible_image_region(ctx, url):
@@ -226,9 +236,14 @@ STATE = {
     "fullscreen_image": None,
     "last_turn_at": 0.0,
     "fitted_cache": {},
+    "content_cache": OrderedDict(),
+    "document_version": 0,
+    "image_generation": 0,
     "chrome_visible": False,
     "layout_generation": 0,
 }
+
+_CONTENT_CACHE_LIMIT = 3
 
 
 _GUIDE_LINES = [
@@ -365,7 +380,7 @@ def enter(ctx):
                     or STATE["book_id"] != book_id
                     or STATE["sort_num"] != sort_num):
                 return
-            STATE["doc"] = document
+            _set_document(document)
             if at_last:
                 STATE["page"] = max(0, document.page_count - 1)
             elif fresh:
@@ -383,7 +398,8 @@ def enter(ctx):
         return
     STATE.update({"book_id": book_id, "sort_num": sort_num, "data": None,
                   "doc": None, "page": 0, "loading": True, "last_saved": -1,
-                  "signature": signature, "fitted_cache": {}})
+                  "signature": signature, "fitted_cache": {},
+                  "content_cache": OrderedDict()})
     ctx.show()
 
     def operation():
@@ -400,7 +416,7 @@ def enter(ctx):
         response, document = result
         chapter = response.get("Chapter") or {}
         STATE["data"] = response
-        STATE["doc"] = document
+        _set_document(document)
         STATE["signature"] = signature
         STATE["loading"] = False
         if chapter.get("Font") and not document.font_resolver.custom_font_loaded:
@@ -507,6 +523,57 @@ def header_blocked():
     return time.monotonic() - float(STATE.get("last_turn_at") or 0.0) < 0.35
 
 
+def _content_cache_key(ctx, page_index, content_height):
+    return (
+        id(STATE.get("doc")),
+        int(STATE.get("document_version") or 0),
+        int(page_index),
+        int(STATE.get("image_generation") or 0),
+        int(ctx.width),
+        int(content_height),
+        bool(ctx.config.get("night_mode")),
+    )
+
+
+def _page_content_image(ctx, canvas, page, page_index, content_height):
+    """把正文画进独立位图并缓存;控件层/提示层重绘时直接复用。"""
+    height = max(1, int(content_height))
+    key = _content_cache_key(ctx, page_index, height)
+    cache = STATE["content_cache"]
+    cached = cache.get(key)
+    if cached is not None:
+        cache.move_to_end(key)
+        return cached
+    image = Image.new("L", (int(canvas.width), height), canvas.theme.background)
+    content = Canvas(image, ctx.fonts, canvas.theme)
+    for item in page:
+        kind = item.get("type")
+        if kind == "text":
+            if item.get("y", 0) + item.get("size", 0) > height:
+                continue
+            content.text_fallback(
+                (item["x"], item["y"]), item["text"], item["font"],
+                item.get("fallback_font"))
+        elif kind == "image":
+            url = item.get("url")
+            target = height_bucket(item.get("height") or 1024)
+            loaded = ctx.images.get(url, target)
+            if loaded is None:
+                content.centered_text(
+                    "[图片]", ctx.fonts["small"], canvas.width // 2,
+                    item.get("y", 0) + item.get("height", 0) // 2,
+                    fill=canvas.theme.muted)
+                continue
+            fitted = _fit_image(url, loaded, item["width"], item["height"])
+            x = item["x"] + (item["width"] - fitted.width) // 2
+            image.paste(fitted, (x, item["y"]))
+    cache[key] = image
+    cache.move_to_end(key)
+    while len(cache) > _CONTENT_CACHE_LIMIT:
+        cache.popitem(last=False)
+    return image
+
+
 def render(ctx, canvas):
     if STATE["fullscreen_image"]:
         url = STATE["fullscreen_image"]
@@ -542,38 +609,30 @@ def render(ctx, canvas):
         if chrome_visible:
             _render_chrome(ctx, canvas, title, None)
         return
-    page = doc.pages[max(0, min(STATE["page"], len(doc.pages) - 1))]
+    page_index = max(0, min(int(STATE["page"]), len(doc.pages) - 1))
+    page = doc.pages[page_index]
     STATE["image_rects"] = {}
     for item in page:
-        if item["type"] == "text":
-            y = top + item["y"]
-            if y + item.get("size", 0) > top + content_height:
-                continue
-            canvas.text_fallback(
-                (item["x"], y), item["text"], item["font"],
-                item.get("fallback_font"),
+        if item.get("type") != "image":
+            continue
+        url = item["url"]
+        target = height_bucket(item.get("height") or 1024)
+        image = ctx.images.get(url, target)
+        if image is None:
+            ctx.images.prefetch(
+                url, ctx.config.get("strict_tls"), height=target,
+                priority=0,
+                callback=lambda ok, url=url: _image_ready(ctx, url, ok),
             )
-        elif item["type"] == "image":
-            url = item["url"]
-            target = height_bucket(item.get("height") or 1024)
-            image = ctx.images.get(url, target)
-            if image is None:
-                ctx.images.prefetch(
-                    url, ctx.config.get("strict_tls"), height=target,
-                    priority=0,
-                    callback=lambda ok, url=url: _image_ready(ctx, url, ok),
-                )
-            if image is not None:
-                fitted = _fit_image(url, image, item["width"], item["height"])
-                x = item["x"] + (item["width"] - fitted.width) // 2
-                image_y = top + item["y"]
-                canvas.image.paste(fitted, (x, image_y))
-                STATE["image_rects"][(item.get("path"), item.get("y"))] = (
-                    x, image_y, fitted.width, fitted.height, item["url"])
-            else:
-                canvas.centered_text("[图片]", ctx.fonts["small"],
-                                     canvas.width // 2, top + item["y"] + item["height"] // 2,
-                                     fill=canvas.theme.muted)
+            continue
+        fitted = _fit_image(url, image, item["width"], item["height"])
+        x = item["x"] + (item["width"] - fitted.width) // 2
+        image_y = top + item["y"]
+        STATE["image_rects"][(item.get("path"), item.get("y"))] = (
+            x, image_y, fitted.width, fitted.height, url)
+    canvas.image.paste(
+        _page_content_image(ctx, canvas, page, page_index, content_height),
+        (0, top))
     if chrome_visible:
         # 控件层画在正文之上：正文分页几何不随控件显隐变化
         _render_chrome(ctx, canvas, title, doc)
