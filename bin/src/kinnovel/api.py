@@ -45,6 +45,28 @@ def _normalize_list(value, key="Data"):
     return dict_items(value)
 
 
+def is_comic(item):
+    """列表项是否漫画。书籍列表用 Type=Novel/Comic, 书架用 type=NOVEL/COMIC。"""
+    if not isinstance(item, dict):
+        return False
+    value = item.get("Type")
+    if value is None:
+        value = item.get("type")
+    return str(value or "").strip().lower() == "comic"
+
+
+def novel_items(value):
+    return [item for item in dict_items(value) if not is_comic(item)]
+
+
+def _novel_data(envelope, key="Data"):
+    """归一化并剔除漫画,兼容裸数组与 {Data: [...]} 两种返回。"""
+    if isinstance(envelope, dict):
+        envelope[key] = novel_items(envelope.get(key))
+        return envelope
+    return novel_items(envelope)
+
+
 class SessionStore:
     def __init__(self, path=SESSION_PATH):
         self.path = path
@@ -248,14 +270,14 @@ class ApiClient:
             params["KeyWords"] = keywords
         if category_id is not None:
             params["CategoryId"] = int(category_id)
-        return _normalize_data(self.invoke("GetBookList", params))
+        return _novel_data(self.invoke("GetBookList", params))
 
     def get_book_categories(self, book_type="Novel"):
         return _normalize_list(
             self.invoke("GetBookCategories", {"Type": book_type}))
 
     def get_rank(self, days=1):
-        return _normalize_list(self.invoke("GetRank", {"Days": int(days)}))
+        return _novel_data(self.invoke("GetRank", {"Days": int(days)}))
 
     def get_announcement_list(self, page=1, size=12):
         return _normalize_data(
@@ -277,11 +299,11 @@ class ApiClient:
         # 传 Type=Novel 会让服务端返回空列表。
         if book_type and str(book_type).lower() != "novel":
             params["Type"] = book_type
-        return _normalize_list(self.invoke("GetBookListByIds", params))
+        return _novel_data(self.invoke("GetBookListByIds", params))
 
     def get_books_by_series(self, series_name, page=1, size=24, order="latest",
                             ignore_japanese=False, ignore_ai=False):
-        return _normalize_data(self.invoke("GetBooksBySeries", {
+        return _novel_data(self.invoke("GetBooksBySeries", {
             "SeriesName": str(series_name or ""),
             "Page": int(page),
             "Size": int(size),
@@ -325,7 +347,16 @@ class ApiClient:
         return self.invoke("MarkNotifications", {"Ids": [int(value) for value in ids]})
 
     def get_book_shelf(self):
-        return _normalize_data(self.invoke("GetBookShelf"), "data")
+        envelope = self.invoke("GetBookShelf")
+        items = [
+            item for item in dict_items(
+                envelope.get("data") if isinstance(envelope, dict) else envelope)
+            if str(item.get("type") or "").strip().lower() != "comic"
+        ]
+        if isinstance(envelope, dict):
+            envelope["data"] = items
+            return envelope
+        return items
 
     def save_book_shelf(self, items, version="20260921"):
         return self.invoke("SaveBookShelf", {"data": items, "ver": version})
