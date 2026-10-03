@@ -156,3 +156,24 @@ python -m unittest discover -s tests  -> Ran 119 tests, OK (skipped=1)
 live_type_probe: rank raw 48 (44 Novel + 4 Comic) -> filtered 44, comic 0
                  browse 10 -> 10 (comic 0); shelf 5 -> 5 (comic 0)
 ```
+
+## Sixth review round (2026-10, v0.7.3)
+
+本轮针对实机测量出的排版瓶颈做优化；旧实现自 v0.2.0 引入逐字探测、v0.3.1
+加入 notdef 位图比对后一直沿用。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| Perf | `glyph_available()` 对每个新字符执行 `getmask()` + 额外渲染一张位图与 `.notdef` 逐字节比对，实测 1.4–2.4ms/字，占分页时间约 91%。 | 改用 FreeType `FT_Get_Char_Index` 做 cmap 覆盖查询（0.011ms/字），与浏览器回退同一机制；栅格化判定保留为库不可用时的兜底。 |
+| Perf | 每章新建 `FontResolver`，1MB 级 WOFF2 每章重复 `truetype` 约 450ms。 | `cached_font()` 按 (路径, 字号) 全局复用 FreeTypeFont。 |
+| Perf | 每次 `show()` 都重新栅格化整页文字，翻页回看/控件层显隐/插图到达都要重付一次。 | 新增页面内容位图缓存（3 页 LRU），缓存键含文档版本、页码、插图代际、分辨率、夜间模式。 |
+
+Device verification (v0.7.3) — 渲染逐像素一致：
+
+```text
+python -m unittest discover -s tests  -> Ran 121 tests, OK (skipped=1)
+layout   : ch1 1620->799ms(cold)/80ms(warm); ch3 7259->264ms; pages identical
+cmap     : 605 sample chars, 0 mismatch vs raster fallback
+render   : text page 128->13ms; image page 104->10ms; chrome toggle 21/13ms
+pixel    : old vs new pagination 0/41M diff; cached vs uncached 0 diff
+```
