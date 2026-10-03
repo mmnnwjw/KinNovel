@@ -1,0 +1,100 @@
+[
+  {
+    "description": "Single closing punctuation hangs",
+    "text": "汉汉汉汉汉。汉汉汉",
+    "max_width": 171.0,
+    "expected_parts": [
+      {
+        "text": "汉汉汉汉汉。",
+        "line_start": 0
+      },
+      {
+        "text": "汉汉汉",
+        "line_start": 6
+      }
+    ]
+  },
+  {
+    "description": "Consecutive closing punctuation group move",
+    "text": "汉汉汉汉汉。。”。汉汉",
+    "max_width": 171.0,
+    "expected_parts": [
+      {
+        "text": "汉汉汉汉汉",
+        "line_start": 0
+      },
+      {
+        "text": "。。”。汉",
+        "line_start": 5
+      },
+      {
+        "text": "汉",
+        "line_start": 10
+      }
+    ]
+  },
+  {
+    "description": "Consecutive closing punctuation fits",
+    "text": "汉汉汉汉汉。。”。汉汉",
+    "max_width": 289.109375,
+    "expected_parts": [
+      {
+        "text": "汉汉汉汉汉。。”。",
+        "line_start": 0
+      },
+      {
+        "text": "汉汉",
+        "line_start": 9
+      }
+    ]
+  },
+  {
+    "description": "Opening punctuation moves to next line",
+    "text": "汉汉汉汉“汉汉汉汉",
+    "max_width": 153.109375,
+    "expected_parts": [
+      {
+        "text": "汉汉汉汉",
+        "line_start": 0
+      },
+      {
+        "text": "“汉汉汉汉",
+        "line_start": 4
+      }
+    ]
+  },
+  {
+    "description": "Consecutive opening punctuation moves to next line",
+    "text": "汉汉汉汉““汉汉汉汉",
+    "max_width": 169.21875,
+    "expected_parts": [
+      {
+        "text": "汉汉汉汉",
+        "line_start": 0
+      },
+      {
+        "text": "““汉汉汉汉",
+        "line_start": 4
+      }
+    ]
+  },
+  {
+    "description": "Multline with newline",
+    "text": "第一章 中文正文测试文本。\n第二段正文测试。",
+    "max_width": 300.0,
+    "expected_parts": [
+      {
+        "text": "第一章 中文正文测",
+        "line_start": 0
+      },
+      {
+        "text": "试文本。",
+        "line_start": 9
+      },
+      {
+        "text": "第二段正文测试。",
+        "line_start": 14
+      }
+    ]
+  }
+]

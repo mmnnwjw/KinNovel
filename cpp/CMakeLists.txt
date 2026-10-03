@@ -15,6 +15,8 @@ endif()
 
 # Find basic dependencies
 find_package(Threads REQUIRED)
+find_package(Freetype REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Include directories
 include_directories(
@@ -23,15 +25,6 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
-
-# Optional system packages for native/cross builds
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(FREETYPE QUIET freetype2)
-    pkg_check_modules(CURL QUIET libcurl)
-    pkg_check_modules(ZLIB QUIET zlib)
-    pkg_check_modules(BROTLI QUIET libbrotlidec)
-endif()
 
 # Third-party library target (yyjson)
 add_library(kinnovel_thirdparty STATIC
@@ -42,6 +35,10 @@ target_include_directories(kinnovel_thirdparty PUBLIC ${CMAKE_CURRENT_SOURCE_DIR
 # Core library
 set(CORE_SOURCES
     src/core/Logger.cpp
+    src/core/Sha256.cpp
+    src/core/Utils.cpp
+    src/core/Config.cpp
+    src/core/Charset.cpp
 )
 add_library(kinnovel_core STATIC ${CORE_SOURCES})
 target_link_libraries(kinnovel_core PUBLIC kinnovel_thirdparty Threads::Threads)
@@ -67,6 +64,24 @@ endif()
 add_library(kinnovel_hal STATIC ${HAL_SOURCES})
 target_link_libraries(kinnovel_hal PUBLIC kinnovel_core)
 target_include_directories(kinnovel_hal PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Reader library
+set(READER_SOURCES
+    src/reader/HtmlParser.cpp
+    src/reader/WoffNormalizer.cpp
+    src/reader/FontEngine.cpp
+    src/reader/ReaderDocument.cpp
+)
+add_library(kinnovel_reader STATIC ${READER_SOURCES})
+target_link_libraries(kinnovel_reader PUBLIC
+    kinnovel_core
+    Freetype::Freetype
+    ZLIB::ZLIB
+)
+target_include_directories(kinnovel_reader PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
