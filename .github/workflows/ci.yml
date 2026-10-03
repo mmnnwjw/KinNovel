@@ -1,0 +1,64 @@
+name: C++ CI & Cross-Compilation
+
+on:
+  push:
+    branches:
+      - rewrite/cpp
+      - main
+  pull_request:
+    branches:
+      - rewrite/cpp
+      - main
+
+jobs:
+  native-build-and-test:
+    name: Native Linux (x86_64) Build & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libfreetype6-dev libcurl4-openssl-dev zlib1g-dev libbrotli-dev
+
+      - name: Configure CMake
+        run: |
+          cmake -B cpp/build -S cpp \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON
+
+      - name: Build
+        run: |
+          cmake --build cpp/build --parallel
+
+      - name: Run Tests
+        run: |
+          ctest --test-dir cpp/build --output-on-failure
+
+  kindlehf-cross-compile:
+    name: Kindle armhf Cross-Compilation
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/koreader/koxtoolchain:kindlehf
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cross-compile for Kindle (armhf)
+        run: |
+          export PATH="/opt/x-tools/arm-kindlehf-linux-gnueabihf/bin:$PATH"
+          cmake -B cpp/build-arm -S cpp \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain-kindlehf.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON
+          cmake --build cpp/build-arm --parallel
+
+      - name: Verify Static Linking & Dependencies
+        run: |
+          export PATH="/opt/x-tools/arm-kindlehf-linux-gnueabihf/bin:$PATH"
+          echo "=== File Info ==="
+          file cpp/build-arm/tests/test_hal
+          echo "=== Dynamic Section ==="
+          arm-kindlehf-linux-gnueabihf-readelf -d cpp/build-arm/tests/test_hal || true

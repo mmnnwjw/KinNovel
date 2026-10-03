@@ -53,6 +53,9 @@ The complete license text is included in `LICENSE`.
 | Pillow | Framebuffer rendering, image decoding, FreeType fonts | MIT-CMU | https://github.com/python-pillow/Pillow |
 | lxml | HTML parsing for the novel reader | BSD | https://github.com/lxml/lxml |
 | python-evdev | Kindle touch input | BSD | https://github.com/gvalkov/python-evdev |
+| yyjson | High-performance JSON parser/serializer for C++ rewrite | MIT | https://github.com/ibireme/yyjson |
+| stb_image | Image decoder for cover and illustrations in C++ rewrite | MIT / Public Domain | https://github.com/nothings/stb |
+| stb_image_write | Image writer for screenshots and tests in C++ rewrite | MIT / Public Domain | https://github.com/nothings/stb |
 
 ## Content notice
 

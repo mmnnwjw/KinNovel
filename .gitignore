@@ -11,3 +11,6 @@ GithubToken
 audit_bin.txt
 .env
 .env.*
+cpp/build/
+cpp/build-*/
+*.tmp
