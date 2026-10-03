@@ -142,3 +142,17 @@ live_page_probe: history raw 24 ids, 1 null filtered -> render OK;
                  browse 8 items, rank 48 items -> render OK
 device_boot_test.sh: started to touch-listening, SIGTERM -> 2s, lock removed
 ```
+
+## Fifth review round (2026-10, v0.7.2)
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| Feature | 漫画会出现在排行榜/最近等小说列表里。 | 在 `api.py` 集中过滤：`is_comic()` 同时识别书籍列表的 `Type` 与书架的 `type`，`novel_items()`/`_novel_data()` 兼容裸数组与 `{Data:[...]}`；排行榜、最近、按 ID 取书、系列、书架全部只保留小说，阅读历史本就只读 `Novel` 字段。 |
+
+Device verification (v0.7.2):
+
+```text
+python -m unittest discover -s tests  -> Ran 119 tests, OK (skipped=1)
+live_type_probe: rank raw 48 (44 Novel + 4 Comic) -> filtered 44, comic 0
+                 browse 10 -> 10 (comic 0); shelf 5 -> 5 (comic 0)
+```

@@ -21,7 +21,10 @@ def _load(ctx):
 
     def operation():
         shelf = ctx.api.get_book_shelf()
-        items = list(shelf.get("data") or [])
+        items = [
+            item for item in (shelf.get("data") or [])
+            if str(item.get("type") or "").strip().lower() != "comic"
+        ]
         folder_ids = {item.get("id") for item in items if item.get("type") == "FOLDER"}
         STATE["path"] = [value for value in STATE["path"] if value in folder_ids]
         parent = STATE["path"][-1] if STATE["path"] else None
