@@ -119,6 +119,51 @@ class ImageCacheTests(unittest.TestCase):
         self.assertIsNone(self.cache.get(url, 256))
         self.assertFalse(path.exists())
 
+    def test_visible_priority_jumps_ahead_of_background(self):
+        cache = ImageCache(workers=1)
+        order = []
+        gate = threading.Event()
+
+        def fake_download(url, key, height, strict_tls, priority=0):
+            order.append(url)
+            if len(order) == 1:
+                gate.wait(5)
+
+        cache._download = fake_download
+        cache.prefetch("bg?size=1x1", height=256, priority=6)
+        time.sleep(0.2)  # 让 worker 先拿起后台任务
+        cache.prefetch("mid?size=1x1", height=256, priority=3)
+        cache.prefetch("visible?size=1x1", height=256, priority=0)
+        gate.set()
+        deadline = time.monotonic() + 5
+        while len(order) < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(order, ["bg?size=1x1", "visible?size=1x1",
+                                 "mid?size=1x1"])
+
+    def test_visible_image_is_retried_after_failure(self):
+        results = []
+        calls = {"count": 0}
+        original = self.cache._download_image
+
+        def flaky(url, height, strict_tls):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("transient")
+            return Image.new("L", (10, 10), 255)
+
+        self.cache._download_image = flaky
+        self.cache._save = lambda path, image: None
+        url = "http://127.0.0.1:1/retry.png?size=600x400"
+        self.assertTrue(self.cache.prefetch(
+            url, height=256, priority=0, callback=results.append))
+        deadline = time.monotonic() + 8
+        while not results and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(results, [True])
+        self.assertGreaterEqual(calls["count"], 2)
+        self.cache._download_image = original
+
 
 if __name__ == "__main__":
     unittest.main()

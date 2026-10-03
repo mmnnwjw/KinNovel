@@ -126,6 +126,8 @@ def render(ctx, canvas):
         if index >= len(STATE["items"]):
             continue
         item = STATE["items"][index]
+        if not isinstance(item, dict):
+            continue
         canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
                                       radius=8, outline=canvas.theme.mid, width=1)
         canvas.centered_text(str((STATE["page"] - 1) * per_page + index + 1),

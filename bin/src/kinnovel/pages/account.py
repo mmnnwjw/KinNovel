@@ -221,6 +221,8 @@ def render_notifications(ctx, canvas):
         if index >= len(items):
             continue
         item = items[index]
+        if not isinstance(item, dict):
+            continue
         canvas.draw.rounded_rectangle(
             [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
             radius=8, outline=canvas.theme.mid,
@@ -329,6 +331,8 @@ def render_shop(ctx, canvas):
         if index >= len(items):
             break
         item = items[index]
+        if not isinstance(item, dict):
+            continue
         y = top + 12 + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 8)
         SHOP_STATE["rects"][("item", index)] = rect

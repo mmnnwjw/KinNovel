@@ -149,6 +149,8 @@ ABOUT_LINES = [
     "framebuffer、EPDC、evdev、启动和恢复流程",
     "KOReader",
     "休眠与电源事件调度、内置 FreeType 与 WOFF2 字体支持",
+    "FBInk",
+    "各代 EPDC 波形、ioctl 结构体与刷新区域对齐规范",
     "",
     "主要依赖",
     "Python 3.14、Pillow、lxml、python-evdev",
