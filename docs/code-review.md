@@ -91,3 +91,35 @@ Deferred: main-loop rendering still runs synchronously inside the evdev read
 loop; ioctl timeout threads can linger in the kernel; partial/dirty-region
 refresh is not yet wired into `PageContext.show()`. These need on-device
 validation before changing.
+
+## Third review round (2026-10, v0.7.0)
+
+本轮聚焦图片加载性能，并在 Kindle 实机（1236x1648 / MTK / Python 3.14）上
+完成验证。完整报告见 `docs/review-2026-10-03-image-perf.md`。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P0 | 图片失败被当作成功：`prefetch` 返回 `None`、调用方丢弃 pending 后立即重绘，形成“反复 fork + 反复全屏刷新”的热循环。 | `prefetch` 改为明确返回状态并记录失败退避；渲染不再因失败重新入队。`tests/test_images.py::test_failure_backoff_prevents_retry_storm` 覆盖。 |
+| P0 | 整章插图预取无并发上限，且每张图一个 Python 子进程（实测冷启动约 1.07s / 47MB）。 | 改为 2 个常驻 daemon worker + 每 URL+尺寸 in-flight 去重，只预取当前页及后两页。 |
+| P1 | 每张图完成都整页重绘 + 全屏刷新。 | 新增 UI 回调队列与合并刷新，插图到达只刷新其矩形。 |
+| P1 | 全尺寸解码后转 `L` 再存 PNG；二次显示再解码一次。 | 按目标尺寸缩放后存灰度 JPEG，成功后预热内存缓存。 |
+| P1 | 不做用途化尺寸协商，所有图都 `height=1024`。 | 封面 512、插图按显示高度取桶，仅对 `size=WxH` 图床 URL 改写。 |
+| P1 | 图片内存缓存按条目数（24）而非字节计。 | 48MB 字节预算 + 条目上限双重 LRU；封面缩放结果单独缓存。 |
+| P1 | 已缓存章节会逐张 `get()` 全解码；`image_pending` 跨页面永久泄漏。 | 预取改为 `is_cached` 探测 + 有界队列；去掉 `image_pending`，改由 `ImageCache` 统一去重。 |
+| P1 | 书架预取自己不渲染的封面。 | 删除该预取。 |
+| P1 | 异步回调在工作线程修改 UI 状态并渲染。 | 新增 `PageContext.post/request_show/drain_ui_queue`，输入循环 50ms 轮询，在主线程执行回调。 |
+| P1 | 账号自动登录离开页面后永久卡在“正在登录…”。 | `run_async(sticky=True)` + 回调内按当前页刷新。 |
+| P1 | 书籍详情切书残留旧数据；章节预热使用全局 `book_id`。 | 清空 `STATE["data"]/bound`；预热显式传入 `book_id`。 |
+| P2 | 插图排版用固定高度，浪费版面。 | 解析 `<img width/height>`，按真实宽高比预留高度。 |
+| P2 | 目录空白行可点击；章节导航假定 `SortNum` 连续。 | 只为有效行注册命中区域；新增 `_chapter_sort/_chapter_index`。 |
+| P2 | 损坏缓存文件不再重下；失败无负缓存。 | `get()` 删除无法解码的文件；失败退避表有上限。 |
+| P2 | 经典 mxcfb 的 `mxcfb_rect` 字段顺序为 `left, top`，与 FBInk 内核头文件不符。 | 改为 `top, left`；当前全屏刷新下不可见，为局部刷新铺路。 |
+
+Device verification:
+
+```text
+Kindle (armv7l, Python 3.14.3, 1236x1648, mtk)
+python -m unittest discover -s tests  -> Ran 101 tests, OK (skipped=1)
+live image bench: cover 512 -> 359x512 grayscale JPEG, 55 KB, RSS +1 MB
+device_boot_test.sh: SIGTERM -> exited in 3s, lock removed, screen restored
+```

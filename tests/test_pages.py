@@ -385,7 +385,7 @@ class PageSmokeTests(unittest.TestCase):
         self._prime_reader()
         self.context.navigate("catalog", book_id=1, sort_num=2)
         self.assertEqual(self.context.stack[-1][0], "reader")
-        reader.STATE["rects"] = {("catalog", 4): (0, 0, 200, 60)}
+        reader.STATE["rects"] = {("catalog", 1): (0, 0, 200, 60)}
         calls = []
         self.context.replace = lambda name, **params: calls.append((name, params))
 
@@ -393,8 +393,17 @@ class PageSmokeTests(unittest.TestCase):
             {"gesture": "tap", "x-pixel": 20, "y-pixel": 20}, self.context)
 
         self.assertEqual(calls[0][0], "reader")
-        self.assertEqual(calls[0][1]["sort_num"], 5)
+        self.assertEqual(calls[0][1]["sort_num"], 2)
         self.assertEqual([name for name, _ in self.context.stack], [])
+
+    def test_catalog_blank_row_is_not_clickable(self):
+        self._prime_reader()
+        reader.STATE["rects"] = {("catalog", 9): (0, 0, 200, 60)}
+        calls = []
+        self.context.replace = lambda name, **params: calls.append((name, params))
+        reader.handle_catalog(
+            {"gesture": "tap", "x-pixel": 20, "y-pixel": 20}, self.context)
+        self.assertEqual(calls, [])
 
     def test_paged_lists_request_only_what_they_render(self):
         cases = [

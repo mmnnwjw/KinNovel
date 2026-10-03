@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from ..config import CACHE_DIR
 from ..reader import ReaderDocument, ensure_font
+from ..ui import height_bucket
 from ..utils import atomic_write, read_json, stable_cache_name, touch
 
 
@@ -96,26 +97,71 @@ def prefetch_chapter(ctx, book_id, sort_num):
     return True
 
 
-def _prefetch_images(ctx, document):
-    for block in document.blocks:
-        if block.kind != "image" or not block.source_url:
+def _image_ready(ctx, url):
+    """图片到达后只刷新当前页上该插图所在矩形，避免整屏重绘。"""
+    def apply():
+        if ctx.page_name != "reader" or STATE.get("fullscreen_image"):
+            return
+        region = _visible_image_region(ctx, url)
+        if region is not None:
+            ctx.show(region=region)
+    ctx.post(apply)
+
+
+def _fullscreen_ready(ctx, url):
+    def apply():
+        if ctx.page_name == "reader" and STATE.get("fullscreen_image") == url:
+            ctx.show()
+    ctx.post(apply)
+
+
+def _visible_image_region(ctx, url):
+    doc = STATE.get("doc")
+    pages = getattr(doc, "pages", None) if doc else None
+    if not pages:
+        return None
+    try:
+        index = max(0, min(int(STATE.get("page") or 0), len(pages) - 1))
+        page = pages[index]
+    except (TypeError, ValueError, IndexError):
+        return None
+    top, _ = _layout_metrics(ctx)
+    for item in page:
+        if item.get("type") != "image" or item.get("url") != url:
             continue
-        url = block.source_url
-        if ctx.images.get(url) is not None or url in STATE["image_pending"]:
-            continue
-        STATE["image_pending"].add(url)
-        ctx.run_async(
-            "reader",
-            lambda url=url: ctx.images.prefetch(url, ctx.config.get("strict_tls")),
-            lambda _result, url=url: STATE["image_pending"].discard(url),
-            lambda _exc, url=url: STATE["image_pending"].discard(url),
-        )
+        return (int(item["x"]), int(top + item["y"]),
+                int(item["width"]), int(item["height"]))
+    return None
+
+
+def _prefetch_images(ctx, document, pages_ahead=2):
+    """只预取当前页及其后少量页的插图，交给 ImageCache 做去重与限流。"""
+    pages = getattr(document, "pages", None) or []
+    if not pages:
+        return
+    first = max(0, min(int(STATE.get("page") or 0), len(pages) - 1))
+    for page in pages[first:first + max(0, int(pages_ahead)) + 1]:
+        for item in page:
+            if item.get("type") != "image":
+                continue
+            url = item.get("url")
+            if not url:
+                continue
+            target = height_bucket(item.get("height") or 1024)
+            if ctx.images.is_cached(url, target):
+                continue
+            ctx.images.prefetch(
+                url, ctx.config.get("strict_tls"), height=target,
+                callback=lambda ok, url=url: _image_ready(ctx, url),
+            )
 
 
 def _prefetch_neighbors(ctx, book_id, sort_num, chapters):
-    for target in (int(sort_num) - 1, int(sort_num) + 1):
-        if target < 1 or target > len(chapters):
+    index = _chapter_index(chapters, sort_num)
+    for target_index in (index - 1, index + 1):
+        if target_index < 0 or target_index >= len(chapters):
             continue
+        target = _chapter_sort(chapters, target_index)
         if _chapter_cache_path(book_id, target, ctx.config.get("convert")).exists():
             continue
 
@@ -123,6 +169,36 @@ def _prefetch_neighbors(ctx, book_id, sort_num, chapters):
             prefetch_chapter(ctx, book_id, target)
 
         ctx.run_async("reader", task, lambda _result: None, lambda _exc: None)
+
+
+def _chapter_sort(chapters, index):
+    """章节在第 index 位时的服务端 SortNum。"""
+    if 0 <= index < len(chapters):
+        item = chapters[index]
+        if isinstance(item, dict):
+            try:
+                return int(item.get("SortNum") or index + 1)
+            except (TypeError, ValueError):
+                return index + 1
+    return index + 1
+
+
+def _chapter_index(chapters, sort_num):
+    """服务端 SortNum 对应的列表下标（兼容字符串章节列表）。"""
+    try:
+        wanted = int(sort_num)
+    except (TypeError, ValueError):
+        wanted = 1
+    for index, item in enumerate(chapters):
+        if isinstance(item, dict):
+            try:
+                if int(item.get("SortNum") or 0) == wanted:
+                    return index
+            except (TypeError, ValueError):
+                continue
+        elif index + 1 == wanted:
+            return index
+    return wanted - 1
 
 
 STATE = {
@@ -183,14 +259,18 @@ def _configure_swipe(ctx, delta):
 
 def _fit_image(url, image, width, height):
     key = (url, int(width), int(height))
-    cached = STATE["fitted_cache"].get(key)
+    cache = STATE["fitted_cache"]
+    cached = cache.get(key)
     if cached is not None:
         return cached
     fitted = ImageOps.contain(image, (int(width), int(height)),
                               method=Image.Resampling.LANCZOS)
-    if len(STATE["fitted_cache"]) >= 8:
-        STATE["fitted_cache"].clear()
-    STATE["fitted_cache"][key] = fitted
+    if len(cache) >= 8:
+        try:
+            cache.pop(next(iter(cache)))
+        except StopIteration:
+            pass
+    cache[key] = fitted
     return fitted
 
 
@@ -396,18 +476,20 @@ def _turn(ctx, delta):
         STATE["page"] = target
         STATE["last_turn_at"] = time.monotonic()
         _save_progress(ctx)
+        _prefetch_images(ctx, doc)
         ctx.show()
         return
     _change_chapter(ctx, delta, at_last=(delta < 0))
 
 
 def _change_chapter(ctx, delta, at_last=False):
-    sort_num = int(STATE["sort_num"]) + int(delta)
     chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
-    if sort_num < 1 or sort_num > len(chapters):
+    index = _chapter_index(chapters, STATE["sort_num"]) + int(delta)
+    if index < 0 or index >= len(chapters):
         ctx.toast("已经是%s" % ("第一页" if delta < 0 else "最后一页"))
         return
-    ctx.replace("reader", book_id=STATE["book_id"], sort_num=sort_num,
+    target = _chapter_sort(chapters, index)
+    ctx.replace("reader", book_id=STATE["book_id"], sort_num=target,
                 at_last=bool(at_last), swipe_delta=int(delta))
     STATE["last_turn_at"] = time.monotonic()
 
@@ -419,14 +501,12 @@ def header_blocked():
 def render(ctx, canvas):
     if STATE["fullscreen_image"]:
         url = STATE["fullscreen_image"]
-        image = ctx.images.get(url)
-        if image is None and url not in STATE["image_pending"]:
-            STATE["image_pending"].add(url)
-            ctx.run_async(
-                "reader",
-                lambda: ctx.images.prefetch(url, ctx.config.get("strict_tls")),
-                lambda _result: STATE["image_pending"].discard(url),
-                lambda _exc: STATE["image_pending"].discard(url),
+        target = height_bucket(canvas.height)
+        image = ctx.images.get(url, target)
+        if image is None:
+            ctx.images.prefetch(
+                url, ctx.config.get("strict_tls"), height=target,
+                callback=lambda ok, url=url: _fullscreen_ready(ctx, url),
             )
         if image is not None:
             fitted = _fit_image("fullscreen:" + url, image,
@@ -464,19 +544,16 @@ def render(ctx, canvas):
                 item.get("fallback_font"),
             )
         elif item["type"] == "image":
-            image = ctx.images.get(item["url"])
+            url = item["url"]
+            target = height_bucket(item.get("height") or 1024)
+            image = ctx.images.get(url, target)
             if image is None:
-                url = item["url"]
-                if url not in STATE["image_pending"]:
-                    STATE["image_pending"].add(url)
-                    ctx.run_async(
-                        "reader",
-                        lambda url=url: ctx.images.prefetch(url, ctx.config.get("strict_tls")),
-                        lambda _result, url=url: STATE["image_pending"].discard(url),
-                        lambda _exc, url=url: STATE["image_pending"].discard(url),
-                    )
+                ctx.images.prefetch(
+                    url, ctx.config.get("strict_tls"), height=target,
+                    callback=lambda ok, url=url: _image_ready(ctx, url),
+                )
             if image is not None:
-                fitted = _fit_image(item["url"], image, item["width"], item["height"])
+                fitted = _fit_image(url, image, item["width"], item["height"])
                 x = item["x"] + (item["width"] - fitted.width) // 2
                 image_y = top + item["y"]
                 canvas.image.paste(fitted, (x, image_y))
@@ -597,10 +674,10 @@ def render_catalog(ctx, canvas):
         index = start + row
         y = top + 12 + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 6)
-        STATE["rects"][("catalog", index)] = rect
         if index >= len(chapters):
             continue
-        current = int(STATE["sort_num"]) == index + 1
+        STATE["rects"][("catalog", index)] = rect
+        current = int(STATE["sort_num"]) == _chapter_sort(chapters, index)
         canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
                                       radius=8, outline=canvas.theme.mid,
                                       fill=canvas.theme.inverse_bg if current else canvas.theme.background,
@@ -635,8 +712,11 @@ def handle_catalog(data, ctx):
             # 否则返回键会回到跳转前的章节而不是书籍详情
             if ctx.stack and ctx.stack[-1][0] == "reader":
                 ctx.stack.pop()
+            chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
+            if not 0 <= key[1] < len(chapters):
+                return
             ctx.replace("reader", book_id=STATE["book_id"],
-                        sort_num=key[1] + 1, fresh=True)
+                        sort_num=_chapter_sort(chapters, key[1]), fresh=True)
         elif key[0] == "prev" and STATE["catalog_page"] > 0:
             STATE["catalog_page"] -= 1
             ctx.show()

@@ -24,6 +24,9 @@ def _load(ctx, force=False):
     if not force and STATE["data"] and STATE["book_id"] == book_id:
         return
     STATE["book_id"] = book_id
+    # 切书时先清掉上一本的数据，避免加载窗口内渲染/操作到旧内容
+    STATE["data"] = None
+    STATE["bound"] = None
     STATE["loading"] = True
     STATE["generation"] += 1
     generation = STATE["generation"]
@@ -54,15 +57,15 @@ def _load(ctx, force=False):
                         continue
                 STATE["bound"] = book_id in ids
                 ctx.show()
-                _prefetch_reading_target(ctx, result)
+                _prefetch_reading_target(ctx, result, book_id)
             ctx.run_async(
                 "book",
                 ctx.api.get_book_shelf,
                 shelf_result,
-                lambda _: _prefetch_reading_target(ctx, result),
+                lambda _: _prefetch_reading_target(ctx, result, book_id),
             )
         else:
-            _prefetch_reading_target(ctx, result)
+            _prefetch_reading_target(ctx, result, book_id)
 
     def error(exc):
         if generation != STATE["generation"] or book_id != STATE["book_id"]:
@@ -73,7 +76,7 @@ def _load(ctx, force=False):
     ctx.run_async("book", operation, success, error)
 
 
-def _prefetch_reading_target(ctx, book_info):
+def _prefetch_reading_target(ctx, book_info, book_id=None):
     chapters = ((book_info or {}).get("Book") or {}).get("Chapters") or []
     if not chapters:
         return
@@ -95,7 +98,8 @@ def _prefetch_reading_target(ctx, book_info):
 
     def operation():
         from . import reader
-        reader.prefetch_chapter(ctx, STATE["book_id"], sort_num)
+        target_id = int(book_id if book_id is not None else STATE["book_id"])
+        reader.prefetch_chapter(ctx, target_id, sort_num)
 
     ctx.run_async("book", operation, lambda _: None, lambda _: None)
 

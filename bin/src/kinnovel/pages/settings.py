@@ -134,7 +134,7 @@ def handle(data, ctx):
 def _clear(ctx):
     for name in ("covers", "fonts", "images", "content"):
         clear_cache(CACHE_DIR / name)
-    ctx.images._memory.clear()
+    ctx.images.clear_memory()
     ctx.toast("缓存已清空")
 
 

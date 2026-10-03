@@ -80,12 +80,18 @@ def _auto_login(ctx, force=False):
         STATE["loading"] = False
         STATE["mode"] = "profile"
         STATE["error"] = ""
+        if ctx.page_name == "account":
+            ctx.show()
 
     def error(exc):
         STATE["loading"] = False
         STATE["error"] = str(exc)
+        if ctx.page_name == "account":
+            ctx.show()
 
-    ctx.run_async("account", lambda: ctx.api.login(email, password), success, error)
+    # sticky: 离开账号页也要清掉 loading，否则回来会永久卡在“正在登录…”
+    ctx.run_async("account", lambda: ctx.api.login(email, password),
+                  success, error, refresh=False, sticky=True)
 
 
 def _render_profile(ctx, canvas):

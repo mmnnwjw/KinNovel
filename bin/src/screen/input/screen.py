@@ -184,16 +184,27 @@ class ScreenInput:
                 pass
 
     # 事件循环
-    def listen(self, on_gesture=None, on_down=None):
+    def listen(self, on_gesture=None, on_down=None, on_idle=None):
         self.parser = MultiTouchParser(
             config=GestureConfig(),
             on_down=on_down,
             on_gesture=lambda g: on_gesture(self.get(g)) if on_gesture else None,
         )
         print("正在监听触摸输入")
+        import select
         try:
             assert self.device is not None
-            for ev in self.device.read_loop():
-                self.parser.handle_event(ev)
+            # 用 50ms 超时轮询，既能及时处理触摸，也能在主线程排空 UI 回调队列
+            while True:
+                ready, _, _ = select.select([self.device], [], [], 0.05)
+                if ready:
+                    for ev in self.device.read():
+                        self.parser.handle_event(ev)
+                if on_idle is not None:
+                    try:
+                        on_idle()
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
         except KeyboardInterrupt:
             print("正在退出")

@@ -42,10 +42,6 @@ def _load(ctx):
         STATE["page"] = 0
         STATE["loading"] = False
         STATE["loaded"] = True
-        for book in books[:8]:
-            url = book.get("Cover")
-            if url:
-                ctx.run_async("shelf", lambda url=url: ctx.images.prefetch(url, ctx.config.get("strict_tls")))
 
     def error(exc):
         STATE["loading"] = False
