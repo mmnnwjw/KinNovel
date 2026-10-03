@@ -117,11 +117,11 @@ class UPDATE:
 
 
 # 结构体
-# mxcfb 矩形:left, top, width, height
+# mxcfb 矩形:top, left, width, height(FBInk/Kindle 内核顺序)
 class MxcfbRect(ctypes.Structure):
     _fields_ = [
-        ("left", ctypes.c_uint32),
         ("top", ctypes.c_uint32),
+        ("left", ctypes.c_uint32),
         ("width", ctypes.c_uint32),
         ("height", ctypes.c_uint32),
     ]
@@ -156,7 +156,7 @@ class MxcfbSwipeData(ctypes.Structure):
         ("steps", ctypes.c_uint32),
     ]
 
-# Kindle lab126 mxcfb 设备的 update_data 结构体(68 字节)
+# Kindle lab126 mxcfb 设备的 update_data 结构体(72 字节)
 class MxcfbUpdateData(ctypes.Structure):
     _fields_ = [
         ("update_region", MxcfbRect),
@@ -542,9 +542,9 @@ class EInkDisplay:
             return
         img = image.convert("L")
         data = img.tobytes()
-        if x == 0 and iw == self.line_length and iw == image.width:
+        if x == 0 and iw == self.width and self.line_length == image.width:
             start = y * self.line_length
-            self.mem[start:start + iw * ih] = data[:iw * ih]
+            self.mem[start:start + iw * ih] = data
             return
         for row in range(ih):
             src = row * image.width

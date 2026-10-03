@@ -30,6 +30,8 @@ class Block:
     path: str = "."
     offset: int = 0
     source_url: str = ""
+    width: int = 0
+    height: int = 0
     footnotes: list = field(default_factory=list)
 
 
@@ -134,9 +136,18 @@ def extract_blocks(content, base_url=""):
                     child.get("src") or child.get("data-system-image-url") or "",
                 )
                 if src:
+                    try:
+                        image_width = max(0, int(child.get("width") or 0))
+                    except (TypeError, ValueError):
+                        image_width = 0
+                    try:
+                        image_height = max(0, int(child.get("height") or 0))
+                    except (TypeError, ValueError):
+                        image_height = 0
                     blocks.append(Block(
                         "image", path=_relative_xpath(child, root),
                         offset=offset, source_url=src,
+                        width=image_width, height=image_height,
                     ))
             elif tag == "br":
                 buffer.append("\n")
@@ -587,7 +598,12 @@ class ReaderDocument:
         for block in self.blocks:
             path = block.path
             if block.kind == "image":
-                image_height = min(int(usable_height * 0.62), int(usable_width * 0.72))
+                max_image_height = int(usable_height * 0.62)
+                if block.width > 0 and block.height > 0:
+                    image_height = int(usable_width * block.height / float(block.width))
+                    image_height = max(1, min(image_height, max_image_height))
+                else:
+                    image_height = min(max_image_height, int(usable_width * 0.72))
                 if y + image_height > usable_height and current:
                     new_page()
                 current.append({

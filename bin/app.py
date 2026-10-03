@@ -188,10 +188,15 @@ class KinNovelApp:
                 self.context.message(["运行时错误", "请查看 logs/kinnovel.log"])
 
         try:
-            self.screen.input.listen(on_gesture=on_gesture)
+            self.context._ui_loop_running = True
+            self.screen.input.listen(
+                on_gesture=on_gesture,
+                on_idle=self.context.drain_ui_queue,
+            )
         except KeyboardInterrupt:
             pass
         finally:
+            self.context._ui_loop_running = False
             self.shutdown()
 
     def shutdown(self):
@@ -205,6 +210,10 @@ class KinNovelApp:
             if self.context:
                 self.context._closed = True
             self.api.hub.close()
+        except Exception:
+            pass
+        try:
+            self.images.close()
         except Exception:
             pass
         try:
