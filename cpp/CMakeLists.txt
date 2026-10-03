@@ -86,6 +86,37 @@ target_include_directories(kinnovel_reader PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Network library
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
+
+set(NETWORK_SOURCES
+    src/network/RateLimiter.cpp
+    src/network/HttpTransport.cpp
+    src/network/WebSocketClient.cpp
+    src/network/SignalRClient.cpp
+    src/network/SessionStore.cpp
+    src/network/ApiClient.cpp
+)
+add_library(kinnovel_network STATIC ${NETWORK_SOURCES})
+target_link_libraries(kinnovel_network PUBLIC
+    kinnovel_core
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ZLIB::ZLIB
+)
+target_include_directories(kinnovel_network PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Tools
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)
+    add_executable(live_smoke ${CMAKE_CURRENT_SOURCE_DIR}/../tools/live_smoke.cpp)
+    target_link_libraries(live_smoke PRIVATE kinnovel_network kinnovel_core)
+endif()
+
 # Unit & Integration Tests
 option(BUILD_TESTS "Build KinNovel unit tests" ON)
 if(BUILD_TESTS)

@@ -239,7 +239,14 @@ void Config::setHomeOrder(const std::map<std::string, int>& order, bool autoSave
 }
 
 std::string Config::getAppDir() {
-    return "/mnt/us/extensions/kinnovel";
+    const char* env = std::getenv("KINNOVEL_APP_DIR");
+    if (env && *env) {
+        return env;
+    }
+    if (std::filesystem::exists("/mnt/us/extensions/kinnovel")) {
+        return "/mnt/us/extensions/kinnovel";
+    }
+    return "./.kinnovel";
 }
 
 std::string Config::getCacheDir() {

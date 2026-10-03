@@ -32,3 +32,10 @@ add_executable(test_golden
 )
 target_link_libraries(test_golden PRIVATE kinnovel_reader kinnovel_core)
 add_test(NAME test_golden COMMAND test_golden)
+
+# Network Unit Test
+add_executable(test_network
+    unit/test_network.cpp
+)
+target_link_libraries(test_network PRIVATE kinnovel_network kinnovel_core)
+add_test(NAME test_network COMMAND test_network)

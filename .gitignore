@@ -13,4 +13,7 @@ audit_bin.txt
 .env.*
 cpp/build/
 cpp/build-*/
+.kinnovel/
+testaccount
 *.tmp
+
