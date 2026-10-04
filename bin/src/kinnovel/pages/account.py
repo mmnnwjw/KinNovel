@@ -1,16 +1,35 @@
+import time
+
 STATE = {
     "mode": "login",
     "rects": {},
     "loading": False,
     "attempted": False,
     "error": "",
+    "today_signed": False,
 }
+
+
+def _is_today_signed(user):
+    growth = (user or {}).get("Growth") or {}
+    if growth.get("TodaySigned"):
+        return True
+    value = growth.get("LastSignAt") or growth.get("LastSignTime")
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = time.strptime(text[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return tuple(parsed[:3]) == tuple(time.localtime()[:3])
 
 
 def enter(ctx):
     if ctx.api.user:
         STATE["mode"] = "profile"
         STATE["error"] = ""
+        STATE["today_signed"] = _is_today_signed(ctx.api.user)
         ctx.show()
         return
     STATE["mode"] = "login"
@@ -116,8 +135,9 @@ def _render_profile(ctx, canvas):
         canvas.text((margin, y), label, font=ctx.fonts["small"], fill=canvas.theme.muted)
         canvas.text((margin + 180, y), str(value), font=ctx.fonts["small"])
         y += 52
+    signed = bool(STATE.get("today_signed")) or _is_today_signed(user)
     buttons = [
-        ("sign", "每日签到"),
+        ("sign", "今日已签到" if signed else "每日签到"),
         ("notifications", "通知"),
         ("shop", "商城"),
     ]
@@ -126,7 +146,8 @@ def _render_profile(ctx, canvas):
     for index, (action, label) in enumerate(buttons):
         row, column = divmod(index, 2)
         rect = (margin + column * (button_width + gap), y + row * 76, button_width, 62)
-        canvas.button(rect, label, font=ctx.fonts["small"])
+        canvas.button(rect, label, active=(action != "sign" or not signed),
+                      font=ctx.fonts["small"])
         STATE["rects"][(action, 0)] = rect
 
 
@@ -142,6 +163,8 @@ def handle(data, ctx):
         if kind == "retry":
             _auto_login(ctx, force=True)
         elif kind == "sign":
+            if STATE.get("today_signed"):
+                return
             _sign_in(ctx)
         elif kind in ("notifications", "shop"):
             ctx.navigate(kind)
@@ -149,11 +172,19 @@ def handle(data, ctx):
 
 
 def _sign_in(ctx):
-    def success(result):
-        ctx.api.refresh_user()
-        ctx.toast("签到成功 +%s 经验" % result.get("Reward", 0))
+    def operation():
+        result = ctx.api.sign_in()
+        try:
+            ctx.api.refresh_user()
+        except Exception:
+            pass
+        return result
 
-    ctx.run_async("account", ctx.api.sign_in, success,
+    def success(result):
+        STATE["today_signed"] = True
+        ctx.toast("签到成功 +%s 经验" % (result or {}).get("Reward", 0))
+
+    ctx.run_async("account", operation, success,
                   lambda exc: ctx.message(["签到失败", str(exc)]))
 
 
@@ -163,6 +194,7 @@ NOTIFICATION_STATE = {
     "total_pages": 1,
     "rects": {},
     "loading": True,
+    "error": "",
     "generation": 0,
 }
 
@@ -177,6 +209,8 @@ def _load_notifications(ctx, page=None):
         NOTIFICATION_STATE["page"] = max(1, int(page))
     NOTIFICATION_STATE["generation"] += 1
     generation = NOTIFICATION_STATE["generation"]
+    NOTIFICATION_STATE["loading"] = True
+    NOTIFICATION_STATE["error"] = ""
 
     def success(result):
         if generation != NOTIFICATION_STATE["generation"]:
@@ -185,6 +219,7 @@ def _load_notifications(ctx, page=None):
         NOTIFICATION_STATE["page"] = int(result.get("Page") or 1)
         NOTIFICATION_STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
         NOTIFICATION_STATE["loading"] = False
+        NOTIFICATION_STATE["error"] = ""
 
     _top, _row_height, per_page = _notification_layout(ctx)
     ctx.run_async("notifications", lambda: ctx.api.get_notifications(
@@ -195,14 +230,19 @@ def _load_notifications(ctx, page=None):
 def _notification_error(generation, exc, ctx):
     if generation == NOTIFICATION_STATE["generation"]:
         NOTIFICATION_STATE["loading"] = False
-        ctx.message(["通知加载失败", str(exc)])
+        NOTIFICATION_STATE["error"] = str(exc)
+        # 清掉旧通知，避免错误态还显示上一页数据
+        NOTIFICATION_STATE["items"] = []
+        NOTIFICATION_STATE["total_pages"] = 1
 
 
 def _notification_layout(ctx):
     # 同公告页：拉取条数必须等于可渲染行数，否则每页尾部通知永远翻不到
     top = max(72, int(ctx.height * 0.085))
+    action_height = 66
+    list_top = top + action_height
     row_height = max(76, int(ctx.height * 0.063))
-    per_page = max(1, (ctx.height - top - 90) // row_height)
+    per_page = max(1, (ctx.height - list_top - 90) // row_height)
     return top, row_height, per_page
 
 
@@ -213,9 +253,25 @@ def render_notifications(ctx, canvas):
     items = NOTIFICATION_STATE["items"]
     pages = NOTIFICATION_STATE["total_pages"]
     NOTIFICATION_STATE["rects"] = {}
+    if NOTIFICATION_STATE["error"]:
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(NOTIFICATION_STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, canvas.height - 72, canvas.width - 2 * margin, 54)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        NOTIFICATION_STATE["rects"][("retry", 0)] = rect
+        return
+    # “全部已读”必须是可见按钮，不能复用状态栏的隐藏热区
+    action_rect = (canvas.width - margin - 240, top + 6, 240, 54)
+    has_unread = any(not item.get("IsRead") for item in items)
+    canvas.button(action_rect, "全部已读", active=has_unread, font=ctx.fonts["small"])
+    NOTIFICATION_STATE["rects"][("readall", 0)] = action_rect
+    list_y = top + 66
     for row in range(per_page):
         index = row
-        y = top + 12 + row * row_height
+        y = list_y + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 6)
         NOTIFICATION_STATE["rects"][("item", index)] = rect
         if index >= len(items):
@@ -257,7 +313,14 @@ def handle_notifications(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    if y < int(ctx.height * 0.09) and x > int(ctx.width * 0.68):
+    retry = NOTIFICATION_STATE["rects"].get(("retry", 0))
+    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+        _load_notifications(ctx, NOTIFICATION_STATE["page"])
+        return
+    readall = NOTIFICATION_STATE["rects"].get(("readall", 0))
+    if (readall
+            and readall[0] <= x < readall[0] + readall[2]
+            and readall[1] <= y < readall[1] + readall[3]):
         ids = [int(item.get("Id")) for item in NOTIFICATION_STATE["items"]
                if not item.get("IsRead")]
         if ids:
@@ -296,23 +359,30 @@ def _mark_notifications_local():
         item["IsRead"] = True
 
 
-SHOP_STATE = {"shop": {}, "items": [], "owned": [], "rects": {}, "loading": True, "page": 0}
+SHOP_STATE = {"shop": {}, "items": [], "rects": {}, "loading": True,
+              "error": "", "page": 0}
 
 
 def enter_shop(ctx):
-    def operation():
-        return ctx.api.get_shop(), ctx.api.get_my_items()
+    SHOP_STATE["loading"] = True
+    SHOP_STATE["error"] = ""
 
-    def success(result):
-        SHOP_STATE["shop"], mine = result
+    def operation():
+        return ctx.api.get_shop()
+
+    def success(shop):
+        SHOP_STATE["shop"] = shop or {}
         SHOP_STATE["items"] = SHOP_STATE["shop"].get("Items") or []
-        SHOP_STATE["owned"] = mine.get("Items") or []
         SHOP_STATE["page"] = 0
         SHOP_STATE["loading"] = False
+        SHOP_STATE["error"] = ""
 
-    ctx.run_async("shop", operation, success,
-                  lambda exc: (SHOP_STATE.update({"loading": False}),
-                               ctx.message(["商城加载失败", str(exc)])))
+    def error(exc):
+        SHOP_STATE["loading"] = False
+        SHOP_STATE["error"] = str(exc)
+        SHOP_STATE["items"] = []
+
+    ctx.run_async("shop", operation, success, error)
 
 
 def render_shop(ctx, canvas):
@@ -326,6 +396,21 @@ def render_shop(ctx, canvas):
     SHOP_STATE["page"] = min(SHOP_STATE["page"], pages - 1)
     start = SHOP_STATE["page"] * per_page
     SHOP_STATE["rects"] = {}
+    nav_y = canvas.height - 68
+    if SHOP_STATE["error"]:
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(SHOP_STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, nav_y, canvas.width - 2 * margin, 50)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        SHOP_STATE["rects"][("retry", 0)] = rect
+        return
+    if SHOP_STATE["loading"]:
+        canvas.centered_text("加载中…", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2)
+        return
     for row in range(per_page):
         index = start + row
         if index >= len(items):
@@ -344,7 +429,6 @@ def render_shop(ctx, canvas):
         canvas.text((rect[0] + 12, y + 44),
                     "%s 金币 · 持有 %s" % (item.get("Price", 0), item.get("Owned", 0)),
                     font=ctx.fonts["tiny"], fill=canvas.theme.muted)
-    nav_y = canvas.height - 68
     width = int(canvas.width * 0.25)
     for key, rect, label in (
         ("prev", (margin, nav_y, width, 50), "上一页"),
@@ -357,10 +441,7 @@ def render_shop(ctx, canvas):
             key == "next" and SHOP_STATE["page"] < pages - 1)
         canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
         SHOP_STATE["rects"][(key, 0)] = rect
-    if SHOP_STATE["loading"]:
-        canvas.centered_text("加载中…", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2)
-    elif not items:
+    if not items:
         canvas.centered_text("暂无商品", ctx.fonts["body"],
                              canvas.width // 2, canvas.height // 2,
                              fill=canvas.theme.muted)
@@ -370,6 +451,10 @@ def handle_shop(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
+    retry = SHOP_STATE["rects"].get(("retry", 0))
+    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+        enter_shop(ctx)
+        return
     for key, rect in SHOP_STATE["rects"].items():
         rx, ry, width, height = rect
         if not (rx <= x < rx + width and ry <= y < ry + height):

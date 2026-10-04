@@ -1,6 +1,5 @@
 STATE = {
     "rects": {},
-    "online": None,
 }
 
 
@@ -58,8 +57,6 @@ def render(ctx, canvas):
                          fill=canvas.theme.muted)
     user = ctx.api.user or {}
     status = user.get("UserName") if user else "未登录"
-    if STATE["online"] is not None:
-        status += "  ·  在线 %s" % STATE["online"]
     canvas.centered_text(status, ctx.fonts["small"], width // 2, int(height * 0.20),
                          fill=canvas.theme.muted)
 

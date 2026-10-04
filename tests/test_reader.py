@@ -1,6 +1,9 @@
 import struct
+import tempfile
 import unittest
+from collections import OrderedDict
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -8,6 +11,11 @@ from kinnovel.config import APP_DIR, Config
 from kinnovel.reader import (
     FontResolver,
     ReaderDocument,
+    _FONT_OBJECTS,
+    _FREETYPE,
+    _GLYPH_CACHE,
+    _NOTDEF_BYTES,
+    _TEXT_WIDTH_CACHE,
     _glyph_available_raster,
     cached_font,
     cmap_available,
@@ -16,6 +24,7 @@ from kinnovel.reader import (
     normalize_font,
     sanitize_html,
     split_font_runs,
+    text_width,
     wrap_line,
 )
 
@@ -43,9 +52,16 @@ class MemoryConfig:
 
 
 class ReaderTests(unittest.TestCase):
+    def test_freetype_face_cache_is_ordered(self):
+        self.assertIsInstance(_FREETYPE["faces"], OrderedDict)
+
     def setUp(self):
         if not FONT_PATH:
             self.skipTest("no CJK test font available")
+        _FONT_OBJECTS.clear()
+        _TEXT_WIDTH_CACHE.clear()
+        _GLYPH_CACHE.clear()
+        _NOTDEF_BYTES.clear()
 
     def test_utf8_content_is_not_mojibake(self):
         blocks = extract_blocks("<p>第一章 中文正文</p>")
@@ -272,6 +288,108 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(runs[0], ("A", primary))
         self.assertEqual(runs[1], ("\u30fb", fallback))
         self.assertEqual(runs[2], ("B", primary))
+
+    def test_normalize_font_header_only_when_conversion_exists(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "font.woff"
+            converted = path.with_suffix(path.suffix + ".ttf")
+            path.write_bytes(b"wOFF" + b"\x00\x01\x00\x00" + b"\0" * 40)
+            converted.write_bytes(b"converted")
+            with patch.object(Path, "read_bytes",
+                              side_effect=AssertionError("must not read whole file")):
+                result = normalize_font(path)
+            self.assertEqual(result, converted)
+
+    def test_normalized_font_cache_hit_avoids_full_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "font.woff"
+            path.write_bytes(b"wOFF" + b"OTTO" + b"\0" * 60)
+            converted = path.with_suffix(path.suffix + ".otf")
+            converted.write_bytes(b"converted")
+            calls = []
+            original = Path.read_bytes
+
+            def tracking_read_bytes(self):
+                calls.append(self)
+                return original(self)
+
+            with patch.object(Path, "read_bytes", tracking_read_bytes):
+                result = normalize_font(path)
+            self.assertEqual(result, converted)
+            self.assertNotIn(path, calls)
+
+    def test_font_object_cache_is_lru_bounded(self):
+        original_limit = __import__("kinnovel.reader", fromlist=["x"])._FONT_OBJECTS_LIMIT
+        reader_module = __import__("kinnovel.reader", fromlist=["x"])
+        try:
+            reader_module._FONT_OBJECTS_LIMIT = 3
+            fonts = [cached_font(FONT_PATH, size) for size in (10, 12, 14, 16)]
+        finally:
+            reader_module._FONT_OBJECTS_LIMIT = original_limit
+        self.assertLessEqual(len(_FONT_OBJECTS), 3)
+        self.assertNotIn((FONT_PATH, 10), _FONT_OBJECTS)
+        self.assertIs(cached_font(FONT_PATH, 12), fonts[1])
+
+    def test_text_width_cache_is_bounded(self):
+        reader_module = __import__("kinnovel.reader", fromlist=["x"])
+        image = Image.new("L", (8, 8), 255)
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype(FONT_PATH, 20)
+        original_limit = reader_module._TEXT_WIDTH_LIMIT
+        try:
+            reader_module._TEXT_WIDTH_LIMIT = 5
+            for index in range(12):
+                text_width(draw, chr(ord("A") + index), font)
+        finally:
+            reader_module._TEXT_WIDTH_LIMIT = original_limit
+        self.assertLessEqual(len(_TEXT_WIDTH_CACHE), 5)
+
+    def test_text_width_cache_uses_real_getlength(self):
+        class Dummy:
+            path = None
+            size = 12
+
+            def __init__(self):
+                self.calls = []
+
+            def getlength(self, value):
+                self.calls.append(value)
+                return float(len(value))
+
+        dummy = Dummy()
+        image = Image.new("L", (8, 8), 255)
+        draw = ImageDraw.Draw(image)
+        first = text_width(draw, "汉", dummy)
+        second = text_width(draw, "汉", dummy)
+        self.assertEqual(first, second)
+        self.assertEqual(dummy.calls, ["汉"])
+
+    def test_default_font_loads_with_requested_size(self):
+        with patch("PIL.ImageFont.load_default",
+                   wraps=ImageFont.load_default) as load_default:
+            font = FontResolver("").system_font(42)
+        self.assertEqual(int(getattr(font, "size", 0)), 42)
+        load_default.assert_called_once_with(size=42)
+
+    def test_missing_font_path_falls_back_to_sized_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing = Path(root) / "missing.ttf"
+            font = FontResolver(str(missing)).system_font(33)
+        self.assertEqual(int(getattr(font, "size", 0)), 33)
+
+    def test_freetype_faces_are_lru_bounded(self):
+        original_limit = _FREETYPE["face_limit"]
+        try:
+            _FREETYPE["face_limit"] = 2
+            fonts = [ImageFont.truetype(FONT_PATH, size) for size in (11, 12, 13)]
+            for font in fonts:
+                cmap_available(font, "A")
+            self.assertLessEqual(len(_FREETYPE["faces"]), 2)
+            cmap_available(fonts[0], "A")
+            self.assertLessEqual(len(_FREETYPE["faces"]), 2)
+        finally:
+            _FREETYPE["face_limit"] = original_limit
+            _FREETYPE["faces"].clear()
 
 
 if __name__ == "__main__":

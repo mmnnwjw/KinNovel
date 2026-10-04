@@ -271,7 +271,9 @@ class ApiClient:
             try:
                 token = self._http("/api/user/refresh_token", {"token": refresh})
             except ApiError as exc:
-                if int(getattr(exc, "status", 500)) in (-100, 401, 404):
+                # 401 只说明本次刷新被拒, 不能据此清掉 refresh token;
+                # 只有明确的失效状态 (-100/404) 才清理凭据。
+                if int(getattr(exc, "status", 500)) in (-100, 404):
                     self.session.clear_credentials()
                 raise
             if not token:
@@ -289,7 +291,7 @@ class ApiClient:
         try:
             return self.refresh_access_token()
         except ApiError as exc:
-            if int(getattr(exc, "status", 500)) in (-100, 401, 404):
+            if int(getattr(exc, "status", 500)) in (-100, 404):
                 # refresh token 已失效: 清掉凭据后按匿名连接, 公开接口仍可用。
                 self.session.clear_credentials()
                 return None
@@ -439,6 +441,21 @@ class ApiClient:
             params["Type"] = book_type
         return _novel_data(self.invoke("GetBookListByIds", params))
 
+    def get_book_list_by_ids_chunked(self, ids, book_type=None, chunk_size=24):
+        """按服务端上限分块请求书籍元数据, 不再把 24 条当作整体上限。"""
+        size = max(1, int(chunk_size))
+        values = list(ids or [])
+        output = []
+        for start in range(0, len(values), size):
+            chunk = values[start:start + size]
+            if not chunk:
+                continue
+            result = self.get_book_list_by_ids(chunk, book_type)
+            if isinstance(result, dict):
+                result = result.get("Data") or result.get("data") or []
+            output.extend(dict_items(result))
+        return output
+
     def get_books_by_series(self, series_name, page=1, size=24, order="latest",
                             ignore_japanese=False, ignore_ai=False):
         return _novel_data(self.invoke("GetBooksBySeries", {
@@ -485,16 +502,13 @@ class ApiClient:
         return self.invoke("MarkNotifications", {"Ids": [int(value) for value in ids]})
 
     def get_book_shelf(self):
+        # 书架写回是整表覆盖, API 层只归一化, 不能丢弃漫画/文件夹等条目。
         envelope = self.invoke("GetBookShelf")
-        if not isinstance(envelope, dict):
-            return [item for item in dict_items(envelope) if not is_comic(item)]
-        key = "data" if "data" in envelope else "Data"
-        items = [
-            item for item in dict_items(envelope.get(key))
-            if not is_comic(item)
-        ]
-        envelope[key] = items
-        return envelope
+        if isinstance(envelope, dict):
+            key = "data" if "data" in envelope else "Data"
+            envelope[key] = dict_items(envelope.get(key))
+            return envelope
+        return dict_items(envelope)
 
     def save_book_shelf(self, items, version="20260921"):
         return self.invoke("SaveBookShelf", {"data": items, "ver": version})

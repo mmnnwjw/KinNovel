@@ -1,7 +1,7 @@
 """e-ink 屏幕输出:Pillow 图像渲染与 EPDC framebuffer 刷新.
 实现参考:KOReader,fbink,感谢原仓库的贡献者
     - mxcfb:Kindle lab126 内核 EPDC(PW2/PW3/KT2/KT3/Voyage 等 i.MX6SL),
-        MXCFB_SEND_UPDATE = _IOW('F', 0x2E, 68)
+        MXCFB_SEND_UPDATE = _IOW('F', 0x2E, 72)
         MXCFB_WAIT_FOR_UPDATE_COMPLETE = _IOWR('F', 0x2F, 8) (marker_data)
         结构体含 hist_bw/hist_gray 波形字段,与 NXP 上游 mxcfb.h 不同.
         定义来源:KOReader koreader-base ffi-cdecl/include/mxcfb-kindle.h
@@ -114,6 +114,11 @@ class SWIPE_MTK:
 class UPDATE:
     PARTIAL = 0x0
     FULL = 0x1
+
+
+# EPDC 温度选择常量(FBInk)
+TEMP_USE_AMBIENT = 0x1000
+TEMP_USE_AUTO = 0x1001
 
 
 # 结构体
@@ -297,7 +302,7 @@ class EInkDisplay:
     _show_lock = threading.Lock()
     def __init__(self, fb_path="/dev/fb0", protocol="mtk",
                 wait_for_submission_before=True, wait_for_completion=False,
-                ioctl_timeout=5.0, temp=25, is_reagl=False, night_mode=False, alignment=8):
+                ioctl_timeout=5.0, temp=None, is_reagl=False, night_mode=False, alignment=8):
         self.fb_path = fb_path
         self.fd = os.open(fb_path, os.O_RDWR)
         try:
@@ -338,8 +343,13 @@ class EInkDisplay:
             self.wait_for_submission_before = wait_for_submission_before
             self.wait_for_completion = wait_for_completion
             self.ioctl_timeout = ioctl_timeout
-            # Rex / Zelda 硬件默认使用板载环境温度传感器 (TEMP_USE_AMBIENT = 0x1000)
-            self.temp = 0x1000 if (protocol in ("rex", "zelda") and temp == 25) else temp
+            # FBInk: 经典 mxcfb 默认 AUTO, MTK/rex/zelda 使用环境温度传感器.
+            if temp is None:
+                if protocol == "mxcfb":
+                    temp = TEMP_USE_AUTO
+                elif protocol in ("mtk", "rex", "zelda"):
+                    temp = TEMP_USE_AMBIENT
+            self.temp = temp
             self.is_reagl = is_reagl
             self.night_mode = night_mode
             self.alignment = alignment
@@ -369,24 +379,17 @@ class EInkDisplay:
         self.wait_update_complete(0, timeout=1.0)
     # ioctl
     def _ioctl(self, request, arg, timeout=None):
-        timeout = self.ioctl_timeout if timeout is None else timeout
-        result = []
-        def run():
+        # 内核 EPDC ioctl 自带阻塞/超时语义. 用 daemon 线程包住无法取消的
+        # 内核态调用只会泄漏线程, 因此这里保持同步并重试 EINTR.
+        while True:
             try:
                 fcntl.ioctl(self.fd, request, arg)  # type: ignore[attr-defined]
-                result.append("ok")
-            except OSError as e:
-                result.append(e)
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
-        t.join(timeout)
-        if not result:
-            print(f"[输出] ioctl 0x{request:08X} 超时({timeout}s),已跳过")
-            return None
-        if isinstance(result[0], OSError):
-            print(f"[输出] ioctl 0x{request:08X} 失败:{result[0]}")
-            return None
-        return True
+                return True
+            except InterruptedError:
+                continue
+            except OSError as exc:
+                print(f"[输出] ioctl 0x{request:08X} 失败:{exc}")
+                return None
 
     # 屏幕信息
     def _read_screeninfo(self):
@@ -394,10 +397,13 @@ class EInkDisplay:
         if self._ioctl(FBIOGET_VSCREENINFO, vbuf, timeout=1.0) is None:
             raise OSError("读取 framebuffer 可变屏幕信息失败 (FBIOGET_VSCREENINFO)")
         self.width, self.height, self.xres_virtual, self.yres_virtual, \
-            _, _, self.bpp = struct.unpack_from("<7I", vbuf.raw, 0)
+            _, _, self.bpp, self.grayscale = struct.unpack_from("<8I", vbuf.raw, 0)
         if self.width <= 0 or self.height <= 0:
             raise OSError(f"framebuffer 分辨率无效: {self.width}x{self.height}")
-        print(f"[输出] framebuffer: {self.width}x{self.height} bpp={self.bpp}")
+        print(
+            f"[输出] framebuffer: {self.width}x{self.height} "
+            f"bpp={self.bpp} grayscale={self.grayscale}"
+        )
         fix = FbFixScreeninfo()
         if self._ioctl(FBIOGET_FSCREENINFO, fix, timeout=1.0) is None:
             raise OSError("读取 framebuffer 固定屏幕信息失败 (FBIOGET_FSCREENINFO)")
@@ -405,6 +411,12 @@ class EInkDisplay:
         if self.smem_len <= 0:
             raise OSError(f"framebuffer smem_len 无效: {self.smem_len}")
         self.line_length = fix.line_length or self.width * (self.bpp // 8)
+        if self.bpp not in (1, 8):
+            raise OSError(
+                "不支持的 framebuffer 格式: "
+                f"bpp={self.bpp} grayscale={self.grayscale} "
+                f"line_length={self.line_length}; 仅支持 1bpp/8bpp"
+            )
         print(f"[输出] smem_len={self.smem_len} line_length={self.line_length}")
         self.mem = mmap.mmap(self.fd, self.smem_len, access=mmap.ACCESS_WRITE)
 
@@ -440,9 +452,14 @@ class EInkDisplay:
         data.temp = self.temp
         data.flags = flags
         data.hist_bw_waveform_mode = self.W.REAGL if waveform == self.W.REAGL else self.W.DU
-        data.hist_gray_waveform_mode = self.W.REAGL if waveform == self.W.REAGL else self.W.GC16
+        if self.update_data_cls is MxcfbUpdateData:
+            data.hist_gray_waveform_mode = self.W.GC16_FAST
+        elif waveform == self.W.REAGL:
+            data.hist_gray_waveform_mode = self.W.REAGL
+        else:
+            data.hist_gray_waveform_mode = self.W.GC16
         if self.update_data_cls is MxcfbUpdateDataMtk:
-            data.dither_mode = 1  # EPDC_FLAG_USE_DITHERING_PASSTHROUGH
+            data.dither_mode = 0  # EPDC_FLAG_USE_DITHERING_PASSTHROUGH
             if swipe_direction is not None:
                 data.swipe_data.direction = swipe_direction
                 data.swipe_data.steps = self.swipe_steps
@@ -466,7 +483,9 @@ class EInkDisplay:
 
     # mxc_update 提交决策
     def mxc_update(self, x, y, w, h, is_flashing, waveform_mode,
-                    dither=False, night_mode=None, alignment=None):
+                    dither=False, night_mode=None, alignment=None,
+                    wait_for_submission_before=None,
+                    wait_for_completion=None):
         """对给定矩形(x,y,w,h)提交一次 e-ink 更新请求(ioctl)
         提交前后基于 waveform,dither,full/partial,night mode 做决策
         边界对齐,partial 升级为 full,dither 强制 full,waveform 提升
@@ -505,7 +524,11 @@ class EInkDisplay:
         if night_mode:
             flags |= self.FLAG.ENABLE_INVERSION
         # 4. 等待策略
-        if self.wait_for_submission_before and self._pending_marker is not None:
+        if wait_for_submission_before is None:
+            wait_for_submission_before = self.wait_for_submission_before
+        if wait_for_completion is None:
+            wait_for_completion = self.wait_for_completion
+        if wait_for_submission_before and self._pending_marker is not None:
             self.wait_update_submission(self._pending_marker)
         # 5. 提交本次更新
         marker = self._get_next_marker()
@@ -515,12 +538,20 @@ class EInkDisplay:
             return None
         self._pending_marker = marker
         # 6. 等待完成
-        if self.wait_for_completion:
+        if wait_for_completion:
             self.wait_update_complete(marker)
         return marker
 
     # 把 Pillow 图像写入 framebuffer(8bpp 灰度:0=黑 255=白)
     def write_image(self, image, x=0, y=0):
+        if getattr(self, "bpp", None) not in (1, 8):
+            raise OSError(
+                "不支持的 framebuffer 格式: "
+                f"bpp={getattr(self, 'bpp', None)} "
+                f"grayscale={getattr(self, 'grayscale', None)} "
+                f"line_length={getattr(self, 'line_length', None)}; "
+                "仅支持 1bpp/8bpp"
+            )
         x = max(0, min(x, self.width - 1))
         y = max(0, min(y, self.height - 1))
         iw = min(image.width, self.width - x)
@@ -528,26 +559,49 @@ class EInkDisplay:
         if iw <= 0 or ih <= 0:
             return
         if self.bpp == 1:
-            data = image.convert("1").tobytes()
-            stride = (image.width + 7) // 8
+            img = image if image.mode == "1" else image.convert("1")
+            data = img.tobytes()
+            stride = (img.width + 7) // 8
+            if (x == 0 and iw == self.width and img.width == self.width
+                    and self.line_length == stride):
+                start = y * self.line_length
+                expected = stride * ih
+                self.mem[start:start + expected] = data[:expected]
+                return
             x_byte = x // 8
             for row in range(ih):
-                src = row * stride
-                dst = (y + row) * self.line_length + x_byte
-                copy_len = min(stride, (x % 8 + iw + 7) // 8,
-                               self.line_length - x_byte)
-                if copy_len <= 0:
-                    continue
-                self.mem[dst:dst + copy_len] = data[src:src + copy_len]
+                src_row = row * stride
+                first_byte = x // 8
+                last_byte = (x + iw - 1) // 8
+                for dst_byte in range(first_byte, last_byte + 1):
+                    dst = (y + row) * self.line_length + dst_byte
+                    if dst < 0 or dst >= self.line_length * self.height:
+                        continue
+                    value = self.mem[dst]
+                    for bit in range(8):
+                        px = dst_byte * 8 + bit
+                        if px < x or px >= x + iw:
+                            continue
+                        src_px = px - x
+                        src_byte = src_row + (src_px // 8)
+                        src_mask = 0x80 >> (src_px % 8)
+                        dst_mask = 0x80 >> bit
+                        if data[src_byte] & src_mask:
+                            value |= dst_mask
+                        else:
+                            value &= ~dst_mask
+                    self.mem[dst] = value
             return
-        img = image.convert("L")
+        img = image if image.mode == "L" else image.convert("L")
         data = img.tobytes()
-        if x == 0 and iw == self.width and self.line_length == image.width:
+        if (x == 0 and iw == self.width and img.width == self.width
+                and self.line_length == self.width):
             start = y * self.line_length
-            self.mem[start:start + iw * ih] = data
+            expected = iw * ih
+            self.mem[start:start + expected] = data[:expected]
             return
         for row in range(ih):
-            src = row * image.width
+            src = row * img.width
             dst = (y + row) * self.line_length + x
             self.mem[dst:dst + iw] = data[src:src + iw]
 
@@ -557,17 +611,37 @@ class EInkDisplay:
         region=(x, y, w, h) 指定刷新区域,默认全屏.
         返回 marker,失败返回 None.
         """
+        # 旧 marker 的等待放在 _show_lock 外,避免 EPDC busy 时阻塞其他显示请求.
+        if self.wait_for_submission_before and self._pending_marker is not None:
+            self.wait_update_submission(self._pending_marker)
         with EInkDisplay._show_lock:
             if self.supports_swipe_animation and self._swipe_animation:
                 is_flashing = False
                 waveform_mode = WAVEFORM_MTK.REAGL
             if region:
                 rx, ry, rw, rh = region
+                rx = max(0, min(rx, self.width))
+                ry = max(0, min(ry, self.height))
+                rw = max(0, min(rw, self.width - rx))
+                rh = max(0, min(rh, self.height - ry))
+                if rw <= 0 or rh <= 0:
+                    return None
                 image = image.crop((rx, ry, rx + rw, ry + rh))
             else:
                 rx, ry, rw, rh = 0, 0, self.width, self.height
+            rw = min(rw, image.width)
+            rh = min(rh, image.height)
+            if rw <= 0 or rh <= 0:
+                return None
             self.write_image(image, rx, ry)
-            return self.mxc_update(rx, ry, rw, rh, is_flashing, waveform_mode, dither=dither)
+            marker = self.mxc_update(
+                rx, ry, rw, rh, is_flashing, waveform_mode, dither=dither,
+                wait_for_submission_before=False,
+                wait_for_completion=False,
+            )
+        if marker is not None and self.wait_for_completion:
+            self.wait_update_complete(marker)
+        return marker
 
     # 协议探测:提交一次小区域更新,验证当前协议的 ioctl 可用
     def probe(self):

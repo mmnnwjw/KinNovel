@@ -24,6 +24,7 @@ DEFAULTS = {
     "page_turn_animation": True,
     "reader_guide_dismissed": False,
     "night_mode": False,
+    # 预留项：两端对齐尚未启用，保留键位以兼容既有设备配置。
     "justify": False,
     "first_line_indent": True,
     "convert": None,
@@ -35,7 +36,6 @@ DEFAULTS = {
     "request_window_ms": 5500,
     "cache_limit_mb": 192,
     "strict_tls": True,
-    "check_update": True,
     "home_order": {
         "shelf": 0,
         "history": 1,

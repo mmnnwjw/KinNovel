@@ -8,6 +8,8 @@ from .reader import open_device
 
 # 触控类设备所需的绝对坐标掩码(EV_ABS)
 TOUCH_ABS_REQUIRED = frozenset((ecodes.ABS_MT_POSITION_X, ecodes.ABS_MT_POSITION_Y))
+# 单指协议回退:部分设备只报 ABS_X/ABS_Y + BTN_TOUCH
+TOUCH_SINGLE_ABS_REQUIRED = frozenset((ecodes.ABS_X, ecodes.ABS_Y))
 # 多点触控协议所需的事件码掩码
 TOUCH_MT_REQUIRED = frozenset((ecodes.ABS_MT_SLOT, ecodes.ABS_MT_TRACKING_ID))
 # 一键式触控判据:直接输入设备属性(坐标直接对应屏幕)
@@ -32,15 +34,23 @@ def _has_touch_caps(dev):
             code = item
             info = None
         abs_items[code] = info
+    key_items = set(caps.get(ecodes.EV_KEY, []))
 
-    has_xy = all(abs_items.get(code) is not None for code in TOUCH_ABS_REQUIRED)
+    has_mt_xy = all(abs_items.get(code) is not None for code in TOUCH_ABS_REQUIRED)
+    has_single_xy = all(
+        abs_items.get(code) is not None for code in TOUCH_SINGLE_ABS_REQUIRED
+    )
     has_mt = TOUCH_MT_REQUIRED <= set(abs_items)
+    has_btn_touch = ecodes.BTN_TOUCH in key_items
 
     # 多点触控屏:绝对坐标 + MT 协议并具备触点坐标
-    if has_xy and has_mt:
+    if has_mt_xy and has_mt:
         return True
-    # 直接输入设备(坐标直接对应屏幕)且具备触点坐标
-    if direct and has_xy:
+    # 单指屏:BTN_TOUCH 确认触摸,ABS_X/ABS_Y 提供坐标.
+    if has_single_xy and has_btn_touch:
+        return True
+    # 直接输入设备(坐标直接对应屏幕)且具备单指坐标
+    if direct and has_single_xy:
         return True
     return False
 
@@ -60,6 +70,9 @@ def _probe_touch_device(path):
                 abs_items[code] = info
         absinfo_x = abs_items.get(ecodes.ABS_MT_POSITION_X)
         absinfo_y = abs_items.get(ecodes.ABS_MT_POSITION_Y)
+        if absinfo_x is None or absinfo_y is None:
+            absinfo_x = abs_items.get(ecodes.ABS_X)
+            absinfo_y = abs_items.get(ecodes.ABS_Y)
         if absinfo_x is not None and absinfo_y is not None:
             return path, dev.name, absinfo_x, absinfo_y
         return None

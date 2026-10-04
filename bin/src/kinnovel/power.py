@@ -221,16 +221,7 @@ class PowerManager:
 
         consecutive_active += 1
         if consecutive_active == 1:
-            self.log(f"休眠中 powerd state={state!r}，补发一次物理电源键请求屏保")
-            try:
-                subprocess.run(
-                    ["lipc-set-prop", "-i", "com.lab126.powerd", "powerButton", "1"],
-                    timeout=2.0,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as exc:
-                self.log(f"补发电源键请求失败: {exc}")
+            self.log(f"休眠中 powerd state={state!r}，等待下一次采样确认")
         elif consecutive_active >= 2:
             self.log(f"休眠中 powerd state 连续两次为 {state!r}，执行自愈恢复")
             self.handle_resume()
@@ -238,7 +229,7 @@ class PowerManager:
         return consecutive_active
 
     def _sleep_watchdog_loop(self):
-        """Nudge or recover from a missed screen-saver transition."""
+        """Recover from a missed screen-saver transition without power-key injection."""
         consecutive_active = 0
         while not self._stopped:
             time.sleep(2.0)
@@ -352,6 +343,13 @@ class PowerManager:
         self.is_sleeping = True
         self.log("正在挂起应用，释放触摸屏并恢复系统 UI 进程...")
         try:
+            context = getattr(self.app, "context", None)
+            reader_page = context.pages.get("reader") if context is not None else None
+            if reader_page is not None and context.page_name == "reader":
+                reader_page.handle_suspend(context)
+        except Exception as exc:
+            self.log(f"阅读进度休眠落盘失败: {exc}")
+        try:
             self.app.screen.input.reset_gesture_state()
         except Exception:
             pass
@@ -419,7 +417,9 @@ class PowerManager:
         try:
             if self.app.context:
                 self.log("正在以防残影模式重绘当前界面...")
-                self.app.context.show(is_flashing=True, force=True)
+                self.app.context.post(
+                    lambda: self.app.context.show(is_flashing=True, force=True)
+                )
         except Exception as exc:
             self.log(f"重绘当前界面失败: {exc}")
 

@@ -1,12 +1,17 @@
-import time
+import datetime
 import tempfile
+import threading
+import time
+import traceback
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageFont
 
 from kinnovel import progress
+import kinnovel.pages.reader as reader_page
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import Canvas, ImageCache, PageContext, Theme, height_bucket
 
@@ -271,6 +276,103 @@ class PageSmokeTests(unittest.TestCase):
         self.assertIsNotNone(session)
         self.assertEqual(session["sort_num"], 2)
         self.assertEqual(session["page"], 5)
+
+    def test_reader_turn_page_keeps_memory_progress_without_disk_write(self):
+        self._prime_reader()
+        reader.STATE["page"] = 2
+        reader.STATE["last_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_durable_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_save_at"] = time.monotonic()
+        with patch.object(reader_page, "atomic_write") as atomic:
+            reader._turn(self.context, 1)
+        self.assertEqual(reader.STATE["page"], 3)
+        atomic.assert_not_called()
+        self.assertEqual(progress.get(1)["page"], 3)
+
+    def test_reader_leave_forces_durable_write_and_upload(self):
+        self._prime_reader()
+        reader.STATE["last_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_durable_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_save_at"] = time.monotonic()
+        with patch.object(reader_page, "atomic_write") as atomic, patch.object(
+                self.context.api, "save_read_position") as save_pos:
+            reader.leave(self.context)
+            deadline = time.monotonic() + 1
+            while not save_pos.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertTrue(atomic.called)
+        self.assertTrue(save_pos.called)
+
+    def test_reader_suspend_flushes_progress(self):
+        self._prime_reader()
+        reader.STATE["last_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_durable_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_save_at"] = time.monotonic()
+        with patch.object(reader_page, "atomic_write") as atomic:
+            reader.handle_suspend(self.context)
+        self.assertTrue(atomic.called)
+
+    def test_reader_chapter_change_flushes_progress(self):
+        self._prime_reader()
+        reader.STATE["last_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_durable_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_save_at"] = time.monotonic()
+        calls = []
+        self.context.replace = lambda name, **params: calls.append(
+            (name, params))
+        with patch.object(reader_page, "atomic_write") as atomic:
+            reader._change_chapter(self.context, -1)
+        self.assertTrue(atomic.called)
+        self.assertEqual(calls[0][0], "reader")
+
+    def test_navigation_calls_reader_leave(self):
+        self._prime_reader()
+        with patch.object(reader, "leave") as leave:
+            self.context.navigate("home")
+        leave.assert_called_once_with(self.context)
+
+    def test_reader_exit_flushes_the_last_position(self):
+        self._prime_reader()
+        reader.STATE["last_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_durable_saved_path"] = (1, 2, 2, "./p[1]", 0)
+        reader.STATE["last_save_at"] = time.monotonic()
+        with patch.object(reader_page, "atomic_write") as atomic:
+            reader.handle_exit()
+        self.assertTrue(atomic.called)
+
+    def test_settings_cache_size_is_cached_for_sixty_seconds(self):
+        settings.STATE["cache_text"] = "1.0 MB"
+        settings.STATE["cache_loaded_at"] = time.monotonic()
+        settings.STATE["cache_loading"] = False
+        calls = []
+        with patch.object(settings, "cache_size",
+                          side_effect=lambda _path: calls.append(1) or 1024):
+            settings.enter(self.context)
+        self.assertEqual(calls, [])
+        self.assertEqual(settings._cache_text(), "1.0 MB")
+
+    def test_settings_logout_clears_credentials(self):
+        self.context.api.session = MagicMock()
+        self.context.api.hub = MagicMock()
+        settings._logout(self.context)
+        self.context.api.session.clear_credentials.assert_called_once_with()
+        self.context.api.hub.close.assert_called_once_with()
+
+    def test_sign_refresh_runs_async_and_detects_today_signed(self):
+        self.assertTrue(account._is_today_signed(
+            {"Growth": {"TodaySigned": True}}))
+        user = {"Growth": {"LastSignAt": time.strftime("%Y-%m-%dT%H:%M:%S")}}
+        self.assertTrue(account._is_today_signed(user))
+        calls = []
+        self.context.api.sign_in = lambda: calls.append("sign") or {"Reward": 5}
+        self.context.api.refresh_user = lambda: calls.append("refresh")
+        with patch.object(
+                self.context, "run_async",
+                lambda _owner, operation, success=None, error=None, **kw:
+                    success(operation())):
+            account._sign_in(self.context)
+        self.assertEqual(calls, ["sign", "refresh"])
+        self.assertTrue(account.STATE["today_signed"])
 
     def test_session_progress_can_be_cleared(self):
         progress.record(1, 2, 3)
@@ -814,6 +916,49 @@ class PageSmokeTests(unittest.TestCase):
                     ("spacing_down", 0), ("spacing_up", 0)):
             self.assertIn(key, settings.STATE["rects"])
 
+    def test_page_context_posts_show_from_worker_thread(self):
+        self.context.page_name = "home"
+        self.context._ui_loop_running = True
+        self.context._ui_thread = threading.current_thread()
+        calls = []
+        self.context.screen.output.show = lambda *a, **k: calls.append(1)
+        worker = threading.Thread(target=self.context.show, daemon=True)
+        worker.start()
+        worker.join(2)
+        self.assertEqual(calls, [])
+        self.context.drain_ui_queue()
+        self.assertEqual(calls, [1])
+        self.context._ui_loop_running = False
+
+    def test_clock_minute_change_requests_redraw(self):
+        self.context.app.power = type("Power", (), {"is_sleeping": False})()
+        self.context.page_name = "home"
+        self.context._ui_thread = threading.current_thread()
+        self.context._ui_loop_running = True
+        old = datetime.datetime.now() - datetime.timedelta(minutes=5)
+        self.context._last_minute = old.strftime("%Y%m%d%H%M")
+        self.context._check_clock_tick()
+        self.assertTrue(self.context._refresh_requested)
+        self.context._ui_loop_running = False
+
+    def test_concurrent_render_does_not_deadlock(self):
+        self.context.page_name = "home"
+        errors = []
+
+        def worker():
+            for _ in range(5):
+                try:
+                    self.context.render()
+                except Exception:
+                    errors.append(traceback.format_exc())
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(errors, [])
+
     def test_browse_uses_six_items_per_page(self):
         browse.STATE.update({"page": 1, "total_pages": 2, "items": []})
         self.context.page_name = "browse"
@@ -844,6 +989,12 @@ class PageSmokeTests(unittest.TestCase):
         )
         browse.STATE.update({
             "items": [{"Id": 1, "Title": "Page 1"}],
+            "accepted": [
+                {"Id": index, "Title": "Page 1 item %s" % index}
+                for index in range(13)
+            ],
+            "next_server_page": 2,
+            "server_total_pages": 3,
             "page": 1,
             "total_pages": 3,
             "loading": False,
@@ -869,6 +1020,37 @@ class PageSmokeTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(browse.STATE["page"], 2)
         self.assertEqual(browse.STATE["items"][0]["Title"], "Page 2")
+
+    def test_browse_fills_sparse_filtered_pages(self):
+        calls = []
+
+        def get_page(**kwargs):
+            page = kwargs["page"]
+            calls.append(page)
+            return {
+                "Page": page,
+                "TotalPages": 7,
+                "Data": [
+                    {"Id": page * 10 + row, "Title": "Book %s-%s" % (page, row)}
+                    for row in range(2)
+                ],
+            }
+
+        self.context.api.get_book_list = get_page
+        browse.STATE.update({
+            "categories": [],
+            "category": 0,
+            "order": "latest",
+        })
+        self.context.page_name = "browse"
+        browse._load(self.context, 1, reset=True)
+        deadline = time.monotonic() + 2
+        while len(browse.STATE["items"]) != 13 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(calls, [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(browse.STATE["items"][0]["Title"], "Book 1-0")
+        self.assertEqual(browse.STATE["items"][-1]["Title"], "Book 7-0")
+        self.assertEqual(browse.STATE["total_pages"], 2)
 
     def test_browse_second_page_rows_map_to_current_page_items(self):
         browse.STATE.update({
@@ -1065,11 +1247,11 @@ class PageSmokeTests(unittest.TestCase):
         self.context._returning = False
         with patch.object(browse, "_load") as load:
             browse.enter(self.context)
-        load.assert_called_once_with(self.context, 1)
+        load.assert_called_once_with(self.context, 1, reset=True)
         self.context._returning = True
         with patch.object(browse, "_load") as load:
             browse.enter(self.context)
-        load.assert_called_once_with(self.context, 3)
+        load.assert_called_once_with(self.context, 3, reset=False)
         self.context._returning = False
 
         with patch.object(rank, "_load") as load:
@@ -1140,6 +1322,276 @@ class PageSmokeTests(unittest.TestCase):
                 self.assertEqual(result.size, (100, 140))
             finally:
                 cache.close()
+
+
+class ShelfApi:
+    """书架的同步 API 替身, 只覆盖本批次测试用到的接口。"""
+
+    def __init__(self, items):
+        self.items = [dict(item) for item in items]
+        self.requests = []
+
+    def get_book_shelf(self):
+        return {"data": [dict(item) for item in self.items]}
+
+    def save_book_shelf(self, items):
+        self.items = list(items)
+        return None
+
+    def get_book_list_by_ids_chunked(self, ids, book_type=None, chunk_size=24):
+        self.requests.append(list(ids))
+        return [{"Id": value, "Title": "书%s" % value} for value in ids]
+
+
+class ImmediateContext:
+    def __init__(self, api, height=1448, width=1072, returning=False, params=None):
+        self.api = api
+        self.height = height
+        self.width = width
+        self.config = Config()
+        self.returning = returning
+        self.params = params or {}
+        self.messages = []
+        self.show_count = 0
+
+    def run_async(self, owner, operation, on_success=None, on_error=None,
+                  refresh=True, sticky=False):
+        try:
+            result = operation()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+            return
+        if on_success:
+            on_success(result)
+
+    def message(self, lines):
+        self.messages.append(lines)
+
+    def show(self):
+        self.show_count += 1
+
+
+class ShelfHistorySeriesTests(unittest.TestCase):
+    def setUp(self):
+        shelf.STATE.update({
+            "items": [], "visible": [], "books": {}, "path": [],
+            "page": 0, "rects": {}, "loading": False, "loaded": False,
+            "error": "", "generation": 0,
+        })
+        history.STATE.update({
+            "items": [], "history_ids": [], "page": 0, "rects": {},
+            "loading": False, "loaded": False, "error": "", "generation": 0,
+        })
+        series.STATE.update({
+            "title": "系列", "series_name": "系列", "items": [],
+            "current_id": 0, "page": 0, "total_pages": 1,
+            "server_paged": False, "rects": {}, "loading": False,
+            "loaded": False, "error": "", "generation": 0,
+        })
+
+    def test_shelf_book_id_skips_folders_and_damaged(self):
+        self.assertEqual(shelf.shelf_book_id({"id": "7"}), 7)
+        self.assertIsNone(shelf.shelf_book_id({"id": "abc", "type": "FOLDER"}))
+        self.assertIsNone(shelf.shelf_book_id({"id": "x"}))
+        self.assertIsNone(shelf.shelf_book_id({"type": "NOVEL"}))
+        self.assertIsNone(shelf.shelf_book_id(None))
+        self.assertTrue(shelf.is_folder({"type": "folder", "id": "abc"}))
+
+    def test_set_shelf_preserves_comic_and_folder(self):
+        api = ShelfApi([
+            {"id": 1, "type": "NOVEL"},
+            {"id": 2, "type": "COMIC"},
+            {"id": "abc", "type": "FOLDER"},
+        ])
+        ctx = SimpleNamespace(api=api)
+        book._set_shelf(ctx, 3, "NOVEL", bound=False)
+        self.assertEqual([item["id"] for item in api.items], [3, 1, 2, "abc"])
+        book._set_shelf(ctx, 1, "NOVEL", bound=True)
+        self.assertEqual([item["id"] for item in api.items], [3, 2, "abc"])
+
+    def test_set_shelf_accepts_uppercase_data_key(self):
+        api = ShelfApi([{"id": 1, "type": "NOVEL"}])
+        api.get_book_shelf = lambda: {"Data": [dict(item) for item in api.items]}
+        ctx = SimpleNamespace(api=api)
+        book._set_shelf(ctx, 2, "NOVEL", bound=False)
+        self.assertEqual([item["id"] for item in api.items], [2, 1])
+
+    def test_shelf_remove_book_keeps_folder_comic_and_damaged(self):
+        shelf.STATE["items"] = [
+            {"id": 1, "type": "NOVEL"},
+            {"id": 2, "type": "COMIC"},
+            {"id": "abc", "type": "FOLDER"},
+            {"id": "broken", "type": "NOVEL"},
+        ]
+        saved = {}
+
+        class Api:
+            def save_book_shelf(self, items):
+                saved["items"] = items
+
+        class Ctx:
+            api = Api()
+
+            @staticmethod
+            def run_async(owner, operation, on_success=None, on_error=None,
+                          refresh=True, sticky=False):
+                on_success(operation())
+
+            @staticmethod
+            def message(lines):
+                return None
+
+        with patch.object(shelf, "_load"):
+            shelf._remove_book(Ctx(), 1)
+        self.assertEqual(
+            [item.get("id") for item in saved["items"]], [2, "abc", "broken"]
+        )
+
+    def test_shelf_delete_folder_does_not_int_coerce(self):
+        shelf.STATE["items"] = [
+            {"id": 1, "type": "NOVEL", "parents": ["abc"]},
+            {"id": "abc", "type": "FOLDER", "parents": []},
+            {"id": 2, "type": "COMIC", "parents": []},
+        ]
+        saved = {}
+
+        class Api:
+            def save_book_shelf(self, items):
+                saved["items"] = items
+
+        class Ctx:
+            api = Api()
+
+            @staticmethod
+            def run_async(owner, operation, on_success=None, on_error=None,
+                          refresh=True, sticky=False):
+                on_success(operation())
+
+            @staticmethod
+            def message(lines):
+                return None
+
+        with patch.object(shelf, "_load"):
+            shelf._delete_folder(Ctx(), "abc")
+        self.assertEqual([item.get("id") for item in saved["items"]], [1, 2])
+        self.assertEqual(saved["items"][0]["parents"], [])
+
+    def test_shelf_pagination_reaches_last_page(self):
+        items = [
+            {"id": value, "type": "NOVEL", "index": value, "parents": []}
+            for value in range(1, 61)
+        ]
+        api = ShelfApi(list(reversed(items)))
+        ctx = ImmediateContext(api)
+        shelf._load(ctx)
+        _top, _row_height, per_page = shelf._layout(ctx)
+        self.assertEqual(per_page, 14)
+        self.assertEqual(
+            [item["id"] for item in shelf.STATE["visible"][:3]], [1, 2, 3]
+        )
+        self.assertEqual(len(api.requests[0]), per_page)
+        self.assertTrue(all(len(chunk) <= 24 for chunk in api.requests))
+        last = (60 + per_page - 1) // per_page - 1
+        shelf.STATE["page"] = last
+        shelf._load_page(ctx)
+        self.assertIn(60, shelf.STATE["books"])
+        self.assertEqual(shelf.STATE["books"][60]["Title"], "书60")
+        self.assertEqual(len(api.requests[-1]), 4)
+
+    def test_history_pagination_reaches_last_page(self):
+        class HistoryApi:
+            def __init__(self):
+                self.requests = []
+
+            @staticmethod
+            def get_read_history():
+                return {"Novel": list(range(1, 61))}
+
+            def get_book_list_by_ids_chunked(self, ids, book_type=None,
+                                             chunk_size=24):
+                self.requests.append(list(ids))
+                return [{"Id": value, "Title": "历史%s" % value} for value in ids]
+
+        api = HistoryApi()
+        ctx = ImmediateContext(api)
+        history._load(ctx)
+        self.assertEqual(history.STATE["history_ids"], list(range(1, 61)))
+        rows = history._layout(ctx)[2]
+        pages = (60 + rows - 1) // rows
+        self.assertGreater(pages, 1)
+        self.assertTrue(all(len(chunk) <= 24 for chunk in api.requests))
+        history.STATE["page"] = pages - 1
+        history._load(ctx, reset_page=False)
+        self.assertEqual(history.STATE["page"], pages - 1)
+        self.assertEqual(
+            history.STATE["items"][0]["Title"],
+            "历史%s" % ((pages - 1) * rows + 1),
+        )
+
+    def test_series_server_pagination_uses_total_pages(self):
+        class SeriesApi:
+            def __init__(self):
+                self.calls = []
+
+            def get_books_by_series(self, name, page=1, size=24, order="latest",
+                                    ignore_japanese=False, ignore_ai=False):
+                self.calls.append((page, size))
+                start = (page - 1) * size
+                data = [
+                    {"Id": value, "Title": "卷%s" % value}
+                    for value in range(start + 1, min(start + size, 60) + 1)
+                ]
+                return {
+                    "Data": data, "Page": page,
+                    "TotalPages": (60 + size - 1) // size,
+                }
+
+        api = SeriesApi()
+        ctx = ImmediateContext(api)
+        series._load(ctx, page=0)
+        rows = series._layout(ctx)[2]
+        self.assertEqual(api.calls[0], (1, rows))
+        total = series.STATE["total_pages"]
+        self.assertEqual(total, (60 + rows - 1) // rows)
+        series._load(ctx, page=total - 1)
+        self.assertEqual(api.calls[-1], (total, rows))
+        self.assertEqual(series.STATE["page"], total - 1)
+        ids = [item["Id"] for item in series._page_items(ctx)]
+        self.assertEqual(ids[-1], 60)
+
+    def test_series_enter_keeps_page_when_returning(self):
+        captured = {}
+
+        class Api:
+            @staticmethod
+            def get_books_by_series(name, page=1, size=24, **kwargs):
+                captured["page"] = page
+                captured["size"] = size
+                return {
+                    "Data": [{"Id": 7, "Title": "卷"}],
+                    "Page": page, "TotalPages": 5,
+                }
+
+        ctx = ImmediateContext(Api(), returning=True, params={
+            "title": "系列", "series_name": "系列", "current_id": 3,
+            "books": [{"Id": 3, "Title": "当前"}],
+        })
+        series.STATE["page"] = 2
+        series.enter(ctx)
+        self.assertEqual(captured["page"], 3)
+        self.assertEqual(series.STATE["page"], 2)
+
+    def test_series_local_page_survives_return(self):
+        api = MagicMock()
+        ctx = ImmediateContext(api, returning=True, params={
+            "title": "系列", "series_name": "系列", "current_id": 1,
+            "books": [{"Id": 1}, {"Id": 2}, {"Id": 3}],
+        })
+        series.STATE["page"] = 1
+        series.enter(ctx)
+        self.assertEqual(series.STATE["page"], 1)
+        api.get_books_by_series.assert_not_called()
 
 
 if __name__ == "__main__":

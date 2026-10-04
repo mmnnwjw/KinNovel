@@ -24,6 +24,22 @@ EXCLUDE_NAMES = {
     "audit_bin.txt",
 }
 
+# 构建输出目录里一旦出现这些名字，说明测试账号/凭据被放到了发布目录，
+# 打包前必须先清掉，避免随 zip 一起分发。
+SENSITIVE_NAME_PATTERNS = (
+    re.compile(r"^testaccount.*\.txt$", re.IGNORECASE),
+    re.compile(r"^githubtoken", re.IGNORECASE),
+    re.compile(r"^(gh_?token|credentials?|secrets?)", re.IGNORECASE),
+    re.compile(r"\.local\.txt$", re.IGNORECASE),
+)
+
+# 发布前的内容扫描：命中任一模式的文件一律不进入 zip。
+SECRET_CONTENT_PATTERNS = (
+    re.compile(rb"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(rb"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+)
+
 EXCLUDE_EXTS = {
     ".pyc",
     ".pyo",
@@ -31,6 +47,19 @@ EXCLUDE_EXTS = {
     ".log",
     ".DS_Store",
 }
+
+INCLUDE_PATHS = [
+    "bin",
+    "config.xml",
+    "manifest.json",
+    "menu.json",
+    "launch.sh",
+    "install.sh",
+    "uninstall.sh",
+    "LICENSE",
+    "README.md",
+    "THIRD-PARTY-NOTICES.md",
+]
 
 
 def get_version():
@@ -51,6 +80,27 @@ def should_exclude(rel_path):
     return False
 
 
+def is_sensitive_name(name):
+    return any(pattern.search(name) for pattern in SENSITIVE_NAME_PATTERNS)
+
+
+def contains_secret(data):
+    return any(pattern.search(data) for pattern in SECRET_CONTENT_PATTERNS)
+
+
+def clean_build_output(output_dir):
+    """Remove test/credential files that leaked into the build output dir."""
+    removed = []
+    for item in sorted(Path(output_dir).rglob("*")):
+        if item.is_file() and is_sensitive_name(item.name):
+            try:
+                item.unlink()
+                removed.append(str(item))
+            except OSError:
+                pass
+    return removed
+
+
 def build_release_zip(output_dir=None):
     version = get_version()
     if output_dir is None:
@@ -58,25 +108,32 @@ def build_release_zip(output_dir=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    for removed_path in clean_build_output(output_dir):
+        print("Removed credential file from build output: %s" % removed_path)
+
     zip_name = f"KinNovel-v{version}.zip"
     zip_path = output_dir / zip_name
 
     included_files = []
     # Collect files
-    for base in ["bin", "config.xml", "manifest.json", "menu.json", "launch.sh", "install.sh", "uninstall.sh", "LICENSE", "THIRD-PARTY-NOTICES.md"]:
+    for base in INCLUDE_PATHS:
         p = ROOT / base
         if not p.exists():
             continue
         if p.is_file():
             rel = p.relative_to(ROOT)
-            if not should_exclude(rel):
+            if not should_exclude(rel) and not is_sensitive_name(p.name):
                 included_files.append((p, rel))
         else:
             for item in p.rglob("*"):
                 if item.is_file():
                     rel = item.relative_to(ROOT)
-                    if not should_exclude(rel):
-                        included_files.append((item, rel))
+                    if should_exclude(rel) or is_sensitive_name(item.name):
+                        continue
+                    if contains_secret(item.read_bytes()):
+                        print("Skipped file with credential pattern: %s" % rel)
+                        continue
+                    included_files.append((item, rel))
 
     print(f"Packaging {len(included_files)} files into {zip_path}...")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:

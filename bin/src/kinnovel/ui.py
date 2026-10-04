@@ -233,6 +233,22 @@ _SYSTEM_SIZE_RE = re.compile(r"^([1-9]\d*)x([1-9]\d*)$")
 _IMAGE_MEMORY_BYTES = 48 * 1024 * 1024
 _FITTED_MEMORY_BYTES = 8 * 1024 * 1024
 _IMAGE_DOWNLOAD_LIMIT = 16 * 1024 * 1024
+_SSL_CONTEXTS = {}
+_SSL_CONTEXTS_LOCK = threading.Lock()
+
+
+def _ssl_context(strict_tls=False):
+    """进程级复用 SSL context;strict_tls 决定是否跳过证书校验。"""
+    key = bool(strict_tls)
+    with _SSL_CONTEXTS_LOCK:
+        context = _SSL_CONTEXTS.get(key)
+        if context is None:
+            context = ssl.create_default_context()
+            if not key:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            _SSL_CONTEXTS[key] = context
+        return context
 
 
 def height_bucket(height, fallback=1024):
@@ -245,6 +261,52 @@ def height_bucket(height, fallback=1024):
         if value <= bucket:
             return bucket
     return _IMAGE_HEIGHTS[-1]
+
+
+_ACTIVE_CONTEXT = None
+_EXIT_HOOK_INSTALLED = False
+
+
+def _track_context(ctx):
+    """记住活动 PageContext,退出钩子需要它来落盘阅读进度。"""
+    global _ACTIVE_CONTEXT
+    _ACTIVE_CONTEXT = ctx
+
+
+def _page_changed(name):
+    """页面切换时通知 reader 刷新活动状态(仅用于防止陈旧上传)。"""
+    global _ACTIVE_CONTEXT
+    try:
+        from .pages import reader as reader_page
+        reader_page._remember_context(_ACTIVE_CONTEXT)
+    except Exception:
+        pass
+
+
+def _flush_on_exit():
+    ctx = _ACTIVE_CONTEXT
+    if ctx is None:
+        return
+    try:
+        from .pages import reader as reader_page
+        reader_page.flush_progress(ctx, upload=True)
+    except Exception:
+        pass
+
+
+def _install_exit_hook():
+    global _EXIT_HOOK_INSTALLED
+    if _EXIT_HOOK_INSTALLED:
+        return
+    _EXIT_HOOK_INSTALLED = True
+    try:
+        import atexit
+        atexit.register(_flush_on_exit)
+    except Exception:
+        pass
+
+
+_install_exit_hook()
 
 
 def system_image_size(url):
@@ -571,12 +633,7 @@ class ImageCache:
     def _download_image(self, url, height, strict_tls):
         request = urllib.request.Request(
             url, headers={"User-Agent": "KinNovel/0.7"})
-        context = None
-        if url.startswith("https://"):
-            context = ssl.create_default_context()
-            if not strict_tls:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
+        context = _ssl_context(strict_tls) if url.startswith("https://") else None
         with urllib.request.urlopen(
                 request, timeout=20, context=context) as response:
             data = response.read(_IMAGE_DOWNLOAD_LIMIT + 1)
@@ -688,6 +745,9 @@ class PageContext:
         self._refresh_requested = False
         self._returning = False
         self._async_slots = threading.BoundedSemaphore(6)
+        self._last_minute = time.strftime("%Y%m%d%H%M")
+        self._ui_thread = None
+        _track_context(self)
 
     @property
     def returning(self):
@@ -712,9 +772,22 @@ class PageContext:
         finally:
             self._returning = False
 
+    def _leave(self):
+        leave = getattr(self.pages.get(self.page_name), "leave", None)
+        if callable(leave):
+            try:
+                leave(self)
+            except Exception:
+                logger = getattr(self.app, "log", None)
+                if callable(logger):
+                    import traceback
+                    logger(traceback.format_exc())
+
     def navigate(self, name, push=True, **params):
         if name not in self.pages:
             raise KeyError("unknown page: " + name)
+        if name != self.page_name:
+            self._leave()
         if push and name != self.page_name:
             self.stack.append((self.page_name, self.params))
             if len(self.stack) > 20:
@@ -723,14 +796,18 @@ class PageContext:
         self.page_name = name
         self.params = dict(params)
         self.modal = None
+        _page_changed(name)
         self._enter(False)
         self.show()
 
     def replace(self, name, **params):
+        if name != self.page_name:
+            self._leave()
         self.previous_page = self.page_name
         self.page_name = name
         self.params = dict(params)
         self.modal = None
+        _page_changed(name)
         self._enter(False)
         self.show()
 
@@ -743,27 +820,35 @@ class PageContext:
         if now - self._last_back_at < 0.35:
             return
         self._last_back_at = now
+        self._leave()
         if self.stack:
             self.previous_page = self.page_name
             self.page_name, self.params = self.stack.pop()
         else:
             self.previous_page = self.page_name
             self.page_name, self.params = "home", {}
+        _page_changed(self.page_name)
         self._enter(True)
         self.show()
 
     def home(self):
+        if self.page_name != "home":
+            self._leave()
         self.stack = []
         self.previous_page = self.page_name
         self.page_name = "home"
         self.params = {}
         self.modal = None
+        _page_changed("home")
         self._enter(False)
         self.show()
 
-    def render(self):
+    def render(self, image=None):
         theme = Theme(self.config.get("night_mode"))
-        image = Image.new("L", (self.width, self.height), theme.background)
+        if image is None:
+            image = Image.new("L", (self.width, self.height), theme.background)
+        else:
+            image.paste(theme.background, (0, 0, self.width, self.height))
         canvas = Canvas(image, self.fonts, theme)
         page = self.pages[self.page_name]
         page.render(self, canvas)
@@ -794,6 +879,18 @@ class PageContext:
                 return
         if self._closed:
             return
+        current_thread = threading.current_thread()
+        ui_thread = self._ui_thread
+        if self._ui_loop_running and ui_thread is None:
+            # 首次进入主循环前无法确定输入线程;队列为空时由 show() 自行认领。
+            if self._ui_queue.empty():
+                self._ui_thread = current_thread
+                ui_thread = current_thread
+        if (not force and self._ui_loop_running
+                and ui_thread is not None
+                and current_thread is not ui_thread):
+            self.post(self.show, is_flashing, force, region, waveform, dither)
+            return
         with self._show_lock:
             try:
                 image = self.render()
@@ -803,18 +900,18 @@ class PageContext:
                     import traceback
                     logger(traceback.format_exc())
                 image = self._fallback_image()
-            flashing = bool(self.config.get("page_flash")) if is_flashing is None else bool(is_flashing)
-            extra = {}
-            if region:
-                extra["region"] = region
-            if waveform is not None:
-                extra["waveform_mode"] = waveform
-            if dither:
-                extra["dither"] = True
-            try:
-                self.screen.output.show(image, is_flashing=flashing, **extra)
-            except OSError:
-                pass
+        flashing = bool(self.config.get("page_flash")) if is_flashing is None else bool(is_flashing)
+        extra = {}
+        if region:
+            extra["region"] = region
+        if waveform is not None:
+            extra["waveform_mode"] = waveform
+        if dither:
+            extra["dither"] = True
+        try:
+            self.screen.output.show(image, is_flashing=flashing, **extra)
+        except OSError:
+            pass
 
     def _fallback_image(self):
         """渲染失败时给出可恢复的错误页,而不是让异常冒泡终止应用。"""
@@ -831,12 +928,12 @@ class PageContext:
                 draw.text((20, self.height // 2 + offset * 20), text, fill=0)
         return image
 
-    def post(self, callback):
+    def post(self, callback, *args, **kwargs):
         """Run ``callback`` on the input thread, or inline when no loop runs."""
         if self._ui_loop_running:
-            self._ui_queue.put(callback)
+            self._ui_queue.put(lambda: callback(*args, **kwargs))
         else:
-            callback()
+            callback(*args, **kwargs)
 
     def request_show(self):
         """Coalesce redraw requests so a burst of image arrivals shows once."""
@@ -846,6 +943,9 @@ class PageContext:
             self.show()
 
     def drain_ui_queue(self, limit=64):
+        if self._ui_thread is None:
+            self._ui_thread = threading.current_thread()
+        self._check_clock_tick()
         for _ in range(limit):
             try:
                 callback = self._ui_queue.get_nowait()
@@ -861,6 +961,16 @@ class PageContext:
         if self._refresh_requested:
             self._refresh_requested = False
             self.show()
+
+    def _check_clock_tick(self):
+        minute = time.strftime("%Y%m%d%H%M")
+        if minute == getattr(self, "_last_minute", minute):
+            return
+        self._last_minute = minute
+        power = getattr(self.app, "power", None)
+        if power is not None and getattr(power, "is_sleeping", False):
+            return
+        self.request_show()
 
     def handle(self, data):
         gesture = data.get("gesture")
@@ -922,7 +1032,7 @@ class PageContext:
             time.sleep(seconds)
             if generation == getattr(self, "_toast_generation", 0):
                 self.status = ""
-                self.show()
+                self.post(self.show)
         threading.Thread(target=clear, daemon=True).start()
 
     def confirm(self, lines, on_yes, on_no=None, yes="确定", no="取消"):

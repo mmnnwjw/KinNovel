@@ -1,13 +1,16 @@
 import ctypes
 import html
 import math
+import os
 import re
+import ssl
 import struct
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from lxml import etree
@@ -183,6 +186,24 @@ def extract_blocks(content, base_url=""):
     return blocks
 
 
+_SSL_CONTEXTS = {}
+_SSL_CONTEXTS_LOCK = threading.Lock()
+
+
+def _ssl_context(strict_tls=False):
+    """进程级复用 SSL context;strict_tls 决定是否跳过证书校验。"""
+    key = bool(strict_tls)
+    with _SSL_CONTEXTS_LOCK:
+        context = _SSL_CONTEXTS.get(key)
+        if context is None:
+            context = ssl.create_default_context()
+            if not key:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            _SSL_CONTEXTS[key] = context
+        return context
+
+
 def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
     if not font_url:
         return ""
@@ -200,13 +221,7 @@ def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
         return str(converted or path)
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "KinNovel/0.1"})
-        context = None
-        if url.startswith("https://"):
-            import ssl
-            context = ssl.create_default_context()
-            if not strict_tls:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
+        context = _ssl_context(strict_tls) if url.startswith("https://") else None
         limit = 20 * 1024 * 1024
         with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
             expected = response.headers.get("Content-Length")
@@ -230,11 +245,23 @@ def normalize_font(path):
     """Convert an uncompressed-table WOFF1 container to TTF/OTF for Pillow."""
     path = __import__("pathlib").Path(path)
     try:
+        with path.open("rb") as handle:
+            header = handle.read(8)
+    except OSError:
+        return None
+    if header[:4] != b"wOFF":
+        return path
+    suffix = ".otf" if header[4:8] == b"OTTO" else ".ttf"
+    converted = path.with_suffix(path.suffix + suffix)
+    try:
+        if converted.exists() and converted.stat().st_size > 0:
+            return converted
+    except OSError:
+        pass
+    try:
         data = path.read_bytes()
     except OSError:
         return None
-    if not data.startswith(b"wOFF"):
-        return path
     if len(data) < 44:
         return None
     try:
@@ -286,15 +313,14 @@ def normalize_font(path):
                 ">4sIII", tag, checksum, table_offset, len(payload)))
             body.extend(payload)
             body.extend(b"\0" * ((-len(body)) % 4))
-        suffix = ".otf" if flavor == b"OTTO" else ".ttf"
-        target = path.with_suffix(path.suffix + suffix)
-        atomic_write(target, header + b"".join(records) + bytes(body))
-        return target
+        atomic_write(converted, header + b"".join(records) + bytes(body))
+        return converted
     except (OSError, ValueError, struct.error, zlib.error):
         return None
 
 
-_FONT_OBJECTS = {}
+_FONT_OBJECTS = OrderedDict()
+_FONT_OBJECTS_LIMIT = 8
 _FONT_OBJECTS_LOCK = threading.RLock()
 
 
@@ -309,10 +335,32 @@ def cached_font(path, size):
     with _FONT_OBJECTS_LOCK:
         font = _FONT_OBJECTS.get(key)
         if font is not None:
+            _FONT_OBJECTS.move_to_end(key)
             return font
         font = ImageFont.truetype(path, int(size))
         _FONT_OBJECTS[key] = font
+        while len(_FONT_OBJECTS) > _FONT_OBJECTS_LIMIT:
+            _FONT_OBJECTS.popitem(last=False)
         return font
+
+
+def _real_font_path(font):
+    """返回字体文件的真实路径;BytesIO/内存字体等不视作路径。"""
+    path = getattr(font, "path", None)
+    if isinstance(path, (str, bytes, os.PathLike)):
+        try:
+            value = os.fspath(path)
+        except TypeError:
+            return ""
+        return value or ""
+    return ""
+
+
+def _font_identity(font):
+    path = _real_font_path(font)
+    if path:
+        return ("path", path)
+    return ("default",)
 
 
 class FontResolver:
@@ -327,11 +375,20 @@ class FontResolver:
         from PIL import ImageFont
         key = int(size)
         if key not in self._system_cache:
-            try:
-                self._system_cache[key] = cached_font(
-                    self.system_font_path, key)
-            except OSError:
-                self._system_cache[key] = ImageFont.load_default()
+            path = self.system_font_path
+            use_file = False
+            if path:
+                try:
+                    use_file = os.path.isfile(path)
+                except (OSError, TypeError, ValueError):
+                    use_file = False
+            if use_file:
+                try:
+                    self._system_cache[key] = cached_font(path, key)
+                    return self._system_cache[key]
+                except OSError:
+                    pass
+            self._system_cache[key] = ImageFont.load_default(size=key)
         return self._system_cache[key]
 
     def resolve(self, chapter_font, base_url, size, strict_tls=False):
@@ -351,12 +408,41 @@ class FontResolver:
         return self.system_font(int(size))
 
 
-def text_width(draw, text, font):
+_TEXT_WIDTH_CACHE = OrderedDict()
+_TEXT_WIDTH_LIMIT = 40000
+_TEXT_WIDTH_LOCK = threading.RLock()
+
+
+def _width_cache_key(font, text):
+    return (_font_identity(font), int(getattr(font, "size", 0) or 0), str(text))
+
+
+def _raw_text_width(draw, text, font):
     try:
         return float(font.getlength(text))
     except AttributeError:
         bbox = draw.textbbox((0, 0), text, font=font)
         return float(bbox[2] - bbox[0])
+
+
+def text_width(draw, text, font):
+    """按 (字体, 字号, 字符) 缓存 getlength, 避免逐字重复探测。"""
+    key = _width_cache_key(font, text)
+    with _TEXT_WIDTH_LOCK:
+        cached = _TEXT_WIDTH_CACHE.get(key)
+        if cached is not None:
+            _TEXT_WIDTH_CACHE.move_to_end(key)
+            return cached
+    value = _raw_text_width(draw, text, font)
+    with _TEXT_WIDTH_LOCK:
+        existing = _TEXT_WIDTH_CACHE.get(key)
+        if existing is not None:
+            _TEXT_WIDTH_CACHE.move_to_end(key)
+            return existing
+        _TEXT_WIDTH_CACHE[key] = value
+        while len(_TEXT_WIDTH_CACHE) > _TEXT_WIDTH_LIMIT:
+            _TEXT_WIDTH_CACHE.popitem(last=False)
+    return value
 
 
 _GLYPH_CACHE = {}
@@ -377,13 +463,14 @@ _FONT_REFS = {}
 
 def _font_key(font):
     # 不能用裸 id(font)：对象被回收后 id 会复用，缺字判定会串到别的字体上
-    path = getattr(font, "path", None)
+    path = _real_font_path(font)
     if path:
         return (str(path), int(getattr(font, "size", 0) or 0))
-    key = id(font)
-    # 无 path 的字体(如 load_default)只能按 id 区分，持强引用防止 id 复用
+    key = (id(font), 0)
     _FONT_REFS[key] = font
-    return (key, 0)
+    while len(_FONT_REFS) > 8:
+        _FONT_REFS.pop(next(iter(_FONT_REFS)))
+    return key
 
 
 def _notdef_bytes(font):
@@ -394,7 +481,8 @@ def _notdef_bytes(font):
 
 
 _FREETYPE_LOCK = threading.RLock()
-_FREETYPE = {"tried": False, "lib": None, "handle": None, "faces": {}}
+_FREETYPE = {"tried": False, "lib": None, "handle": None, "faces": OrderedDict(),
+             "face_limit": 8, "new_faces": 0}
 
 
 def _freetype_locked():
@@ -412,6 +500,10 @@ def _freetype_locked():
         library.FT_New_Face.restype = ctypes.c_int
         library.FT_Get_Char_Index.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
         library.FT_Get_Char_Index.restype = ctypes.c_uint
+        library.FT_Done_Face = getattr(library, "FT_Done_Face", None)
+        if library.FT_Done_Face is not None:
+            library.FT_Done_Face.argtypes = [ctypes.c_void_p]
+            library.FT_Done_Face.restype = ctypes.c_int
         handle = ctypes.c_void_p()
         if library.FT_Init_FreeType(ctypes.byref(handle)) != 0:
             return None
@@ -422,26 +514,54 @@ def _freetype_locked():
     return _FREETYPE
 
 
-def _font_face(font):
-    """该字体文件的 FreeType face;不可用时返回 None。"""
-    path = getattr(font, "path", None)
+def _font_face_locked(font):
+    """该字体文件的 FreeType face;调用方必须持有 _FREETYPE_LOCK。"""
+    path = _real_font_path(font)
     if not path:
         return None
-    with _FREETYPE_LOCK:
-        state = _freetype_locked()
-        if state is None:
-            return None
-        key = str(path)
-        if key in state["faces"]:
-            return state["faces"][key]
-        face = ctypes.c_void_p()
-        try:
-            result = state["lib"].FT_New_Face(
-                state["handle"], key.encode("utf-8"), 0, ctypes.byref(face))
-        except Exception:
-            result = -1
-        state["faces"][key] = face if (result == 0 and face) else None
+    state = _freetype_locked()
+    if state is None:
+        return None
+    key = str(path)
+    if key in state["faces"]:
+        state["faces"].move_to_end(key)
         return state["faces"][key]
+    face = ctypes.c_void_p()
+    try:
+        result = state["lib"].FT_New_Face(
+            state["handle"], key.encode("utf-8"), 0, ctypes.byref(face))
+    except Exception:
+        result = -1
+    value = face if (result == 0 and face) else None
+    if value is not None:
+        state["new_faces"] += 1
+    state["faces"][key] = value
+    while len(state["faces"]) > int(state["face_limit"]):
+        _old_key, old_face = state["faces"].popitem(last=False)
+        if old_face is not None and state["lib"].FT_Done_Face is not None:
+            try:
+                state["lib"].FT_Done_Face(old_face)
+            except Exception:
+                pass
+    return value
+
+
+def _font_face(font):
+    """该字体文件的 FreeType face;不可用时返回 None。"""
+    with _FREETYPE_LOCK:
+        return _font_face_locked(font)
+
+
+def _uses_default_font(font):
+    """区分 load_default 内存字体与测试/自定义内存字体。"""
+    if _real_font_path(font):
+        return False
+    mask = getattr(font, "getmask", None)
+    if not callable(mask):
+        return False
+    # Pillow load_default(size=...) 返回 Aileron Regular;其它无 path 字体仍走
+    # 栅格探测,避免把测试替身/自定义内存字体误判为缺字。
+    return str(getattr(font, "family", "") or "") == "Aileron Regular"
 
 
 def cmap_available(font, character):
@@ -451,10 +571,10 @@ def cmap_available(font, character):
     """
     if not character:
         return True
-    face = _font_face(font)
-    if face is None:
-        return None
     with _FREETYPE_LOCK:
+        face = _font_face_locked(font)
+        if face is None:
+            return None
         try:
             return _FREETYPE["lib"].FT_Get_Char_Index(
                 face, ord(character)) != 0
@@ -489,7 +609,11 @@ def glyph_available(font, character):
     cached = _GLYPH_CACHE.get(key)
     if cached is not None:
         return cached
-    available = cmap_available(font, character)
+    # load_default 只带拉丁字形:汉字直接判缺失,避免每字走栅格化探测。
+    if _uses_default_font(font) and ord(character) > 0x2FFF:
+        available = False
+    else:
+        available = cmap_available(font, character)
     if available is None:
         available = _glyph_available_raster(font, character)
     if len(_GLYPH_CACHE) >= _GLYPH_CACHE_LIMIT:

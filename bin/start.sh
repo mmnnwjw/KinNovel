@@ -107,6 +107,18 @@ resume_fb_users() {
   rm -f "$PAUSE_LIST"
 }
 
+recover_stale_fb_users() {
+  [ -f "$PAUSE_LIST" ] || return
+  while read -r pid; do
+    [ -z "$pid" ] && continue
+    if kill -0 "$pid" 2>/dev/null; then
+      log "recovering stale stopped pid=$pid"
+      kill -CONT "$pid" 2>>"$LOG_FILE" || true
+    fi
+  done < "$PAUSE_LIST"
+  rm -f "$PAUSE_LIST"
+}
+
 save_snapshot() {
   "$PYTHON" "$SCRIPT_DIR/fb_snapshot.py" save "$FB_SNAPSHOT" >>"$LOG_FILE" 2>&1 || true
 }
@@ -133,6 +145,7 @@ trap 'on_exit' INT TERM EXIT
 
 touch "$LOG_FILE" 2>/dev/null || true
 log "starting KinNovel"
+recover_stale_fb_users
 pause_fb_users
 save_snapshot
 usleep 300000 2>/dev/null || sleep 1

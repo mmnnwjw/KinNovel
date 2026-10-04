@@ -1,6 +1,7 @@
 from .. import progress
 from ..utils import format_time
 from ..ui import height_bucket
+from .shelf import shelf_book_id
 
 
 STATE = {
@@ -75,14 +76,15 @@ def _load(ctx, force=False):
             def shelf_result(shelf):
                 if book_id != STATE["book_id"]:
                     return
+                if isinstance(shelf, dict):
+                    items = shelf.get("data") or shelf.get("Data") or []
+                else:
+                    items = shelf or []
                 ids = set()
-                for item in (shelf.get("data") or []):
-                    if str(item.get("type")) == "FOLDER":
-                        continue
-                    try:
-                        ids.add(int(item.get("id")))
-                    except (TypeError, ValueError):
-                        continue
+                for item in items:
+                    book_id_in_shelf = shelf_book_id(item)
+                    if book_id_in_shelf is not None:
+                        ids.add(book_id_in_shelf)
                 STATE["bound"] = book_id in ids
                 ctx.show()
                 _prefetch_reading_target(ctx, result, book_id)
@@ -373,13 +375,18 @@ def _toggle_shelf(ctx):
 
 def _set_shelf(ctx, book_id, book_type, bound):
     result = ctx.api.get_book_shelf()
-    items = list(result.get("data") or [])
-    if bound:
-        items = [item for item in items if int(item.get("id") or 0) != book_id]
+    if isinstance(result, dict):
+        items = list(result.get("data") or result.get("Data") or [])
     else:
-        if not any(int(item.get("id") or 0) == book_id for item in items):
+        items = list(result or [])
+    target_id = int(book_id)
+    # 只增删目标小说, 其他小说、漫画和文件夹保持原样写回。
+    if bound:
+        items = [item for item in items if shelf_book_id(item) != target_id]
+    else:
+        if not any(shelf_book_id(item) == target_id for item in items):
             items.insert(0, {
-                "id": book_id,
+                "id": target_id,
                 "type": book_type,
                 "parents": [],
                 "index": 0,

@@ -72,7 +72,9 @@ class TestPowerManagement(unittest.TestCase):
             mock_kill.assert_any_call(10002, SIGSTOP)
             # Verify grab was called
             app.screen.input.device.grab.assert_called_once()
-            # Verify context.show was called with is_flashing=True
+            # 唤醒重绘必须回到主循环线程
+            post_callback = app.context.post.call_args.args[0]
+            post_callback()
             app.context.show.assert_called_once_with(is_flashing=True, force=True)
             self.assertEqual(app.screen.input.reset_gesture_state.call_count, 2)
 
@@ -124,7 +126,7 @@ class TestPowerManagement(unittest.TestCase):
             mgr.handle_power_key()
             mock_resume.assert_not_called()
 
-    def test_sleep_watchdog_first_active_sends_power_button(self):
+    def test_sleep_watchdog_first_active_waits_without_injection(self):
         app = MagicMock()
         mgr = PowerManager(app, pause_file=self.pause_file)
         mgr.is_sleeping = True
@@ -134,12 +136,7 @@ class TestPowerManagement(unittest.TestCase):
             streak = mgr._sleep_watchdog_check(0)
 
         self.assertEqual(streak, 1)
-        mock_run.assert_called_once_with(
-            ["lipc-set-prop", "-i", "com.lab126.powerd", "powerButton", "1"],
-            timeout=2.0,
-            stdout=unittest.mock.ANY,
-            stderr=unittest.mock.ANY,
-        )
+        mock_run.assert_not_called()
 
     def test_sleep_watchdog_second_active_resumes(self):
         app = MagicMock()

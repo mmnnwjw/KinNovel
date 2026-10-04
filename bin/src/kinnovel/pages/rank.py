@@ -6,6 +6,7 @@ STATE = {
     "rects": {},
     "loading": False,
     "loaded": False,
+    "error": "",
     "generation": 0,
 }
 
@@ -30,6 +31,7 @@ def _load(ctx, reset_page=True):
     STATE["generation"] += 1
     generation = STATE["generation"]
     STATE["loading"] = True
+    STATE["error"] = ""
     if reset_page:
         STATE["page"] = 1
     days = {"daily": 1, "weekly": 7, "monthly": 31}[STATE["kind"]]
@@ -41,12 +43,17 @@ def _load(ctx, reset_page=True):
         _total_pages(ctx)
         STATE["loading"] = False
         STATE["loaded"] = True
+        STATE["error"] = ""
 
     def error(exc):
         if generation != STATE["generation"]:
             return
         STATE["loading"] = False
-        ctx.message(["排行加载失败", str(exc)])
+        STATE["loaded"] = True
+        STATE["error"] = str(exc)
+        # 清掉旧榜单，避免新标签继续搭配上一批数据
+        STATE["items"] = []
+        STATE["total_pages"] = 1
 
     ctx.run_async("rank", lambda: ctx.api.get_rank(days), success, error)
 
@@ -95,25 +102,39 @@ def render(ctx, canvas):
                     canvas.fit_text(author, ctx.fonts["tiny"], rect[2] - 106),
                     font=ctx.fonts["tiny"], fill=canvas.theme.muted)
 
-    nav_width = int(canvas.width * 0.25)
-    for key, rect, label in (
-        ("prev", (margin, nav_y, nav_width, 54), "上一页"),
-        ("count", ((canvas.width - nav_width) // 2, nav_y, nav_width, 54),
-         "%s/%s" % (STATE["page"], pages)),
-        ("next", (canvas.width - margin - nav_width, nav_y, nav_width, 54), "下一页"),
-    ):
-        enabled = key == "count" or (
-            key == "prev" and STATE["page"] > 1) or (
-            key == "next" and STATE["page"] < pages)
-        canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
-        STATE["rects"][(key, 0)] = rect
-    if STATE["loading"]:
-        canvas.centered_text("加载中…", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2)
+    if STATE["error"]:
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, nav_y, canvas.width - 2 * margin, 54)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        STATE["rects"][("retry", 0)] = rect
+    else:
+        nav_width = int(canvas.width * 0.25)
+        for key, rect, label in (
+            ("prev", (margin, nav_y, nav_width, 54), "上一页"),
+            ("count", ((canvas.width - nav_width) // 2, nav_y, nav_width, 54),
+             "%s/%s" % (STATE["page"], pages)),
+            ("next", (canvas.width - margin - nav_width, nav_y, nav_width, 54), "下一页"),
+        ):
+            enabled = key == "count" or (
+                key == "prev" and STATE["page"] > 1) or (
+                key == "next" and STATE["page"] < pages)
+            canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
+            STATE["rects"][(key, 0)] = rect
+        if STATE["loading"]:
+            canvas.centered_text("加载中…", ctx.fonts["body"],
+                                 canvas.width // 2, canvas.height // 2)
 
 
 def handle(data, ctx):
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
+    retry = STATE["rects"].get(("retry", 0))
+    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+        _load(ctx, reset_page=False)
+        return
     for key in (("prev", 0), ("next", 0), ("count", 0)):
         rect = STATE["rects"].get(key)
         if not rect:

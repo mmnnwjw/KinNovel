@@ -5,6 +5,7 @@ Every network step is separated by ten seconds. The script intentionally keeps
 list sizes small and never prints credentials or tokens.
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,7 +45,7 @@ class SmokeConfig:
 
 
 def credentials():
-    path = ROOT / "TESTACCOUNT.txt"
+    path = Path(os.environ.get("KINNOVEL_TESTACCOUNT") or (ROOT / "TESTACCOUNT.txt"))
     lines = [line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines()
              if line.strip()]
     if len(lines) < 2 or "@" not in lines[0]:

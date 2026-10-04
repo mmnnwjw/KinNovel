@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: bin/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pillow lxml
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Scan for committed credentials
+        run: |
+          set -e
+          if git grep -nEI 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' -- . ':!.github'; then
+            echo "::error::credential-like content found in the repository"
+            exit 1
+          fi
+          if git grep -nE '"account_password"[[:space:]]*:[[:space:]]*"[^"]+"' -- 'bin/config.json'; then
+            echo "::error::non-empty account_password committed in bin/config.json"
+            exit 1
+          fi
+          echo "credential scan clean"

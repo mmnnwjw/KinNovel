@@ -9,6 +9,7 @@ from PIL import Image
 
 from kinnovel.ui import (
     ImageCache,
+    _ssl_context,
     scaled_image_url,
     system_image_size,
     with_image_height,
@@ -171,6 +172,15 @@ class ImageCacheTests(unittest.TestCase):
         self.assertEqual(results, [True])
         self.assertGreaterEqual(calls["count"], 2)
         self.cache._download_image = original
+
+    def test_ssl_context_is_reused_per_strict_tls(self):
+        first = _ssl_context(False)
+        second = _ssl_context(False)
+        strict = _ssl_context(True)
+        self.assertIs(first, second)
+        self.assertIsNot(first, strict)
+        self.assertFalse(first.check_hostname)
+        self.assertTrue(strict.check_hostname)
 
 
 if __name__ == "__main__":

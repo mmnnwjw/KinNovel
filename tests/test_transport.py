@@ -3,6 +3,7 @@ import gzip
 import importlib.util
 import io
 import json
+import struct
 import sys
 import threading
 import time
@@ -384,7 +385,7 @@ class TransportTests(unittest.TestCase):
         client.session = Session()
 
         def invalid():
-            raise ApiError("invalid refresh", 401)
+            raise ApiError("invalid refresh", 404)
 
         client.refresh_access_token = invalid
         self.assertIsNone(client.get_access_token())
@@ -473,6 +474,234 @@ class TransportTests(unittest.TestCase):
 
 @unittest.skipIf(_FRAMEBUFFER is None, "framebuffer module unavailable")
 class FramebufferInitializationTests(unittest.TestCase):
+    @staticmethod
+    def _new_display(bpp=8, width=8, height=4, line_length=8):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.width = width
+        display.height = height
+        display.bpp = bpp
+        display.grayscale = 1 if bpp in (1, 8) else 0
+        display.line_length = line_length
+        display.mem = bytearray(line_length * height)
+        return display
+
+    def test_write_image_clips_bottom_right_without_indexerror(self):
+        from PIL import Image
+
+        display = self._new_display(width=8, height=4, line_length=8)
+        image = Image.new("L", (10, 10), 255)
+
+        display.write_image(image, 6, 2)
+
+        self.assertEqual(bytes(display.mem[22:24]), b"\xff\xff")
+        self.assertEqual(bytes(display.mem[30:32]), b"\xff\xff")
+
+    def test_write_image_nonzero_origin_with_stride(self):
+        from PIL import Image
+
+        display = self._new_display(width=5, height=4, line_length=7)
+        display.mem[:] = b"\xa5" * len(display.mem)
+        image = Image.new("L", (4, 3))
+        image.putdata([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+
+        display.write_image(image, 1, 1)
+
+        for row in range(3):
+            start = (1 + row) * 7 + 1
+            self.assertEqual(
+                bytes(display.mem[start:start + 4]),
+                bytes([4 * row + 1, 4 * row + 2, 4 * row + 3, 4 * row + 4]),
+            )
+        self.assertEqual(display.mem[0], 0xA5)
+        self.assertEqual(display.mem[6], 0xA5)
+
+    def test_write_image_full_width_merges_contiguous_rows(self):
+        from PIL import Image
+
+        class RecordingMemory:
+            def __init__(self):
+                self.assignments = []
+
+            def __setitem__(self, key, value):
+                self.assignments.append((key, bytes(value)))
+
+        display = self._new_display(width=4, height=4, line_length=4)
+        display.mem = RecordingMemory()
+        image = Image.new("L", (4, 2))
+        image.putdata(list(range(8)))
+
+        display.write_image(image, 0, 1)
+
+        self.assertEqual(len(display.mem.assignments), 1)
+        key, value = display.mem.assignments[0]
+        self.assertEqual((key.start, key.stop), (4, 12))
+        self.assertEqual(value, bytes(range(8)))
+
+    def test_write_image_1bpp_unaligned_region_preserves_neighbors(self):
+        from PIL import Image
+
+        display = self._new_display(
+            bpp=1, width=16, height=2, line_length=2
+        )
+        display.mem[:] = b"\xa5" * len(display.mem)
+        image = Image.new("1", (3, 1), 0)
+        image.putpixel((1, 0), 1)
+        image.putpixel((2, 0), 1)
+
+        display.write_image(image, 5, 0)
+
+        self.assertEqual(bytes(display.mem[:2]), b"\xa3\xa5")
+        self.assertEqual(bytes(display.mem[2:4]), b"\xa5\xa5")
+
+    def test_write_image_1bpp_nonzero_y_and_stride(self):
+        from PIL import Image
+
+        display = self._new_display(
+            bpp=1, width=16, height=3, line_length=3
+        )
+        image = Image.new("1", (2, 2), 0)
+        image.putpixel((0, 0), 1)
+        image.putpixel((1, 1), 1)
+
+        display.write_image(image, 8, 1)
+
+        self.assertEqual(bytes(display.mem[:3]), b"\x00\x00\x00")
+        self.assertEqual(bytes(display.mem[3:6]), b"\x00\x80\x00")
+        self.assertEqual(bytes(display.mem[6:9]), b"\x00\x40\x00")
+
+    def test_write_image_l_mode_does_not_convert(self):
+        display = self._new_display(width=2, height=2, line_length=2)
+        image = mock.Mock()
+        image.mode = "L"
+        image.width = 2
+        image.height = 2
+        image.tobytes.return_value = b"\x01\x02\x03\x04"
+
+        display.write_image(image, 0, 0)
+
+        image.convert.assert_not_called()
+        self.assertEqual(bytes(display.mem), b"\x01\x02\x03\x04")
+
+    def test_read_screeninfo_rejects_16bpp_before_mmap(self):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.fd = 123
+
+        def fake_ioctl(request, arg, timeout=None):
+            if request == module.FBIOGET_VSCREENINFO:
+                struct.pack_into("<8I", arg, 0, 100, 200, 100, 200, 0, 0, 16, 0)
+            elif request == module.FBIOGET_FSCREENINFO:
+                arg.smem_len = 40000
+                arg.line_length = 200
+            return True
+
+        display._ioctl = fake_ioctl
+        with mock.patch.object(module.mmap, "mmap") as mmap_:
+            with self.assertRaisesRegex(
+                    OSError,
+                    r"bpp=16 grayscale=0 line_length=200"):
+                display._read_screeninfo()
+        mmap_.assert_not_called()
+
+    def test_ioctl_is_synchronous_and_retries_interrupted(self):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.fd = 123
+
+        with mock.patch.object(
+                module.fcntl, "ioctl",
+                side_effect=[InterruptedError("eintr"), 0],
+                create=True) as ioctl_, \
+                mock.patch.object(module.threading, "Thread") as thread_:
+            self.assertTrue(display._ioctl(0x1234, b"\x00"))
+
+        self.assertEqual(ioctl_.call_count, 2)
+        thread_.assert_not_called()
+
+    def test_ioctl_oserror_returns_none(self):
+        module = _FRAMEBUFFER
+        display = module.EInkDisplay.__new__(module.EInkDisplay)
+        display.fd = 123
+
+        with mock.patch.object(
+                module.fcntl, "ioctl", side_effect=OSError("boom"),
+                create=True), \
+                mock.patch("builtins.print") as print_:
+            self.assertIsNone(display._ioctl(0x1234, b"\x00"))
+
+        self.assertIn("失败", print_.call_args.args[0])
+
+    def test_show_waits_for_previous_marker_outside_lock(self):
+        class TrackingLock:
+            def __init__(self):
+                self.held = False
+
+            def __enter__(self):
+                self.held = True
+                return self
+
+            def __exit__(self, *_exc):
+                self.held = False
+
+        module = _FRAMEBUFFER
+        display = self._new_display(width=100, height=100, line_length=100)
+        display.supports_swipe_animation = False
+        display._swipe_animation = False
+        display.wait_for_submission_before = True
+        display.wait_for_completion = False
+        display._pending_marker = 41
+        lock = TrackingLock()
+        observed = {}
+        display.wait_update_submission = (
+            lambda marker: observed.update(marker=marker, lock_held=lock.held)
+        )
+        display.write_image = lambda _image, _x, _y: observed.update(wrote=True)
+        display.mxc_update = (
+            lambda *args, **kwargs: observed.update(kwargs=kwargs) or 42
+        )
+        image = types.SimpleNamespace(width=100, height=100)
+
+        with mock.patch.object(module.EInkDisplay, "_show_lock", lock):
+            marker = display.show(image)
+
+        self.assertEqual(marker, 42)
+        self.assertEqual(observed["marker"], 41)
+        self.assertFalse(observed["lock_held"])
+        self.assertTrue(observed["wrote"])
+        self.assertFalse(observed["kwargs"]["wait_for_submission_before"])
+        self.assertFalse(observed["kwargs"]["wait_for_completion"])
+
+    def test_epdc_histogram_and_dither_constants(self):
+        module = _FRAMEBUFFER
+        captured = {}
+
+        mtk = module.EInkDisplay.__new__(module.EInkDisplay)
+        mtk.update_data_cls = module.MxcfbUpdateDataMtk
+        mtk.ioctls = {"send_update": 1}
+        mtk.W = module.WAVEFORM_MTK
+        mtk.temp = module.TEMP_USE_AMBIENT
+        mtk.swipe_steps = 12
+        mtk._ioctl = lambda _request, data: captured.update(mtk=data) or True
+        self.assertTrue(mtk._send_update(
+            0, 0, 8, 8, module.WAVEFORM_MTK.GC16,
+            module.UPDATE.PARTIAL, 0, 1))
+        self.assertEqual(captured["mtk"].dither_mode, 0)
+
+        classic = module.EInkDisplay.__new__(module.EInkDisplay)
+        classic.update_data_cls = module.MxcfbUpdateData
+        classic.ioctls = {"send_update": 1}
+        classic.W = module.WAVEFORM
+        classic.temp = module.TEMP_USE_AUTO
+        classic._ioctl = lambda _request, data: captured.update(classic=data) or True
+        self.assertTrue(classic._send_update(
+            0, 0, 8, 8, module.WAVEFORM.GC16,
+            module.UPDATE.PARTIAL, 0, 1))
+        self.assertEqual(
+            captured["classic"].hist_gray_waveform_mode,
+            module.WAVEFORM.GC16_FAST,
+        )
+
     @unittest.skipIf(_SCREEN_OUTPUT is None, "screen output module unavailable")
     def test_screen_output_forwards_swipe_animation(self):
         output = _SCREEN_OUTPUT.ScreenOutput(None)
@@ -612,11 +841,15 @@ class FramebufferInitializationTests(unittest.TestCase):
     def test_rex_and_zelda_struct_sizes_and_ioctls(self):
         import ctypes
         module = _FRAMEBUFFER
+        self.assertEqual(ctypes.sizeof(module.MxcfbUpdateData), 72)
+        self.assertEqual(ctypes.sizeof(module.MxcfbUpdateDataMtk), 96)
         self.assertEqual(ctypes.sizeof(module.MxcfbUpdateDataRex), 80)
         self.assertEqual(ctypes.sizeof(module.MxcfbUpdateDataZelda), 88)
 
+        mtk_ioctls = module._mtk_ioctls()
         rex_ioctls = module._rex_ioctls()
         zelda_ioctls = module._zelda_ioctls()
+        self.assertEqual(mtk_ioctls["send_update"], 0x4060462E)
         # 0x4050462E = _IOW('F', 0x2E, 80)
         self.assertEqual(rex_ioctls["send_update"], 0x4050462E)
         # 0x4058462E = _IOW('F', 0x2E, 88)
@@ -630,9 +863,16 @@ class FramebufferInitializationTests(unittest.TestCase):
                 mock.patch.object(display_cls, "_init_epdc"), \
                 mock.patch.object(module.os, "open", return_value=100), \
                 mock.patch.object(module.os, "close"):
+            display_mxcfb = display_cls("/dev/fb0", protocol="mxcfb")
+            self.assertEqual(display_mxcfb.temp, module.TEMP_USE_AUTO)
+
+            display_mtk = display_cls("/dev/fb0", protocol="mtk")
+            self.assertEqual(display_mtk.temp, module.TEMP_USE_AMBIENT)
+
             display_rex = display_cls("/dev/fb0", protocol="rex")
             self.assertIs(display_rex.update_data_cls, module.MxcfbUpdateDataRex)
             self.assertEqual(display_rex.ioctls["send_update"], 0x4050462E)
+            self.assertEqual(display_rex.temp, module.TEMP_USE_AMBIENT)
             self.assertFalse(display_rex.supports_swipe_animation)
 
             display_zelda = display_cls("/dev/fb0", protocol="zelda")

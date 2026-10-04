@@ -1,9 +1,55 @@
+import time
+
 from .. import VERSION
 from ..config import CACHE_DIR
 from ..utils import cache_size, clear_cache
 
 
-STATE = {"rects": {}, "server": ""}
+STATE = {
+    "rects": {}, "server": "",
+    "cache_text": "", "cache_loaded_at": 0.0, "cache_loading": False,
+}
+_CACHE_TTL = 60.0
+
+
+def _cache_text():
+    now = time.monotonic()
+    if (STATE["cache_text"]
+            and now - float(STATE.get("cache_loaded_at") or 0.0) < _CACHE_TTL):
+        return STATE["cache_text"]
+    return STATE["cache_text"] or "统计中…"
+
+
+def _refresh_cache_size(ctx, force=False):
+    now = time.monotonic()
+    if not force and STATE["cache_text"] and (
+            now - float(STATE.get("cache_loaded_at") or 0.0) < _CACHE_TTL):
+        return
+    if STATE.get("cache_loading"):
+        return
+    STATE["cache_loading"] = True
+
+    def operation():
+        return cache_size(CACHE_DIR)
+
+    def success(size):
+        STATE["cache_text"] = "%.1f MB" % (float(size) / 1024.0 / 1024.0)
+        STATE["cache_loaded_at"] = time.monotonic()
+        STATE["cache_loading"] = False
+
+    def error(_exc):
+        STATE["cache_loading"] = False
+        if not STATE["cache_text"]:
+            STATE["cache_text"] = "统计失败"
+
+    try:
+        ctx.run_async("settings", operation, success, error, refresh=False, sticky=True)
+    except TypeError:
+        ctx.run_async("settings", operation, success, error)
+
+
+def enter(ctx):
+    _refresh_cache_size(ctx)
 
 
 def render(ctx, canvas):
@@ -87,8 +133,7 @@ def render(ctx, canvas):
         "animation" if animation_supported else None,
     )
     row("翻页闪屏", "开" if ctx.config.get("page_flash") else "关", "flash")
-    size_text = "%.1f MB" % (cache_size(CACHE_DIR) / 1024.0 / 1024.0)
-    row("缓存", size_text, "clear_cache")
+    row("缓存", _cache_text(), "clear_cache")
     row("退出登录" if ctx.api.user else "登录账号",
         (ctx.api.user or {}).get("UserName") or "未登录", "account")
 
@@ -139,14 +184,30 @@ def handle(data, ctx):
         elif action == "clear_cache":
             ctx.confirm("确认清空封面、正文和字体的磁盘缓存？", lambda: _clear(ctx))
         elif action == "account":
-            ctx.navigate("account")
+            if ctx.api.user:
+                ctx.confirm("确认退出登录？", lambda: _logout(ctx))
+            else:
+                ctx.navigate("account")
         return
+
+
+def _logout(ctx):
+    ctx.api.session.clear_credentials()
+    try:
+        ctx.api.hub.close()
+    except Exception:
+        pass
+    ctx.toast("已退出登录")
+    ctx.show()
 
 
 def _clear(ctx):
     for name in ("covers", "fonts", "images", "content"):
         clear_cache(CACHE_DIR / name)
     ctx.images.clear_memory()
+    STATE["cache_text"] = ""
+    STATE["cache_loaded_at"] = 0.0
+    _refresh_cache_size(ctx, force=True)
     ctx.toast("缓存已清空")
 
 

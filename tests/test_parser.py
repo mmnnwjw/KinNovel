@@ -78,6 +78,17 @@ class TestMultiTouchParser(unittest.TestCase):
         parser.handle_event(timed_event(
             ecodes.EV_ABS, ecodes.ABS_MT_POSITION_Y, payload[1], ts))
 
+    def _press_slot(self, parser, slot, payload, ts=1.0, tracking_id=None):
+        tracking_id = slot + 10 if tracking_id is None else tracking_id
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, slot, ts))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, tracking_id, ts))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_POSITION_X, payload[0], ts))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_POSITION_Y, payload[1], ts))
+
     def test_slow_press_is_tap_not_long(self):
         gestures = []
         parser = MultiTouchParser(on_gesture=gestures.append)
@@ -147,6 +158,105 @@ class TestMultiTouchParser(unittest.TestCase):
         self.assertEqual(len(gestures), 1)
         self.assertEqual(gestures[0].tracking_id, 7)
         self.assertNotIn(7, parser.tracking_to_slot)
+
+    def test_two_finger_swipe_only_settles_primary(self):
+        gestures = []
+        parser = MultiTouchParser(on_gesture=gestures.append)
+        self._press_slot(parser, 0, (100, 200), tracking_id=7)
+        self._press_slot(parser, 1, (300, 200), tracking_id=8)
+
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 1, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_POSITION_X, 380, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.15))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 0, 1.20))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_POSITION_X, 180, 1.20))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.25))
+
+        self.assertEqual(len(gestures), 1)
+        self.assertEqual(gestures[0].kind, "right")
+        self.assertEqual(gestures[0].slot, 0)
+        self.assertEqual(gestures[0].tracking_id, 7)
+
+    def test_two_finger_tap_only_settles_once(self):
+        gestures = []
+        parser = MultiTouchParser(on_gesture=gestures.append)
+        self._press_slot(parser, 0, (100, 200), tracking_id=7)
+        self._press_slot(parser, 1, (300, 200), tracking_id=8)
+
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 1, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 0, 1.15))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.15))
+
+        self.assertEqual(len(gestures), 1)
+        self.assertEqual(gestures[0].kind, "tap")
+        self.assertEqual(gestures[0].slot, 0)
+
+    def test_third_finger_does_not_replace_primary(self):
+        gestures = []
+        parser = MultiTouchParser(on_gesture=gestures.append)
+        self._press_slot(parser, 0, (100, 200), tracking_id=7)
+        self._press_slot(parser, 1, (300, 200), tracking_id=8)
+        self._press_slot(parser, 2, (500, 200), tracking_id=9)
+
+        self.assertEqual(parser.primary_slot, 0)
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 2, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.10))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 1, 1.15))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.15))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_SLOT, 0, 1.20))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.20))
+
+        self.assertEqual(len(gestures), 1)
+        self.assertEqual(gestures[0].tracking_id, 7)
+
+    def test_single_axis_btn_touch_fallback_emits_gesture(self):
+        gestures = []
+        parser = MultiTouchParser(on_gesture=gestures.append)
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_X, 100, 1.0))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_Y, 200, 1.0))
+        parser.handle_event(timed_event(
+            ecodes.EV_KEY, ecodes.BTN_TOUCH, 1, 1.0))
+        parser.handle_event(timed_event(
+            ecodes.EV_KEY, ecodes.BTN_TOUCH, 0, 1.10))
+
+        self.assertEqual(len(gestures), 1)
+        self.assertEqual(gestures[0].kind, "tap")
+        self.assertEqual(gestures[0].start, (100, 200))
+
+    def test_real_mt_tracking_upgrades_btn_touch_fallback(self):
+        gestures = []
+        parser = MultiTouchParser(on_gesture=gestures.append)
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_X, 100, 1.0))
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_Y, 200, 1.0))
+        parser.handle_event(timed_event(
+            ecodes.EV_KEY, ecodes.BTN_TOUCH, 1, 1.0))
+        self._press_slot(parser, 0, (100, 200), ts=1.0, tracking_id=7)
+        parser.handle_event(timed_event(
+            ecodes.EV_ABS, ecodes.ABS_MT_TRACKING_ID, -1, 1.10))
+
+        self.assertEqual(len(gestures), 1)
+        self.assertEqual(gestures[0].tracking_id, 7)
 
 
 if __name__ == "__main__":

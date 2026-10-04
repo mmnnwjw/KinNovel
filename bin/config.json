@@ -17,12 +17,12 @@
   "convert": null,
   "ignore_japanese": false,
   "ignore_ai": false,
+  "prefetch_chapters": false,
   "prefetch_reading_target": false,
   "request_limit": 9,
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
   "strict_tls": true,
-  "check_update": true,
   "home_order": {
     "shelf": 0,
     "history": 1,

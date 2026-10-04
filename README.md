@@ -21,7 +21,7 @@ Qt 或桌面环境。
 
 当前版本仅支持小说：书架、阅读历史、排行榜与最近/分类都会过滤漫画。
 
-当前版本：[`0.7.7`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.7)
+当前版本：[`0.7.8`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.8)
 
 ## 界面预览
 
@@ -94,9 +94,11 @@ Qt 或桌面环境。
 
 ### Release 安装包
 
-发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
+发布包包含运行和安装所需文件，以及 `README.md`、`LICENSE`、
+`THIRD-PARTY-NOTICES.md` 和设备端卸载脚本 `uninstall.sh`；不包含测试、
+研究脚本和开发文档。
 
-1. 下载 Release 中的 [`KinNovel-v0.7.7.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.7/KinNovel-v0.7.7.zip)。
+1. 下载 Release 中的 [`KinNovel-v0.7.8.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.8/KinNovel-v0.7.8.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -126,6 +128,7 @@ Qt 或桌面环境。
 mkdir -p /mnt/us/extensions/kinnovel
 cp -R KinNovel/bin /mnt/us/extensions/kinnovel/
 cp KinNovel/config.xml KinNovel/manifest.json KinNovel/menu.json \
+   KinNovel/LICENSE KinNovel/THIRD-PARTY-NOTICES.md KinNovel/uninstall.sh \
    /mnt/us/extensions/kinnovel/
 ```
 
@@ -186,7 +189,6 @@ Git，也不要分享带有真实凭据的 `config.json`。
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
   "strict_tls": true,
-  "check_update": true,
   "home_order": {
     "shelf": 0,
     "history": 1,
@@ -382,11 +384,9 @@ KOReader 路径。
 /mnt/us/python3/bin/python3.14 --version
 ```
 
-若因跨平台传输丢失了执行权限导致点击无反应，可尝试补全权限：
-
-```sh
-chmod +x /mnt/us/extensions/kinnovel/bin/start.sh
-```
+`/mnt/us` 通常是 vfat 分区，不支持 Unix 权限位，因此不需要也不能用
+`chmod +x` 修复启动权限。KUAL 启动项已通过 `/bin/sh` 调用 `bin/start.sh`，
+无需文件自带执行位。
 
 ### 出现残留锁
 

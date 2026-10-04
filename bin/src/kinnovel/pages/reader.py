@@ -232,6 +232,11 @@ STATE = {
     "rects": {},
     "loading": False,
     "last_saved": -1,
+    "last_durable_saved": -1,
+    "last_save_at": 0.0,
+    "last_saved_path": None,
+    "last_durable_saved_path": None,
+    "last_saved_offset": None,
     "catalog_page": 0,
     "signature": None,
     "image_pending": set(),
@@ -244,10 +249,84 @@ STATE = {
     "image_generation": 0,
     "chrome_visible": False,
     "pending_turn": None,
+    "pending_turn_upload": False,
     "layout_generation": 0,
 }
 
 _CONTENT_CACHE_LIMIT = 3
+_PROGRESS_SAVE_INTERVAL = 5.0
+_READER_CONTEXT = None
+_READER_ACTIVE = False
+_EXIT_HOOK_INSTALLED = False
+_SUSPEND_WATCHER = None
+
+
+def _remember_context(ctx):
+    """记录活动 PageContext;退出钩子在模块级触发时需要它。"""
+    global _READER_CONTEXT, _READER_ACTIVE
+    _READER_CONTEXT = ctx
+    _READER_ACTIVE = getattr(ctx, "page_name", "") == "reader"
+
+
+def _is_current_reader():
+    return bool(_READER_ACTIVE and _READER_CONTEXT)
+
+
+def ensure_exit_hook():
+    """注册进程退出钩子;重复调用无副作用。"""
+    global _EXIT_HOOK_INSTALLED, _SUSPEND_WATCHER
+    if _EXIT_HOOK_INSTALLED:
+        return
+    _EXIT_HOOK_INSTALLED = True
+    try:
+        import atexit
+        atexit.register(handle_exit)
+    except Exception:
+        pass
+    # 休眠瞬间可能来不及走 UI tick,用轻量守护线程兜底落盘。
+    import threading
+    _SUSPEND_WATCHER = threading.Thread(
+        target=_suspend_watch_loop, daemon=True,
+        name="kinnovel-reader-suspend",
+    )
+    _SUSPEND_WATCHER.start()
+
+
+def _suspend_watch_loop():
+    was_sleeping = False
+    while True:
+        time.sleep(0.5)
+        ctx = _READER_CONTEXT
+        if ctx is None:
+            continue
+        power = getattr(getattr(ctx, "app", None), "power", None)
+        sleeping = bool(getattr(power, "is_sleeping", False))
+        if sleeping and not was_sleeping and _is_current_reader():
+            try:
+                flush_progress(ctx, upload=True)
+            except Exception:
+                pass
+        was_sleeping = sleeping
+
+
+def _write_progress(ctx, book_id, sort_num, page, path, offset):
+    """把给定进度落盘,并记录 durable 快照。"""
+    try:
+        atomic_write(
+            _progress_path(book_id, sort_num, ctx.config.get("convert")),
+            json.dumps(
+                {"path": path, "offset": offset, "page": page},
+                ensure_ascii=False,
+            ),
+        )
+    except OSError:
+        return False
+    STATE["last_durable_saved"] = page
+    STATE["last_save_at"] = time.monotonic()
+    STATE["last_durable_saved_path"] = (
+        book_id, sort_num, page, path, int(offset or 0))
+    STATE["last_saved_offset"] = int(offset or 0)
+    return True
 
 
 _GUIDE_LINES = [
@@ -349,7 +428,15 @@ def _set_chrome_visible(ctx, visible):
 
 
 def enter(ctx):
+    _remember_context(ctx)
+    ensure_exit_hook()
     STATE["fullscreen_image"] = None
+    # 章节切换/从其它页返回前先把前一章最后锚点 durable 落盘并上传。
+    if STATE.get("doc") and STATE.get("data"):
+        try:
+            flush_progress(ctx, upload=True)
+        except Exception:
+            pass
     book_id = int(ctx.params.get("book_id") or 0)
     sort_num = int(ctx.params.get("sort_num") or 1)
     fresh = bool(ctx.params.get("fresh"))
@@ -395,19 +482,30 @@ def enter(ctx):
                     current_path, current_offset)
             STATE["signature"] = signature
             STATE["last_saved"] = -1
+            STATE["last_durable_saved"] = -1
+            STATE["last_save_at"] = 0.0
+            STATE["last_saved_path"] = None
+            STATE["last_durable_saved_path"] = None
             STATE["loading"] = False
             pending = STATE.pop("pending_turn", None)
             if pending:
-                _turn(ctx, int(pending))
+                _turn(ctx, int(pending),
+                      upload=bool(STATE.pop("pending_turn_upload", False)))
 
         ctx.run_async("reader", lambda: _prepare_document(
             ctx, STATE["data"].get("Chapter") or {}), success,
             lambda exc: ctx.message(["重新排版失败", str(exc)]))
         return
-    STATE.update({"book_id": book_id, "sort_num": sort_num, "data": None,
-                  "doc": None, "page": 0, "loading": True, "last_saved": -1,
-                  "signature": signature, "fitted_cache": {},
-                  "content_cache": OrderedDict(), "pending_turn": None})
+    STATE.update({
+        "book_id": book_id, "sort_num": sort_num, "data": None,
+        "doc": None, "page": 0, "loading": True, "last_saved": -1,
+        "last_durable_saved": -1, "last_save_at": 0.0,
+        "last_saved_path": None,
+        "last_durable_saved_path": None,
+        "signature": signature, "fitted_cache": {},
+        "content_cache": OrderedDict(), "pending_turn": None,
+        "pending_turn_upload": False,
+    })
     ctx.show()
 
     def operation():
@@ -457,7 +555,8 @@ def enter(ctx):
             _configure_swipe(ctx, swipe_delta)
         pending = STATE.pop("pending_turn", None)
         if pending:
-            _turn(ctx, int(pending))
+            _turn(ctx, int(pending),
+                  upload=bool(STATE.pop("pending_turn_upload", False)))
 
     def error(exc):
         if (generation != STATE["layout_generation"]
@@ -471,26 +570,99 @@ def enter(ctx):
 
 
 def _save_progress(ctx):
-    if not ctx.api.user or not STATE["doc"] or not STATE["data"]:
+    """内存即时更新;磁盘按 5 秒节流,强制路径绕过节流。"""
+    if not STATE["doc"] or not STATE["data"]:
+        return
+    chapter = (STATE["data"].get("Chapter") or {})
+    try:
+        book_id = int(chapter.get("BookId") or STATE["book_id"])
+        sort_num = int(STATE["sort_num"])
+    except (TypeError, ValueError):
         return
     page = int(STATE["page"])
-    if page == STATE["last_saved"]:
-        return
-    STATE["last_saved"] = page
-    chapter = (STATE["data"].get("Chapter") or {})
-    book_id = int(chapter.get("BookId") or STATE["book_id"])
     path, offset = STATE["doc"].first_anchor_on_page(page)
-    progress.record(book_id, STATE["sort_num"], page, path, offset,
+    offset = int(offset or 0)
+    progress.record(book_id, sort_num, page, path, offset,
                     page_count=STATE["doc"].page_count)
+    STATE["last_saved"] = page
+    STATE["last_saved_path"] = (book_id, sort_num, page, path, offset)
+    if not ctx.api.user:
+        return
+    now = time.monotonic()
+    last_write = float(STATE.get("last_save_at") or 0.0)
+    if now - last_write < _PROGRESS_SAVE_INTERVAL:
+        return
+    _write_progress(ctx, book_id, sort_num, page, path, offset)
+
+
+def flush_progress(ctx, upload=True):
+    """强制 durable 落盘(章节切换/离开/休眠/退出),云端上传 best-effort。"""
+    if not STATE["doc"] or not STATE["data"]:
+        return
+    _save_progress(ctx)
+    if not ctx.api.user:
+        return
+    chapter = (STATE["data"].get("Chapter") or {})
     try:
-        atomic_write(
-            _progress_path(book_id, STATE["sort_num"], ctx.config.get("convert")),
-            json.dumps(
-                {"path": path, "offset": offset, "page": page},
-                ensure_ascii=False,
-            ),
-        )
-    except OSError:
+        book_id = int(chapter.get("BookId") or STATE["book_id"])
+        sort_num = int(STATE["sort_num"])
+    except (TypeError, ValueError):
+        return
+    page = int(STATE["page"])
+    path, offset = STATE["doc"].first_anchor_on_page(page)
+    offset = int(offset or 0)
+    current = (book_id, sort_num, page, path, offset)
+    if current != STATE.get("last_durable_saved_path"):
+        if not _write_progress(ctx, book_id, sort_num, page, path, offset):
+            return
+    if upload:
+        _queue_progress_upload(ctx)
+
+
+def _queue_progress_upload(ctx):
+    """上传使用后台通道;退出时降级为短超时 daemon 线程。"""
+    try:
+        ctx.run_async("reader", lambda: _upload_position(ctx),
+                      lambda _: None, lambda _: None, refresh=False)
+    except Exception:
+        _upload_in_background(ctx)
+
+
+def _upload_position(ctx):
+    chapter = (STATE["data"] or {}).get("Chapter") or {}
+    book_id = int(chapter.get("BookId") or STATE["book_id"])
+    chapter_id = int(chapter.get("Id") or 0)
+    xpath = STATE["doc"].first_path_on_page(int(STATE["page"]))
+    ctx.api.save_read_position(book_id, chapter_id, xpath)
+
+
+def _upload_in_background(ctx):
+    import threading
+
+    threading.Thread(
+        target=lambda: _upload_position(ctx), daemon=True,
+        name="kinnovel-progress-upload",
+    ).start()
+
+
+def handle_suspend(ctx=None):
+    """电源管理进入休眠前调用;best-effort 落盘并上传。"""
+    ctx = ctx or _READER_CONTEXT
+    if ctx is None or not _is_current_reader():
+        return
+    try:
+        flush_progress(ctx, upload=True)
+    except Exception:
+        pass
+
+
+def handle_exit():
+    """进程退出(atexit)时对最后一次阅读位置做 durable + 上传。"""
+    if not _is_current_reader():
+        return
+    try:
+        flush_progress(_READER_CONTEXT, upload=True)
+    except Exception:
         pass
 
 
@@ -504,16 +676,22 @@ def upload_progress(ctx):
     path, offset = STATE["doc"].first_anchor_on_page(page)
     progress.record(book_id, STATE["sort_num"], page, path, offset,
                     page_count=STATE["doc"].page_count)
+    STATE["last_saved"] = page
+    STATE["last_saved_path"] = (
+        book_id, int(STATE["sort_num"]), page, path, int(offset or 0))
+    _write_progress(ctx, book_id, int(STATE["sort_num"]), page, path, offset)
     xpath = STATE["doc"].first_path_on_page(page)
     ctx.run_async("reader", lambda: ctx.api.save_read_position(book_id, chapter_id, xpath),
-                  lambda _: None, lambda _: None)
+                  lambda _: None, lambda _: None, refresh=False)
 
 
-def _turn(ctx, delta):
+def _turn(ctx, delta, upload=False):
     doc = STATE["doc"]
     if not doc:
         # 章节加载期间的手势不丢弃: 记住一次意图, 加载完成后执行。
         STATE["pending_turn"] = int(delta)
+        if upload:
+            STATE["pending_turn_upload"] = True
         ctx.toast("正在加载…")
         return
     target = int(STATE["page"]) + int(delta)
@@ -528,6 +706,14 @@ def _turn(ctx, delta):
     _change_chapter(ctx, delta, at_last=(delta < 0))
 
 
+def leave(ctx):
+    """离开阅读器: durable 落盘并 best-effort 上传云端。"""
+    try:
+        flush_progress(ctx, upload=True)
+    except Exception:
+        pass
+
+
 def _change_chapter(ctx, delta, at_last=False):
     chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
     index = _chapter_index(chapters, STATE["sort_num"]) + int(delta)
@@ -535,6 +721,10 @@ def _change_chapter(ctx, delta, at_last=False):
         ctx.toast("已经是%s" % ("第一页" if delta < 0 else "最后一页"))
         return
     target = _chapter_sort(chapters, index)
+    try:
+        flush_progress(ctx, upload=True)
+    except Exception:
+        pass
     ctx.replace("reader", book_id=STATE["book_id"], sort_num=target,
                 at_last=bool(at_last), swipe_delta=int(delta))
     STATE["last_turn_at"] = time.monotonic()
@@ -826,6 +1016,10 @@ def handle_catalog(data, ctx):
             chapters = ((STATE["data"] or {}).get("Chapter") or {}).get("Chapters") or []
             if not 0 <= key[1] < len(chapters):
                 return
+            try:
+                flush_progress(ctx, upload=True)
+            except Exception:
+                pass
             ctx.replace("reader", book_id=STATE["book_id"],
                         sort_num=_chapter_sort(chapters, key[1]), fresh=True)
         elif key[0] == "prev" and STATE["catalog_page"] > 0:
