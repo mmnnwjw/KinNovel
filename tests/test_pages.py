@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageFont
 
+from kinnovel import progress
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
 from kinnovel.ui import Canvas, ImageCache, PageContext, Theme, height_bucket
 
@@ -104,6 +105,7 @@ class PageSmokeTests(unittest.TestCase):
     def setUp(self):
         if not FONT_PATH:
             self.skipTest("no CJK test font available")
+        progress.clear()
         self.context = PageContext(App())
         for name, module in {
             "home": home,
@@ -203,6 +205,78 @@ class PageSmokeTests(unittest.TestCase):
             book._prefetch_reading_target(context, info)
         prefetch.assert_called_once_with(context, 1, 10)
         context.config.values["prefetch_reading_target"] = False
+
+    def test_book_detail_uses_session_progress(self):
+        data = {
+            "Book": {"Chapters": [
+                {"Id": 1, "SortNum": 1},
+                {"Id": 10, "SortNum": 10},
+            ]},
+            "ReadPosition": {},
+        }
+        progress.record(1, 10, 3, "./p[9]", 12)
+        self.assertTrue(book._has_resume(data, 1))
+        self.assertEqual(book._resume_sort_num(data, 1), 10)
+
+    def test_book_resume_prefers_further_chapter(self):
+        data = {
+            "Book": {"Chapters": [
+                {"Id": 1, "SortNum": 1},
+                {"Id": 10, "SortNum": 10},
+            ]},
+            "ReadPosition": {"ChapterId": 10},
+        }
+        progress.record(1, 1, 0)
+        self.assertEqual(book._resume_sort_num(data, 1), 10)
+
+    def test_book_has_no_resume_without_progress(self):
+        data = {
+            "Book": {"Chapters": [{"Id": 1, "SortNum": 1}]},
+            "ReadPosition": {},
+        }
+        self.assertFalse(book._has_resume(data, 1))
+
+    def test_book_read_button_uses_session_progress_sort(self):
+        book.STATE.update({
+            "book_id": 1,
+            "data": {
+                "Book": {"Chapters": [
+                    {"Id": 1, "SortNum": 1},
+                    {"Id": 10, "SortNum": 10},
+                ]},
+                "ReadPosition": {},
+            },
+            "rects": {("read", 0): (0, 0, 100, 50)},
+        })
+        progress.record(1, 10, 3)
+        calls = []
+        self.context.navigate = lambda name, **params: calls.append((name, params))
+        book.handle({"gesture": "tap", "x-pixel": 10, "y-pixel": 10},
+                    self.context)
+        self.assertEqual(calls[0][0], "reader")
+        self.assertEqual(calls[0][1]["sort_num"], 10)
+
+    def test_book_enter_force_loads_after_reader(self):
+        self.context.previous_page = "reader"
+        with patch.object(book, "_load") as load:
+            book.enter(self.context)
+        load.assert_called_once_with(self.context, force=True)
+
+    def test_reader_save_progress_records_session(self):
+        self._prime_reader()
+        reader.STATE["page"] = 5
+        reader.STATE["last_saved"] = -1
+        reader._save_progress(self.context)
+        session = progress.get(1)
+        self.assertIsNotNone(session)
+        self.assertEqual(session["sort_num"], 2)
+        self.assertEqual(session["page"], 5)
+
+    def test_session_progress_can_be_cleared(self):
+        progress.record(1, 2, 3)
+        self.assertIsNotNone(progress.get(1))
+        progress.clear()
+        self.assertIsNone(progress.get(1))
 
     def test_book_series_button_opens_series_page(self):
         book.STATE.update({

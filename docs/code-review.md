@@ -252,3 +252,23 @@ live_keepalive                         -> 45s idle, connects=1, socket unchanged
 python -m unittest discover -s tests  -> Ran 155 tests, OK (skipped=2)
 python -m compileall -q bin            -> OK
 ```
+
+## Tenth review round (2026-10-04, v0.7.7)
+
+修复“从阅读器返回后书籍详情显示开始阅读”的进度一致性问题。根因是详情页
+`STATE["data"]` 被内存缓存短路，而进度只在离开阅读器时异步上传，详情页拿不到
+刚读到的位置。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P1 | `book._load` 对同一本书直接返回旧 `STATE["data"]`，不重新读取服务器进度。 | 从阅读器返回时 `force=True` 刷新；旧数据保留用于即时渲染，后台更新。 |
+| P1 | 进度只在退出阅读器时异步上传，详情页在完成前仍看到旧的 `ReadPosition`。 | `reader._save_progress` 同步写入进程内进度缓存，详情页优先读取。 |
+| P2 | 会话进度与云端进度可能不一致。 | 按章节目录取更靠后的一个；会话缓存在应用退出时清空，下次启动读云端。 |
+| P2 | 强制刷新会清空详情数据并重置章节分页。 | 同书刷新时保留旧数据与章节页码，仅后台替换进度字段。 |
+
+验证（v0.7.7）：
+
+```text
+python -m unittest discover -s tests  -> Ran 162 tests, OK (skipped=2)
+python -m compileall -q bin            -> OK
+```

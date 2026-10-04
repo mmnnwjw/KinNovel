@@ -12,7 +12,7 @@ for path in (os.path.join(BIN_DIR, "vendor"), os.path.join(BIN_DIR, "src")):
 
 from PIL import ImageFont
 
-from kinnovel import VERSION
+from kinnovel import VERSION, progress
 from kinnovel.api import ApiClient
 from kinnovel.config import Config, LOG_DIR, ensure_directories
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
@@ -216,6 +216,8 @@ class KinNovelApp:
             self.api.shutdown()
         except Exception:
             pass
+        # 进度已在离开阅读器时上传, 会话缓存随进程销毁, 下次启动读云端进度。
+        progress.clear()
         try:
             self.images.close()
         except Exception:

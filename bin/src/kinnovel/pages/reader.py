@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageOps
 
+from .. import progress
 from ..config import CACHE_DIR
 from ..reader import ReaderDocument, ensure_font
 from ..ui import Canvas, height_bucket
@@ -479,6 +480,8 @@ def _save_progress(ctx):
     chapter = (STATE["data"].get("Chapter") or {})
     book_id = int(chapter.get("BookId") or STATE["book_id"])
     path, offset = STATE["doc"].first_anchor_on_page(page)
+    progress.record(book_id, STATE["sort_num"], page, path, offset,
+                    page_count=STATE["doc"].page_count)
     try:
         atomic_write(
             _progress_path(book_id, STATE["sort_num"], ctx.config.get("convert")),
@@ -498,6 +501,9 @@ def upload_progress(ctx):
     chapter = (STATE["data"].get("Chapter") or {})
     book_id = int(chapter.get("BookId") or STATE["book_id"])
     chapter_id = int(chapter.get("Id") or 0)
+    path, offset = STATE["doc"].first_anchor_on_page(page)
+    progress.record(book_id, STATE["sort_num"], page, path, offset,
+                    page_count=STATE["doc"].page_count)
     xpath = STATE["doc"].first_path_on_page(page)
     ctx.run_async("reader", lambda: ctx.api.save_read_position(book_id, chapter_id, xpath),
                   lambda _: None, lambda _: None)

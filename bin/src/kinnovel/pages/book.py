@@ -1,3 +1,4 @@
+from .. import progress
 from ..utils import format_time
 from ..ui import height_bucket
 
@@ -33,13 +34,16 @@ def _load(ctx, force=False):
     if book_id <= 0:
         ctx.message("书籍 ID 无效")
         return
-    if not force and STATE["data"] and STATE["book_id"] == book_id:
+    same_book = bool(STATE["data"] and STATE["book_id"] == book_id)
+    if not force and same_book:
         return
+    preserve_chapter_page = bool(force and same_book)
     STATE["book_id"] = book_id
-    # 切书时先清掉上一本的数据，避免加载窗口内渲染/操作到旧内容
-    STATE["data"] = None
-    STATE["bound"] = None
-    STATE["rects"] = {}
+    if not same_book:
+        # 切书时先清掉上一本的数据，避免加载窗口内渲染/操作到旧内容
+        STATE["data"] = None
+        STATE["bound"] = None
+        STATE["rects"] = {}
     STATE["loading"] = True
     STATE["generation"] += 1
     generation = STATE["generation"]
@@ -53,7 +57,8 @@ def _load(ctx, force=False):
         result = result or {}
         STATE["data"] = result
         STATE["loading"] = False
-        STATE["chapter_page"] = 0
+        if not preserve_chapter_page:
+            STATE["chapter_page"] = 0
         cover = (result.get("Book") or {}).get("Cover")
         if cover:
             cover_height = int(int(ctx.width * 0.23) * 1.45)
@@ -103,40 +108,21 @@ def _prefetch_reading_target(ctx, book_info, book_id=None):
     # 打开详情即预取正文会在服务端产生额外阅读记录, 因此默认关闭。
     if not ctx.config.get("prefetch_reading_target"):
         return
-    chapters = ((book_info or {}).get("Book") or {}).get("Chapters") or []
-    if not chapters:
+    target_id = int(book_id if book_id is not None else STATE["book_id"])
+    sort_num = _resume_sort_num(book_info, target_id)
+    if sort_num is None:
         return
-    position = (book_info or {}).get("ReadPosition") or {}
-    try:
-        chapter_id = int(position.get("ChapterId") or 0)
-    except (TypeError, ValueError):
-        chapter_id = 0
-    target = None
-    for index, chapter in enumerate(chapters):
-        if not isinstance(chapter, dict):
-            continue
-        if int(chapter.get("Id") or 0) == chapter_id:
-            target = chapter
-            break
-    target = target or next(
-        (chapter for chapter in chapters if isinstance(chapter, dict)), None)
-    if not isinstance(target, dict):
-        return
-    try:
-        sort_num = int(target.get("SortNum") or 1)
-    except (TypeError, ValueError):
-        sort_num = 1
 
     def operation():
         from . import reader
-        target_id = int(book_id if book_id is not None else STATE["book_id"])
         reader.prefetch_chapter(ctx, target_id, sort_num)
 
     ctx.run_async("book", operation, lambda _: None, lambda _: None)
 
 
 def enter(ctx):
-    _load(ctx)
+    # 从阅读器返回时强制刷新服务端进度; 会话缓存仍会先保证显示"继续阅读"。
+    _load(ctx, force=getattr(ctx, "previous_page", None) == "reader")
 
 
 def _chapter_rows(ctx, canvas, start_y):
@@ -174,6 +160,52 @@ def _chapter_sort(chapters, index):
     except (IndexError, TypeError, ValueError):
         pass
     return index + 1
+
+
+def _has_resume(data, book_id):
+    return bool(progress.get(book_id) or _server_resume_sort(data))
+
+
+def _chapter_index_for_sort(chapters, sort_num):
+    try:
+        wanted = int(sort_num)
+    except (TypeError, ValueError):
+        return None
+    for index in range(len(chapters)):
+        if _chapter_sort(chapters, index) == wanted:
+            return index
+    return None
+
+
+def _server_resume_sort(data):
+    chapters = ((data or {}).get("Book") or {}).get("Chapters") or []
+    position = (data or {}).get("ReadPosition") or {}
+    chapter_id = int(position.get("ChapterId") or 0)
+    if chapter_id:
+        for index, chapter in enumerate(chapters):
+            if int(chapter.get("Id") or 0) == chapter_id:
+                return _chapter_sort(chapters, index)
+    return None
+
+
+def _resume_sort_num(data, book_id):
+    chapters = ((data or {}).get("Book") or {}).get("Chapters") or []
+    session = progress.get(book_id)
+    session_sort = (int(session["sort_num"])
+                    if session and session.get("sort_num") else None)
+    server_sort = _server_resume_sort(data)
+    if session_sort is None and server_sort is None:
+        return _chapter_sort(chapters, 0) if chapters else None
+    if session_sort is None:
+        return server_sort
+    if server_sort is None:
+        return session_sort
+    # 会话内进度和云端进度都存在时取更靠后的章节, 与阅读器"取最远页"一致。
+    session_index = _chapter_index_for_sort(chapters, session_sort)
+    server_index = _chapter_index_for_sort(chapters, server_sort)
+    if session_index is not None and server_index is not None:
+        return session_sort if session_index >= server_index else server_sort
+    return session_sort
 
 
 def render(ctx, canvas):
@@ -250,7 +282,7 @@ def render(ctx, canvas):
     total_pages = _chapter_rows(ctx, canvas, chapter_y + ctx.fonts["body"].size + 8)
     bottom_y = canvas.height - 82
     buttons = [
-        ("read", "继续阅读" if data.get("ReadPosition") else "开始阅读"),
+        ("read", "继续阅读" if _has_resume(data, STATE["book_id"]) else "开始阅读"),
         ("shelf", "移出书架" if STATE["bound"] else "加入书架"),
         ("comments", "评论"),
         ("prev", "上页"),
@@ -286,18 +318,10 @@ def handle(data, ctx):
                              sort_num=_chapter_sort(chapters, key[1]),
                              fresh=True)
         elif action == "read":
-            chapters = (STATE["data"].get("Book") or {}).get("Chapters") or []
-            position = STATE["data"].get("ReadPosition") or {}
-            target = None
-            for chapter in chapters:
-                if int(chapter.get("Id") or 0) == int(position.get("ChapterId") or 0):
-                    target = chapter
-                    break
-            target = target or (chapters[0] if chapters else None)
-            if target:
-                target_index = chapters.index(target)
+            target_sort = _resume_sort_num(STATE["data"], STATE["book_id"])
+            if target_sort is not None:
                 ctx.navigate("reader", book_id=STATE["book_id"],
-                             sort_num=_chapter_sort(chapters, target_index))
+                             sort_num=target_sort)
         elif action == "shelf":
             _toggle_shelf(ctx)
         elif action == "comments":

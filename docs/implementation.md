@@ -106,6 +106,18 @@ to keep the previous page; a fresh navigation from home resets to page one.
 - Gesture release also falls back to `BTN_TOUCH=0` when a driver does not send
   `ABS_MT_TRACKING_ID=-1`.
 
+### Reading progress
+
+- The reader writes its latest local position to `kinnovel.progress` on every
+  page turn (`_save_progress`) and before uploading.
+- The book detail page prefers the session cache over the server `ReadPosition`,
+  so returning from the reader immediately shows “继续阅读”.
+- When both session and server progress exist, the later chapter wins.
+- Returning from the reader forces a background refresh of the book info while
+  keeping the previous detail visible and preserving the chapter page.
+- The session cache is cleared on app shutdown; the next run reads the server
+  position again.
+
 ## Implemented API families
 
 - REST authentication, email codes, registration and password reset.
