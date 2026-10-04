@@ -1,5 +1,6 @@
 import struct
 import unittest
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -19,6 +20,14 @@ from kinnovel.reader import (
 )
 
 
+FONT_PATH = next((path for path in (
+    "C:/Windows/Fonts/simhei.ttf",
+    "/usr/java/lib/fonts/STHeitiMedium.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+) if Path(path).exists()), "")
+
+
 class MemoryConfig:
     def __init__(self):
         self.values = {
@@ -34,6 +43,10 @@ class MemoryConfig:
 
 
 class ReaderTests(unittest.TestCase):
+    def setUp(self):
+        if not FONT_PATH:
+            self.skipTest("no CJK test font available")
+
     def test_utf8_content_is_not_mojibake(self):
         blocks = extract_blocks("<p>第一章 中文正文</p>")
         self.assertEqual(blocks[0].text, "第一章 中文正文")
@@ -72,7 +85,7 @@ class ReaderTests(unittest.TestCase):
             "Content": "<p>" + ("测试正文。" * 200) + "</p>",
         }
         document = ReaderDocument(chapter, "https://example.test",
-                                  "C:/Windows/Fonts/simhei.ttf", MemoryConfig())
+                                  FONT_PATH, MemoryConfig())
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
         pages = document.prepare(draw, 800, 1000)
@@ -87,7 +100,7 @@ class ReaderTests(unittest.TestCase):
             "Content": "<p>" + ("测试正文。" * 300) + "</p>",
         }
         document = ReaderDocument(chapter, "https://example.test",
-                                  "C:/Windows/Fonts/simhei.ttf", MemoryConfig())
+                                  FONT_PATH, MemoryConfig())
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
         pages = document.prepare(draw, 300, 420)
@@ -95,6 +108,38 @@ class ReaderTests(unittest.TestCase):
         path, offset = document.first_anchor_on_page(2)
         self.assertEqual(document.page_for_path(path, offset), 2)
         self.assertEqual(document.page_for_path(path), 0)
+
+    def test_page_for_path_unknown_returns_none(self):
+        chapter = {
+            "Title": "测试",
+            "Font": None,
+            "Chapters": ["测试"],
+            "Content": "<p>一小段正文。</p>",
+        }
+        document = ReaderDocument(chapter, "https://example.test",
+                                  FONT_PATH, MemoryConfig())
+        document.prepare(ImageDraw.Draw(Image.new("L", (8, 8), 255)), 800, 1000)
+        self.assertIsNone(document.page_for_path("./p[999]", missing=None))
+
+    def test_file_url_image_is_dropped(self):
+        blocks = extract_blocks('<p>正文</p><img src="file:///etc/passwd">')
+        self.assertEqual([block.kind for block in blocks], ["text"])
+
+    def test_oversized_woff_table_is_rejected(self):
+        flavor = b"\x00\x01\x00\x00"
+        header = (b"wOFF" + flavor + struct.pack(">IHH", 0, 1, 0) +
+                  b"\0" * 28)
+        record = struct.pack(">4sIIII", b"AAAA", 64, 0, 20 * 1024 * 1024, 0)
+        path = APP_DIR / "build" / "oversized.woff"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(header + record + b"\0" * 20)
+            self.assertIsNone(normalize_font(path))
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     def test_woff1_rebuild_aligns_table_offsets(self):
         payloads = {
@@ -141,7 +186,7 @@ class ReaderTests(unittest.TestCase):
     def test_closing_punctuation_stays_on_previous_line(self):
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        font = ImageFont.truetype(FONT_PATH, 20)
         max_width = font.getlength("汉汉汉汉汉") + 1
         lines = wrap_line(draw, "汉汉汉汉汉。汉汉汉", font, max_width)
         self.assertEqual(lines[0], "汉汉汉汉汉。")
@@ -150,7 +195,7 @@ class ReaderTests(unittest.TestCase):
     def test_consecutive_closing_punctuation_moves_as_a_group(self):
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        font = ImageFont.truetype(FONT_PATH, 20)
         max_width = font.getlength("汉汉汉汉汉") + 1
         lines = wrap_line(draw, "汉汉汉汉汉。。”。汉汉", font, max_width)
         self.assertEqual(lines[0], "汉汉汉汉汉")
@@ -163,7 +208,7 @@ class ReaderTests(unittest.TestCase):
     def test_opening_punctuation_moves_to_next_line(self):
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        font = ImageFont.truetype(FONT_PATH, 20)
         max_width = font.getlength("汉汉汉汉“") + 1
         lines = wrap_line(draw, "汉汉汉汉“汉汉汉汉", font, max_width)
         self.assertEqual(lines[0], "汉汉汉汉")
@@ -172,7 +217,7 @@ class ReaderTests(unittest.TestCase):
     def test_consecutive_opening_punctuation_moves_as_a_group(self):
         image = Image.new("L", (8, 8), 255)
         draw = ImageDraw.Draw(image)
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 20)
+        font = ImageFont.truetype(FONT_PATH, 20)
         max_width = font.getlength("汉汉汉汉““") + 1
         lines = wrap_line(draw, "汉汉汉汉““汉汉汉汉", font, max_width)
         self.assertEqual(lines[0], "汉汉汉汉")
@@ -183,13 +228,13 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(blocks[0].text, "破折号测试文本。")
 
     def test_notdef_box_is_not_treated_as_available(self):
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 32)
+        font = ImageFont.truetype(FONT_PATH, 32)
         self.assertTrue(glyph_available(font, "中"))
         # 超出 Unicode 范围的探测字符必然映射到 .notdef
         self.assertFalse(glyph_available(font, "\U0010FFFF"))
 
     def test_cmap_probe_agrees_with_raster_fallback(self):
-        font = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 24)
+        font = ImageFont.truetype(FONT_PATH, 24)
         if cmap_available(font, "汉") is None:
             self.skipTest("libfreetype.so.6 unavailable on this host")
         for character in ["汉", "字", "。", "A", "1",
@@ -200,7 +245,7 @@ class ReaderTests(unittest.TestCase):
                 "cmap/raster mismatch for %r" % character)
 
     def test_cached_font_is_shared_across_resolvers(self):
-        path = "C:/Windows/Fonts/simhei.ttf"
+        path = FONT_PATH
         first = FontResolver(path)
         second = FontResolver(path)
         self.assertIs(first.system_font(20), second.system_font(20))

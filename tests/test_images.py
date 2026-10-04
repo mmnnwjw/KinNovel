@@ -64,6 +64,14 @@ class ImageCacheTests(unittest.TestCase):
         url = self.base + "/a.png?size=16x12&placeholder=x"
         self.assertNotEqual(self.cache._path(url, 512), self.cache._path(url, 1024))
 
+    def test_legacy_file_is_not_reported_as_size_variant(self):
+        url = self.base + "/legacy.png"
+        legacy = self.cache._path(url)
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("L", (20, 20), 0).save(legacy, "JPEG")
+        self.assertIsNotNone(self.cache.get(url, 512))
+        self.assertFalse(self.cache.is_cached(url, 512))
+
     def test_scaled_url_only_rewrites_system_images(self):
         url = self.base + "/a.png?size=16x12"
         self.assertEqual(system_image_size(url), (16, 12))

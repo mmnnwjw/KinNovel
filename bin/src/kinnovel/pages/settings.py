@@ -11,10 +11,10 @@ def render(ctx, canvas):
     margin = int(canvas.width * 0.05)
     y = top + 18
     # 行高随屏幕高度自适应,低分辨率设备(如 600x800)不溢出
-    row_count = 13
+    row_count = 14
     available = canvas.height - top - 30
-    gap = 14 if available >= 12 * 64 + 11 * 14 else 8
-    height = max(44, min(64, (available - gap * (row_count - 1)) // row_count))
+    gap = 14 if available >= 13 * 64 + 12 * 14 else 4
+    height = max(40, min(64, (available - gap * (row_count - 1)) // row_count))
 
     def row(label, value=None, action=None, progress=None):
         nonlocal y
@@ -75,6 +75,8 @@ def render(ctx, canvas):
     row("忽略日文", "开" if ctx.config.get("ignore_japanese") else "关", "ignore_japanese")
     row("忽略 AI", "开" if ctx.config.get("ignore_ai") else "关", "ignore_ai")
     row("预加载章节", "开" if ctx.config.get("prefetch_chapters") else "关", "prefetch")
+    row("详情页预热", "开" if ctx.config.get("prefetch_reading_target") else "关",
+        "prefetch_target")
     animation_supported = bool(
         getattr(ctx.screen.output, "supports_swipe_animation", False)
     )
@@ -124,6 +126,16 @@ def handle(data, ctx):
             key = mapping.get(action, action)
             ctx.config.set(key, not bool(ctx.config.get(key)))
             ctx.show()
+        elif action == "prefetch_target":
+            if ctx.config.get("prefetch_reading_target"):
+                ctx.config.set("prefetch_reading_target", False)
+                ctx.show()
+            else:
+                ctx.confirm(
+                    "开启后打开书籍详情会预取章节内容，可能产生额外阅读记录。确定开启？",
+                    lambda: (ctx.config.set("prefetch_reading_target", True),
+                             ctx.show()),
+                )
         elif action == "clear_cache":
             ctx.confirm("确认清空封面、正文和字体的磁盘缓存？", lambda: _clear(ctx))
         elif action == "account":

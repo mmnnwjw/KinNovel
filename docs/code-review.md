@@ -177,3 +177,31 @@ cmap     : 605 sample chars, 0 mismatch vs raster fallback
 render   : text page 128->13ms; image page 104->10ms; chrome toggle 21/13ms
 pixel    : old vs new pagination 0/41M diff; cached vs uncached 0 diff
 ```
+
+## Seventh review round (2026-10-04, v0.7.4)
+
+本轮完成一次全项目复审，并优先修复会影响日常阅读与设备稳定性的缺陷。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P1 | 书籍详情封面按固定 `height=512` 预取，渲染却按显示高度的尺寸桶读取；600×800、758×1024、1072×1448 等分辨率下封面永久空白。 | 预取与渲染统一使用 `height_bucket(cover_height)`，`cover()` 还能复用最接近的已缓存尺寸桶。 |
+| P1 | 阅读历史底部按 4 列排版 5 个按钮，“清空”越界且无法可靠点击。 | 按按钮数量计算列宽，并补齐 `count` 命中处理。 |
+| P1 | 弹窗高度按未换行行数计算，长错误信息溢出并压住按钮。 | 先换行再按真实行数计算高度，超过一屏时截断加省略号。 |
+| P1 | `start.sh` 的 mkdir 锁在写入 pid 前存在竞态，两个实例可能同时操作 framebuffer。 | 启动锁增加空 pid 重试与 `/proc` cmdline 校验，避免误删新锁和 PID 复用误判。 |
+| P1 | 打开书籍详情无条件预热目标章节，会在服务端产生额外阅读记录。 | 新增 `prefetch_reading_target` 设置（默认关闭，设置页开启前提示），关闭时不做任何章节预取。 |
+| P1 | 所有列表页从详情返回后都重置到第一页。 | `PageContext.returning` 区分返回与从主页新进入；书架/历史/排行/最近/系列/公告返回时保留页码。 |
+| P1 | `SignalRClient.invoke` 对所有传输错误自动重试，可能重复购买、签到或保存书架。 | 增加 `retry` 开关，`BuyShopItem`、`SignIn`、`SaveBookShelf`、`MarkNotifications`、`ClearReadHistory` 等非幂等方法不自动重试。 |
+| P2 | 截断 gzip 被静默接受；连接/发送阶段的 `OSError` 绕过重试。 | 校验 `decompressobj.eof`；建连和发送统一包装为 `TransportError` 以进入重试路径。 |
+| P2 | 正文图片未限制协议，`file://` 等地址会进入 `urlopen`；root-relative 路径拼接错误。 | 只接受 http/https 或相对地址；`absolute_url` 保留前导斜杠的站点根语义。 |
+| P2 | WOFF1 表目录的 `origLength` 无上限，伪造字体会诱导超大解压。 | 单表 16MB、总量 32MB 上限，超限直接拒绝。 |
+| P2 | 未知服务端 XPath 被当作第 0 页；本地进度不区分简繁转换。 | `page_for_path(..., missing=None)` 供进度恢复使用；本地进度文件名包含 convert。 |
+| P2 | 图片 worker 并发自增 `image_generation`，正文缓存被逐张图重复失效。 | 计数改到 UI 线程回调内执行。 |
+| P2 | `run_async` 每个操作新建无上限线程。 | 使用 6 槽信号量限制并发工作线程。 |
+
+验证（v0.7.4）：
+
+```text
+python -m unittest discover -s tests  -> Ran 133 tests, OK (skipped=2)
+python -m compileall -q bin            -> OK
+python tools/render_preview.py         -> home/browse/reader/settings/about OK
+```

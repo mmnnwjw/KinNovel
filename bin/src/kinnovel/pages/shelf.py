@@ -11,13 +11,15 @@ STATE = {
 
 def enter(ctx):
     if not ctx.api.user:
-        ctx.navigate("account")
+        ctx.replace("account")
         return
-    _load(ctx)
+    # 从主页/其他页面新进入时回到第一页；从书籍详情返回时保留页码。
+    _load(ctx, reset_page=not ctx.returning)
 
 
-def _load(ctx):
+def _load(ctx, reset_page=True):
     STATE["loading"] = True
+    reset_page = bool(reset_page)
 
     def operation():
         shelf = ctx.api.get_book_shelf()
@@ -42,7 +44,8 @@ def _load(ctx):
         STATE["items"] = items
         STATE["books"] = {int(book.get("Id")): book for book in books}
         STATE["visible"] = sorted(visible, key=lambda item: int(item.get("index") or 0))
-        STATE["page"] = 0
+        if reset_page:
+            STATE["page"] = 0
         STATE["loading"] = False
         STATE["loaded"] = True
 

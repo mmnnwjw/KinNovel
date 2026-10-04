@@ -42,7 +42,12 @@ def gunzip_limited(raw, limit=8 * 1024 * 1024):
     out = obj.decompress(raw, limit + 1)
     if len(out) > limit or obj.unconsumed_tail:
         raise TransportError("gzip 响应超过 8MB 上限")
-    return out + obj.flush()
+    out += obj.flush()
+    if not obj.eof:
+        raise TransportError("gzip 响应不完整")
+    if len(out) > limit:
+        raise TransportError("gzip 响应超过 8MB 上限")
+    return out
 
 
 class RateLimit:
@@ -85,61 +90,75 @@ class WebSocketConnection:
         if not host:
             raise TransportError("WebSocket URL 缺少主机")
         port = parsed.port or (443 if secure else 80)
-        raw = socket.create_connection((host, port), timeout=self.timeout)
-        if secure:
-            context = self.ssl_context
-            if context is None:
-                context = ssl.create_default_context()
-                try:
+        raw = None
+        try:
+            raw = socket.create_connection((host, port), timeout=self.timeout)
+            if secure:
+                context = self.ssl_context
+                if context is None:
+                    context = ssl.create_default_context()
                     context.check_hostname = True
                     context.verify_mode = ssl.CERT_REQUIRED
-                except ssl.SSLError as exc:
-                    raise TransportError("TLS 初始化失败: %s" % exc)
-            raw = context.wrap_socket(raw, server_hostname=host)
-        raw.settimeout(self.timeout)
-        self.sock = raw
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
-        headers = {
-            "Host": parsed.netloc,
-            "Upgrade": "websocket",
-            "Connection": "Upgrade",
-            "Sec-WebSocket-Key": key,
-            "Sec-WebSocket-Version": "13",
-            "User-Agent": "KinNovel/0.1",
-        }
-        headers.update(self.headers)
-        request = "GET %s HTTP/1.1\r\n" % path
-        request += "".join("%s: %s\r\n" % item for item in headers.items())
-        request += "\r\n"
-        raw.sendall(request.encode("ascii", "replace"))
-        response = b""
-        while b"\r\n\r\n" not in response:
-            chunk = raw.recv(4096)
-            if not chunk:
-                raise TransportError("WebSocket 握手连接被关闭")
-            response += chunk
-            if len(response) > 65536:
-                raise TransportError("WebSocket 握手响应过大")
-        header_end = response.find(b"\r\n\r\n")
-        if not response.startswith(b"HTTP/1.1 101") and not response.startswith(b"HTTP/1.0 101"):
-            first_line = response.split(b"\r\n", 1)[0].decode("latin1", "replace")
-            raise TransportError("WebSocket 握手失败: " + first_line)
-        expected = base64.b64encode(hashlib.sha1(
-            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
-        ).digest())
-        accept = b""
-        for line in response[:header_end].split(b"\r\n")[1:]:
-            if line.lower().startswith(b"sec-websocket-accept:"):
-                accept = line.split(b":", 1)[1].strip()
-                break
-        if accept != expected:
-            raise TransportError("WebSocket 握手校验失败: Sec-WebSocket-Accept 不匹配")
-        if header_end >= 0:
-            self._buffer.extend(response[header_end + 4:])
-        return self
+                raw = context.wrap_socket(raw, server_hostname=host)
+            raw.settimeout(self.timeout)
+            self.sock = raw
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            headers = {
+                "Host": parsed.netloc,
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Key": key,
+                "Sec-WebSocket-Version": "13",
+                "User-Agent": "KinNovel/0.1",
+            }
+            headers.update(self.headers)
+            request = "GET %s HTTP/1.1\r\n" % path
+            request += "".join("%s: %s\r\n" % item for item in headers.items())
+            request += "\r\n"
+            raw.sendall(request.encode("ascii", "replace"))
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = raw.recv(4096)
+                if not chunk:
+                    raise TransportError("WebSocket 握手连接被关闭")
+                response += chunk
+                if len(response) > 65536:
+                    raise TransportError("WebSocket 握手响应过大")
+            header_end = response.find(b"\r\n\r\n")
+            if not response.startswith(b"HTTP/1.1 101") and not response.startswith(b"HTTP/1.0 101"):
+                first_line = response.split(b"\r\n", 1)[0].decode("latin1", "replace")
+                raise TransportError("WebSocket 握手失败: " + first_line)
+            expected = base64.b64encode(hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+            ).digest())
+            accept = b""
+            for line in response[:header_end].split(b"\r\n")[1:]:
+                if line.lower().startswith(b"sec-websocket-accept:"):
+                    accept = line.split(b":", 1)[1].strip()
+                    break
+            if accept != expected:
+                raise TransportError("WebSocket 握手校验失败: Sec-WebSocket-Accept 不匹配")
+            if header_end >= 0:
+                self._buffer.extend(response[header_end + 4:])
+            return self
+        except OSError as exc:
+            self._fail_connect(raw)
+            raise TransportError("WebSocket 连接失败: %s" % exc)
+        except TransportError:
+            self._fail_connect(raw)
+            raise
+
+    def _fail_connect(self, raw):
+        socket_ = raw if raw is not None else self.sock
+        if socket_ is not None:
+            try:
+                socket_.close()
+            except OSError:
+                pass
+        self.sock = None
 
     def _recv_exact(self, count):
         chunks = []
@@ -333,7 +352,11 @@ class SignalRClient:
             timeout=self.timeout,
             ssl_context=self._ssl_context(),
         ).connect()
-        socket_.send_text('{"protocol":"json","version":1}' + self.RECORD_SEPARATOR)
+        try:
+            socket_.send_text('{"protocol":"json","version":1}' + self.RECORD_SEPARATOR)
+        except OSError as exc:
+            socket_.close()
+            raise TransportError("SignalR 握手发送失败: %s" % exc)
         deadline = time.monotonic() + self.timeout
         try:
             while time.monotonic() < deadline:
@@ -415,8 +438,13 @@ class SignalRClient:
     def _invoke_once(self, invocation, method, timeout):
         with self._lock:
             self._ensure_connected_locked()
-            self._socket.send_text(json.dumps(invocation, ensure_ascii=False, separators=(",", ":"))
-                                   + self.RECORD_SEPARATOR)
+            try:
+                self._socket.send_text(
+                    json.dumps(invocation, ensure_ascii=False,
+                               separators=(",", ":")) + self.RECORD_SEPARATOR)
+            except OSError as exc:
+                self._close_locked()
+                raise TransportError("Hub 调用发送失败: %s" % exc)
             self._last_used = time.monotonic()
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -449,9 +477,8 @@ class SignalRClient:
                         return self._decode_response(self._envelope_value(envelope, "response"))
             raise TransportError("Hub 调用超时: " + method)
 
-    def invoke(self, method, params=None, use_gzip=True, timeout=None):
+    def invoke(self, method, params=None, use_gzip=True, timeout=None, retry=True):
         timeout = timeout or min(self.timeout * 2, 25)
-        self.rate_limit.wait()
         invocation_id = uuid.uuid4().hex
         invocation = {
             "type": 1,
@@ -460,7 +487,9 @@ class SignalRClient:
             "arguments": [params or {}, {"UseGzip": bool(use_gzip)}],
         }
         last_error = None
-        for attempt in range(2):
+        attempts = 2 if retry else 1
+        for attempt in range(attempts):
+            self.rate_limit.wait()
             try:
                 return self._invoke_once(invocation, method, timeout)
             except ApiError:
@@ -469,7 +498,7 @@ class SignalRClient:
                 last_error = exc
                 with self._lock:
                     self._close_locked()
-                if attempt == 0:
+                if attempt + 1 < attempts:
                     time.sleep(1.0)
                     continue
                 raise

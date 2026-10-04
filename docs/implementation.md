@@ -20,6 +20,10 @@
 | `kinnovel/ui.py` | framebuffer canvas, list/dialog widgets, navigation, image cache |
 | `kinnovel/pages/` | home, catalogue, search, book detail, reader, shelf, account and settings pages |
 
+`bin/image_worker.py` is a legacy standalone helper kept for compatibility; the
+active image pipeline is the bounded worker pool and priority queue inside
+`kinnovel/ui.py`.
+
 ## Data flow
 
 ### Login
@@ -49,11 +53,16 @@ The response may be a JSON object or a base64-encoded gzip JSON byte array.
 1. Parses a safe HTML subset.
 2. Downloads and loads `Chapter.Font`.
 3. Measures and wraps text with that exact Pillow font.
-4. Creates page command lists.
+4. Builds `ReaderDocument.pages`, a list of per-page item dicts
+   (`text`/`image` entries with position, font, path and offset).
 5. Maps the current page back to a relative XPath for `SaveReadPosition`.
 
 The screen renders one page of text/images at a time. Page turns are local;
 crossing the first or last page switches chapters.
+
+Opening a book detail page does not prefetch chapter content by default.
+`prefetch_reading_target` (Settings: "详情页预热") must be enabled explicitly
+because the server may record the request as a reading event.
 
 ### Shelf
 
@@ -61,6 +70,12 @@ The client reads the server's flat shelf array. Folders are selected through
 the `parents` path. Adding/removing books and creating/deleting folders rewrites
 the array and calls `SaveBookShelf`. `index` is normalized locally on creation;
 the server remains the source of truth.
+
+### List page position
+
+`PageContext.returning` is true only when `enter()` runs because the user pressed
+back. List pages (shelf, history, rank, browse, series and announcements) use it
+to keep the previous page; a fresh navigation from home resets to page one.
 
 ## Implemented API families
 
@@ -92,8 +107,9 @@ python tools/render_preview.py
 python -m compileall -q bin
 ```
 
-The render tool produces `build/previews/home.png`, `browse.png` and
-`reader.png` using a fake screen; it does not require `/dev/fb0`.
+The render tool produces `build/previews/home.png`, `browse.png`, `reader.png`,
+`settings.png` and `about.png` using a fake screen; it does not require
+`/dev/fb0`.
 
 Authenticated live tests are kept separate because they use credentials and
 must be rate-limited:

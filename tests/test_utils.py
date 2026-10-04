@@ -16,6 +16,14 @@ from kinnovel.utils import atomic_write, read_json
 
 
 class UtilityTests(unittest.TestCase):
+    def test_absolute_url_keeps_root_relative_paths(self):
+        self.assertEqual(
+            utils.absolute_url("https://api.example.com/v1", "/img/a.png"),
+            "https://api.example.com/img/a.png")
+        self.assertEqual(
+            utils.absolute_url("https://api.example.com/v1", "img/a.png"),
+            "https://api.example.com/v1/img/a.png")
+
     def test_atomic_json_roundtrip(self):
         root = APP_DIR / "build"
         path = root / "test-data.json"

@@ -32,13 +32,14 @@ def _chapter_lock(book_id, sort_num, convert):
         return lock
 
 
-def _progress_path(book_id, sort_num):
-    return CACHE_DIR / "progress" / ("%s-%s.json" % (
-        int(book_id), int(sort_num)))
+def _progress_path(book_id, sort_num, convert=None):
+    suffix = "" if not convert else "-" + str(convert)
+    return CACHE_DIR / "progress" / ("%s-%s%s.json" % (
+        int(book_id), int(sort_num), suffix))
 
 
-def _load_progress(book_id, sort_num):
-    progress = read_json(_progress_path(book_id, sort_num))
+def _load_progress(book_id, sort_num, convert=None):
+    progress = read_json(_progress_path(book_id, sort_num, convert))
     if not isinstance(progress, dict):
         return None
     path = progress.get("path")
@@ -102,11 +103,12 @@ def _image_ready(ctx, url, ok=True):
     """图片到达后只刷新当前页上该插图所在矩形，避免整屏重绘。"""
     if not ok:
         return
-    STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
 
     def apply():
         if ctx.page_name != "reader" or STATE.get("fullscreen_image"):
             return
+        # 只在 UI 线程递增, 避免多个图片 worker 并发自增丢计数。
+        STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
         region = _visible_image_region(ctx, url)
         if region is not None:
             ctx.show(region=region)
@@ -116,10 +118,10 @@ def _image_ready(ctx, url, ok=True):
 def _fullscreen_ready(ctx, url, ok=True):
     if not ok:
         return
-    STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
 
     def apply():
         if ctx.page_name == "reader" and STATE.get("fullscreen_image") == url:
+            STATE["image_generation"] = int(STATE.get("image_generation") or 0) + 1
             ctx.show()
     ctx.post(apply)
 
@@ -422,7 +424,7 @@ def enter(ctx):
         if chapter.get("Font") and not document.font_resolver.custom_font_loaded:
             ctx.toast("章节字体加载失败，正文可能显示异常")
         position = response.get("ReadPosition") or {}
-        local = _load_progress(book_id, sort_num)
+        local = _load_progress(book_id, sort_num, ctx.config.get("convert"))
         if at_last:
             STATE["page"] = max(0, document.page_count - 1)
         elif fresh:
@@ -430,10 +432,12 @@ def enter(ctx):
         else:
             server_page = None
             if int(position.get("ChapterId") or 0) == int(chapter.get("Id") or 0):
-                server_page = document.page_for_path(position.get("Position") or "")
+                server_page = document.page_for_path(
+                    position.get("Position") or "", missing=None)
             local_page = None
             if local:
-                local_page = document.page_for_path(local["path"], local["offset"])
+                local_page = document.page_for_path(
+                    local["path"], local["offset"], missing=None)
             # 多端进度取最远页，避免本机旧缓存覆盖其他设备的新进度
             candidates = [p for p in (server_page, local_page) if p is not None]
             STATE["page"] = max(candidates) if candidates else 0
@@ -469,7 +473,7 @@ def _save_progress(ctx):
     path, offset = STATE["doc"].first_anchor_on_page(page)
     try:
         atomic_write(
-            _progress_path(book_id, STATE["sort_num"]),
+            _progress_path(book_id, STATE["sort_num"], ctx.config.get("convert")),
             json.dumps(
                 {"path": path, "offset": offset, "page": page},
                 ensure_ascii=False,

@@ -1,5 +1,10 @@
 # Kindle 版轻书架架构方案
 
+> 说明：本文是最初的整体设计方案，部分规划（MessagePack Hub、示例目录结构、
+> 统一 AppEvent 队列、dirty region 刷新等）**尚未按原样落地**。当前实现以
+> `docs/implementation.md` 和 `bin/src/kinnovel/` 为准：实际使用 SignalR JSON Hub
+> 加 base64+gzip 响应，目录结构为 `bin/src/kinnovel` 与 `bin/src/screen`。
+
 ## 0. 目标、结论与明确排除范围
 
 目标是做一个运行在越狱 Kindle 5.16.3+、Python 3.14 环境中的前台应用，尽量贴近 kComics 已验证的技术路线：`/dev/fb0` + EPDC ioctl + Pillow 灰阶渲染 + evdev 触控 + SQLite/文件缓存。业务上优先实现小说首页、分类、排行、搜索、详情、章节目录、正文阅读、进度同步和书架；之后再按收益补公告、通知、评论、签到/积分、私信、商城和漫画在线阅读。

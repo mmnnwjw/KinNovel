@@ -10,14 +10,16 @@ STATE = {
 
 
 def enter(ctx):
-    _load(ctx)
+    # 从主页/其他页面新进入时回到第一页；从书籍详情返回时保留页码。
+    _load(ctx, reset_page=not ctx.returning)
 
 
-def _load(ctx):
+def _load(ctx, reset_page=True):
     STATE["loading"] = True
     STATE["error"] = ""
     STATE["generation"] += 1
     generation = STATE["generation"]
+    reset_page = bool(reset_page)
 
     def operation():
         history = ctx.api.get_read_history() or {}
@@ -30,7 +32,8 @@ def _load(ctx):
         if generation != STATE["generation"]:
             return
         STATE["items"] = result
-        STATE["page"] = 0
+        if reset_page:
+            STATE["page"] = 0
         STATE["loading"] = False
         STATE["loaded"] = True
         STATE["error"] = ""
@@ -76,7 +79,6 @@ def render(ctx, canvas):
                     fill=canvas.theme.muted)
     bottom_y = canvas.height - 68
     gap = 8
-    width = (canvas.width - 2 * margin - gap * 3) // 4
     buttons = [
         ("prev", "上一页", STATE["page"] > 0),
         ("count", "%s/%s" % (STATE["page"] + 1, pages), True),
@@ -84,6 +86,7 @@ def render(ctx, canvas):
         ("retry", "重试", bool(STATE["error"])),
         ("clear", "清空", bool(items)),
     ]
+    width = (canvas.width - 2 * margin - gap * (len(buttons) - 1)) // len(buttons)
     for index, (action, label, enabled) in enumerate(buttons):
         rect = (margin + index * (width + gap), bottom_y, width, 52)
         canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
@@ -105,7 +108,7 @@ def handle(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    for key in (("prev", 0), ("next", 0), ("retry", 0), ("clear", 0)):
+    for key in (("prev", 0), ("count", 0), ("next", 0), ("retry", 0), ("clear", 0)):
         rect = STATE["rects"].get(key)
         if not rect:
             continue
@@ -117,6 +120,8 @@ def handle(data, ctx):
             if key[0] == "clear":
                 if STATE["items"]:
                     ctx.confirm("确认清空阅读历史？", lambda: _clear(ctx))
+                return
+            if key[0] == "count":
                 return
             row_height = max(76, int(ctx.height * 0.063))
             top = max(72, int(ctx.height * 0.085))

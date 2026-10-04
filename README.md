@@ -19,7 +19,9 @@ KinNovel 是面向已越狱 Kindle 的轻书架（LightNovelShelf）小说阅读
 应用直接使用 Kindle framebuffer、EPDC 刷新和 evdev 触摸输入，不依赖浏览器、
 Qt 或桌面环境。
 
-当前版本：[`0.7.3`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.3)
+当前版本仅支持小说：书架、阅读历史、排行榜与最近/分类都会过滤漫画。
+
+当前版本：[`0.7.4`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.4)
 
 ## 界面预览
 
@@ -58,6 +60,7 @@ Qt 或桌面环境。
 
 | 模块 | 支持内容 |
 |---|---|
+| 内容范围 | 仅小说；书架、阅读历史、排行榜与最近/分类均不显示漫画 |
 | 账号 | 从 `config.json` 读取账号并自动登录；自动刷新访问令牌 |
 | 首页 | 书架、阅读历史、排行榜、最近/分类、账号、设置、关于和退出 |
 | 首页配置 | 使用 `home_order` 隐藏模块并调整左右、上下顺序 |
@@ -69,7 +72,7 @@ Qt 或桌面环境。
 | 缓存 | 打开书籍详情时后台预热目标章节；章节正文磁盘缓存与离线回退；可选预加载前后各一章 |
 | 排版 | 自动分页、字号、行距、首行缩进、标点禁则、简繁转换和夜间模式 |
 | 字体 | 内置 WOFF2 FreeType 运行时；加载章节字体；缺失字形自动使用系统字体补足 |
-| 图片 | 正文插图、按用途请求服务端缩放图、按页窗口预取、点击全屏预览与再次点击退出 |
+| 图片 | 正文插图、按用途请求服务端缩放图、当前页优先加载与按页窗口预取、失败自动重试、点击全屏预览与再次点击退出 |
 | 书架 | 多层文件夹、翻页、加入书架、移出书架和删除文件夹 |
 | 账号功能 | 个人资料、签到、通知、公告、评论浏览和商城 |
 | 显示 | MTK、Rex、Zelda 与 MXCFB 多机型 EPDC 自动探测输出、多分辨率界面适配、原屏快照恢复和系统进程暂停/恢复 |
@@ -93,7 +96,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 [`KinNovel-v0.7.3.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.3/KinNovel-v0.7.3.zip)。
+1. 下载 Release 中的 [`KinNovel-v0.7.4.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.4/KinNovel-v0.7.4.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -177,6 +180,8 @@ Git，也不要分享带有真实凭据的 `config.json`。
   "convert": null,
   "ignore_japanese": false,
   "ignore_ai": false,
+  "prefetch_chapters": false,
+  "prefetch_reading_target": false,
   "request_limit": 9,
   "request_window_ms": 5500,
   "cache_limit_mb": 192,
@@ -228,9 +233,10 @@ Git，也不要分享带有真实凭据的 `config.json`。
 | `reader_margin` | 正文左右边距，单位像素 | `34` |
 | `font_path` | Kindle 系统中文字体 | `/usr/java/lib/fonts/STHeitiMedium.ttf` |
 | `first_line_indent` | 首行缩进 | `true` |
-| `justify` | 两端对齐 | `false` |
+| `justify` | 两端对齐（预留项，当前版本尚未生效） | `false` |
 | `convert` | 简繁转换：`null`、`t2s`、`s2t` | `null` |
 | `prefetch_chapters` | 预加载前后各一章的正文与字体；章节正文始终写入磁盘缓存，离线时自动回退 | `false` |
+| `prefetch_reading_target` | 打开书籍详情时后台预热目标章节。开启后服务端可能因此产生额外阅读记录，默认关闭 | `false` |
 | `ignore_japanese` | 列表过滤日文作品 | `false` |
 | `ignore_ai` | 列表过滤 AI 作品 | `false` |
 | `reader_guide_dismissed` | 是否不再显示阅读页操作指引 | `false` |
@@ -322,6 +328,11 @@ Git，也不要分享带有真实凭据的 `config.json`。
 - 在第 N 章首屏继续向左：进入第 N-1 章最后一页。
 - 从章节目录点选章节：从该章第一页开始。
 
+### 列表导航
+
+- 从书架、阅读历史、排行榜、最近/分类或系列列表进入书籍详情后，返回时会保留原来的页码。
+- 从主页重新进入这些列表页时回到第一页。
+
 ### 书架
 
 - 点击文件夹：进入下一层。
@@ -340,8 +351,9 @@ LightNovelShelf 会为章节返回专用字体。阅读器必须同时使用该�
 font-family: read, sans-serif !important;
 ```
 
-Pillow 不会自动进行 CSS 字体回退。KinNovel 会逐字检测字形，章节字体缺少或
-轮廓为空时，仅对该字符使用 `font_path` 指定的系统字体。
+Pillow 不会自动进行 CSS 字体回退。KinNovel 会逐字查询字体的 cmap 覆盖表，
+章节字体缺少该字时，仅对该字符使用 `font_path` 指定的系统字体；当字体库
+不可用时，回退到逐字栅格化判断。
 
 WOFF2 章节字体需要支持 Brotli 的 FreeType。Release 包内置了：
 

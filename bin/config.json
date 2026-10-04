@@ -17,6 +17,7 @@
   "convert": null,
   "ignore_japanese": false,
   "ignore_ai": false,
+  "prefetch_reading_target": false,
   "request_limit": 9,
   "request_window_ms": 5500,
   "cache_limit_mb": 192,

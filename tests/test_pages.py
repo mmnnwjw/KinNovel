@@ -1,11 +1,21 @@
 import time
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageFont
 
 from kinnovel.pages import account, announcements, book, browse, history, home, rank, reader, series, settings, shelf
-from kinnovel.ui import ImageCache, PageContext
+from kinnovel.ui import Canvas, ImageCache, PageContext, Theme, height_bucket
+
+
+FONT_PATH = next((path for path in (
+    "C:/Windows/Fonts/simhei.ttf",
+    "/usr/java/lib/fonts/STHeitiMedium.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+) if Path(path).exists()), "")
 
 
 class Output:
@@ -32,10 +42,12 @@ class Config:
             "page_flash": False,
             "page_turn_animation": True,
             "strict_tls": False,
-            "font_path": "C:/Windows/Fonts/simhei.ttf",
+            "font_path": FONT_PATH,
             "convert": None,
             "ignore_japanese": False,
             "ignore_ai": False,
+            "prefetch_chapters": False,
+            "prefetch_reading_target": False,
             "home_order": {
                 "shelf": 0,
                 "history": 1,
@@ -90,6 +102,8 @@ class App:
 
 class PageSmokeTests(unittest.TestCase):
     def setUp(self):
+        if not FONT_PATH:
+            self.skipTest("no CJK test font available")
         self.context = PageContext(App())
         for name, module in {
             "home": home,
@@ -160,7 +174,7 @@ class PageSmokeTests(unittest.TestCase):
         self.assertEqual(reader.STATE["page"], 5)
         self.assertNotIn("at_last", self.context.params)
 
-    def test_book_prefetches_server_reading_target(self):
+    def test_book_prefetch_reading_target_requires_setting(self):
         class ImmediateContext:
             config = self.context.config
             api = self.context.api
@@ -184,7 +198,11 @@ class PageSmokeTests(unittest.TestCase):
         context = ImmediateContext()
         with patch("kinnovel.pages.reader.prefetch_chapter") as prefetch:
             book._prefetch_reading_target(context, info)
+            prefetch.assert_not_called()
+            context.config.values["prefetch_reading_target"] = True
+            book._prefetch_reading_target(context, info)
         prefetch.assert_called_once_with(context, 1, 10)
+        context.config.values["prefetch_reading_target"] = False
 
     def test_book_series_button_opens_series_page(self):
         book.STATE.update({
@@ -864,6 +882,112 @@ class PageSmokeTests(unittest.TestCase):
         self.context.register("browse", browse)
         self.context.page_name = "browse"
         self.context.render()
+
+    def test_back_marks_page_as_returning(self):
+        seen = []
+
+        class Probe:
+            @staticmethod
+            def enter(context):
+                seen.append(context.returning)
+
+            @staticmethod
+            def render(_context, _canvas):
+                return None
+
+            @staticmethod
+            def handle(_data, _context):
+                return None
+
+        self.context.register("listprobe", Probe)
+        self.context.register("detailprobe", Probe)
+        self.context.page_name = "listprobe"
+        self.context.navigate("detailprobe")
+        self.assertIs(seen[-1], False)
+        self.context.back()
+        self.assertIs(seen[-1], True)
+
+    def test_list_pages_reset_only_on_fresh_entry(self):
+        browse.STATE["categories"] = [{"Name": "全部", "Id": 1}]
+        browse.STATE["page"] = 3
+        self.context._returning = False
+        with patch.object(browse, "_load") as load:
+            browse.enter(self.context)
+        load.assert_called_once_with(self.context, 1)
+        self.context._returning = True
+        with patch.object(browse, "_load") as load:
+            browse.enter(self.context)
+        load.assert_called_once_with(self.context, 3)
+        self.context._returning = False
+
+        with patch.object(rank, "_load") as load:
+            rank.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=True)
+        self.context._returning = True
+        with patch.object(rank, "_load") as load:
+            rank.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=False)
+        self.context._returning = False
+
+        with patch.object(history, "_load") as load:
+            history.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=True)
+        self.context._returning = True
+        with patch.object(history, "_load") as load:
+            history.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=False)
+        self.context._returning = False
+
+        with patch.object(shelf, "_load") as load:
+            shelf.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=True)
+        self.context._returning = True
+        with patch.object(shelf, "_load") as load:
+            shelf.enter(self.context)
+        load.assert_called_once_with(self.context, reset_page=False)
+        self.context._returning = False
+
+    def test_history_buttons_stay_inside_screen(self):
+        history.STATE.update({
+            "items": [{"Id": 1, "Title": "书", "UserName": "作者"}],
+            "page": 0,
+            "error": "",
+            "loaded": True,
+            "loading": False,
+        })
+        canvas = Canvas(Image.new("L", (1072, 1448), 255),
+                        self.context.fonts, Theme(False))
+        history.render(self.context, canvas)
+        for key in (("prev", 0), ("count", 0), ("next", 0),
+                    ("retry", 0), ("clear", 0)):
+            rx, ry, width, height = history.STATE["rects"][key]
+            self.assertGreaterEqual(rx, 0)
+            self.assertLessEqual(rx + width, canvas.width)
+            self.assertLessEqual(ry + height, canvas.height)
+
+    def test_popup_long_text_stays_inside_screen(self):
+        canvas = Canvas(Image.new("L", (1072, 1448), 255),
+                        self.context.fonts, Theme(False))
+        rects = canvas.popup(["很长的错误信息" * 60], ["确定"])
+        _label, (bx, by, width, height) = rects[0]
+        self.assertGreaterEqual(bx, 0)
+        self.assertGreaterEqual(by, 0)
+        self.assertLessEqual(bx + width, canvas.width)
+        self.assertLessEqual(by + height, canvas.height)
+
+    def test_cover_reuses_nearest_cached_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+                "kinnovel.ui.CACHE_DIR", Path(tmp)):
+            cache = ImageCache(workers=1)
+            try:
+                path = cache._path("https://example.test/cover", 512)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("L", (64, 64), 128).save(path, "JPEG")
+                result = cache.cover("https://example.test/cover", 100, 140)
+                self.assertIsNotNone(result)
+                self.assertEqual(result.size, (100, 140))
+            finally:
+                cache.close()
 
 
 if __name__ == "__main__":

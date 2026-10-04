@@ -28,16 +28,43 @@ elif [ -f "$KOREADER_FREETYPE" ]; then
 fi
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
-  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "KinNovel is already running as pid $OLD_PID." >> "$LOG_FILE"
-    exit 1
-  fi
-  rm -rf "$LOCK_DIR"
-  mkdir "$LOCK_DIR" 2>/dev/null || exit 1
-fi
-echo $$ > "$LOCK_DIR/pid"
+
+lock_owner_alive() {
+  pid=$1
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # PID 可能被复用; 只认确实是本应用的进程。
+  grep -q -E 'start\.sh|app\.py' "/proc/$pid/cmdline" 2>/dev/null
+}
+
+acquire_lock() {
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo $$ > "$LOCK_DIR/pid"
+      return 0
+    fi
+    OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if lock_owner_alive "$OLD_PID"; then
+      echo "KinNovel is already running as pid $OLD_PID." >> "$LOG_FILE"
+      return 1
+    fi
+    # 第二个启动进程可能在 mkdir 成功但 pid 尚未写入的窗口内看见空文件。
+    # 等一秒再判断, 避免把刚创建的新锁误当成 stale lock 删除。
+    sleep 1
+    OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if lock_owner_alive "$OLD_PID"; then
+      echo "KinNovel is already running as pid $OLD_PID." >> "$LOG_FILE"
+      return 1
+    fi
+    rm -rf "$LOCK_DIR"
+  done
+  echo "KinNovel could not acquire its lock." >> "$LOG_FILE"
+  return 1
+}
+
+acquire_lock || exit 1
 
 log() {
   echo "[launcher] $*" >> "$LOG_FILE"
@@ -104,7 +131,7 @@ on_exit() {
 
 trap 'on_exit' INT TERM EXIT
 
-: > "$LOG_FILE"
+touch "$LOG_FILE" 2>/dev/null || true
 log "starting KinNovel"
 pause_fb_users
 save_snapshot

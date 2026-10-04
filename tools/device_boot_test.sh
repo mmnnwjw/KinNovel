@@ -3,7 +3,7 @@
 # 用法: device_boot_test.sh [wait_seconds]
 set -e
 
-APP=/mnt/us/extensions/KinNovel
+APP=${KINNOVEL_APP:-/mnt/us/extensions/kinnovel}
 WAIT=${1:-15}
 
 rm -rf /tmp/kinnovel.lock
@@ -17,7 +17,7 @@ for p in /proc/[0-9]*; do
     *python3.14*)
       c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null || true)
       case "$c" in
-        *KinNovel/bin/app.py*) PID=${p#/proc/}; break ;;
+        *kinnovel/bin/app.py*|*KinNovel/bin/app.py*) PID=${p#/proc/}; break ;;
       esac
       ;;
   esac

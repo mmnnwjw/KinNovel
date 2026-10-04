@@ -5,6 +5,7 @@ import re
 import struct
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
@@ -137,7 +138,7 @@ def extract_blocks(content, base_url=""):
                     base_url,
                     child.get("src") or child.get("data-system-image-url") or "",
                 )
-                if src:
+                if urllib.parse.urlsplit(src).scheme.lower() in ("", "http", "https"):
                     try:
                         image_width = max(0, int(child.get("width") or 0))
                     except (TypeError, ValueError):
@@ -156,7 +157,8 @@ def extract_blocks(content, base_url=""):
             elif tag in BLOCK_TAGS:
                 offset = flush_text(buffer, offset, kind, level, path)
                 child_kind = ("heading" if tag in HEADING_TAGS else
-                              ("footnote" if tag == "aside" else "text"))
+                              ("footnote" if tag == "aside" or kind == "footnote"
+                               else "text"))
                 child_level = int(tag[1]) if child_kind == "heading" else 0
                 child_path = _relative_xpath(child, root)
                 child_offset = append_node(
@@ -185,6 +187,8 @@ def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
     if not font_url:
         return ""
     url = absolute_url(base_url, font_url)
+    if urllib.parse.urlsplit(url).scheme.lower() not in ("", "http", "https"):
+        return ""
     suffix = ""
     if "." in url.split("?", 1)[0].rsplit("/", 1)[-1]:
         suffix = "." + url.split("?", 1)[0].rsplit(".", 1)[-1].lower()
@@ -218,6 +222,10 @@ def ensure_font(font_url, base_url, timeout=30, strict_tls=False):
         return ""
 
 
+_MAX_WOFF_TABLE_BYTES = 16 * 1024 * 1024
+_MAX_WOFF_TOTAL_BYTES = 32 * 1024 * 1024
+
+
 def normalize_font(path):
     """Convert an uncompressed-table WOFF1 container to TTF/OTF for Pillow."""
     path = __import__("pathlib").Path(path)
@@ -235,11 +243,14 @@ def normalize_font(path):
         if num_tables <= 0 or num_tables > 128 or len(data) < 44 + num_tables * 20:
             return None
         tables = []
+        total_bytes = 0
         for index in range(num_tables):
             offset = 44 + index * 20
             tag, table_offset, compressed_length, original_length, checksum = struct.unpack(
                 ">4sIIII", data[offset:offset + 20])
             if table_offset + compressed_length > len(data):
+                return None
+            if original_length > _MAX_WOFF_TABLE_BYTES:
                 return None
             payload = data[table_offset:table_offset + compressed_length]
             if compressed_length < original_length:
@@ -256,6 +267,9 @@ def normalize_font(path):
                 remaining = original_length + 1 - len(payload)
                 payload += decompressor.flush(max(1, remaining))
             if len(payload) != original_length:
+                return None
+            total_bytes += len(payload)
+            if total_bytes > _MAX_WOFF_TOTAL_BYTES:
                 return None
             tables.append((tag, checksum, payload))
         tables.sort(key=lambda item: item[0])
@@ -665,10 +679,11 @@ class ReaderDocument:
             y = 0
 
         def add_line(text, font=None, fallback_font=None, indent=False,
-                     gap_before=0, gap_after=0, base_offset=0):
+                     gap_before=0, gap_after=0, base_offset=0, anchor_path=None):
             nonlocal y, current
             font = font or self.body_font
             fallback_font = fallback_font or self.body_fallback
+            page_path = path if anchor_path is None else anchor_path
             # 标题等大字号行使用自身行高,避免与正文行高不一致导致重叠
             actual_height = max(line_height, int(
                 getattr(font, "size", 28) * float(self.config.get("line_spacing") or 1.42)))
@@ -689,7 +704,7 @@ class ReaderDocument:
                     "font": font,
                     "fallback_font": fallback_font,
                     "size": getattr(font, "size", 28),
-                    "path": path,
+                    "path": page_path,
                     "offset": base_offset + max(0, line_start - len(prefix)),
                 })
                 y += actual_height
@@ -742,19 +757,20 @@ class ReaderDocument:
                          base_offset=block.offset)
         if footnote_lines:
             add_line("注释", font=self.small_font,
-                     fallback_font=self.small_fallback, gap_before=heading_gap)
+                     fallback_font=self.small_fallback, gap_before=heading_gap,
+                     anchor_path=footnote_lines[0][1])
             for text, path, offset in footnote_lines:
                 add_line(text, font=self.small_font,
                          fallback_font=self.small_fallback,
                          gap_after=int(line_height * 0.15),
-                         base_offset=offset)
+                         base_offset=offset, anchor_path=path)
         if current or not pages:
             pages.append(current)
         return pages
 
-    def page_for_path(self, xpath, offset=None):
+    def page_for_path(self, xpath, offset=None, missing=0):
         if not xpath:
-            return 0
+            return missing
         if offset is not None:
             try:
                 target_offset = int(offset)
@@ -780,11 +796,11 @@ class ReaderDocument:
                     return best_page
                 if first_page is not None:
                     return first_page
-                return 0
+                return missing
         for index, page in enumerate(self.pages):
             if any(item.get("path") == xpath for item in page):
                 return index
-        return 0
+        return missing
 
     def first_anchor_on_page(self, page_index):
         if not self.pages:

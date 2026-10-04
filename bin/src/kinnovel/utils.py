@@ -81,7 +81,9 @@ def absolute_url(base, value):
         return ""
     if value.startswith(("http://", "https://")):
         return value
-    return urllib.parse.urljoin(base.rstrip("/") + "/", value.lstrip("/"))
+    # 保留 root-relative 前导斜杠的语义: /img/a.png 应解析到站点根, 而不是
+    # 拼到 API 的当前路径下面。
+    return urllib.parse.urljoin(base.rstrip("/") + "/", value)
 
 
 def format_time(value):

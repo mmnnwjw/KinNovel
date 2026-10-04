@@ -139,6 +139,21 @@ class TransportTests(unittest.TestCase):
             client.invoke("GetMyInfo")
         self.assertEqual(len(calls), 1)
 
+    def test_api_client_marks_non_idempotent_methods(self):
+        client = ApiClient.__new__(ApiClient)
+        hub = mock.Mock()
+        hub.invoke.return_value = {"ok": True}
+        client.hub = hub
+
+        self.assertEqual(client.invoke("BuyShopItem", {"Key": "x"}), {"ok": True})
+        hub.invoke.assert_called_once_with(
+            "BuyShopItem", {"Key": "x"}, retry=False)
+
+        hub.reset_mock()
+        hub.invoke.return_value = {"ok": True}
+        self.assertEqual(client.invoke("GetMyInfo", {}), {"ok": True})
+        hub.invoke.assert_called_once_with("GetMyInfo", {}, retry=True)
+
     def test_api_401_refreshes_closes_hub_and_retries(self):
         client = ApiClient.__new__(ApiClient)
         calls = []
@@ -151,7 +166,7 @@ class TransportTests(unittest.TestCase):
         client.session = Session()
         hub = mock.Mock()
 
-        def invoke(method, params):
+        def invoke(method, params, **kwargs):
             calls.append("invoke")
             if sum(item == "invoke" for item in calls) == 1:
                 raise ApiError("unauthorized", 401)
@@ -176,6 +191,25 @@ class TransportTests(unittest.TestCase):
         ])
         self.assertEqual(hub.invoke.call_count, 2)
         self.assertEqual(hub.close.call_count, 1)
+
+    def test_truncated_gzip_is_rejected(self):
+        raw = gzip.compress(b'{"Success": true}')
+        with self.assertRaisesRegex(TransportError, "不完整"):
+            gunzip_limited(raw[:10])
+
+    def test_non_idempotent_invoke_is_not_retried(self):
+        client = SignalRClient("https://example.test")
+        client.rate_limit.wait = lambda: None
+        calls = []
+
+        def invoke_once(invocation, method, timeout):
+            calls.append(method)
+            raise TransportError("closed")
+
+        client._invoke_once = invoke_once
+        with self.assertRaises(TransportError):
+            client.invoke("BuyShopItem", {"Key": "x"}, retry=False)
+        self.assertEqual(calls, ["BuyShopItem"])
 
     def test_record_split_across_ws_messages(self):
         client = SignalRClient("https://example.test")

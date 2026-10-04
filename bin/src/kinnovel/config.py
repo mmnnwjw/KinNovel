@@ -30,6 +30,7 @@ DEFAULTS = {
     "ignore_japanese": False,
     "ignore_ai": False,
     "prefetch_chapters": False,
+    "prefetch_reading_target": False,
     "request_limit": 9,
     "request_window_ms": 5500,
     "cache_limit_mb": 192,

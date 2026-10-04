@@ -186,18 +186,29 @@ class Canvas:
         width = int(self.width * 0.78)
         line_height = max(self.fonts["small"].size + 10, 52)
         buttons = buttons or []
-        height = max(180, 72 + line_height * max(1, len(lines)) + 70 * bool(buttons))
+        wrapped_lines = []
+        for line in lines:
+            wrapped_lines.extend(self.wrap(line, self.fonts["small"], width - 40))
+        if not wrapped_lines:
+            wrapped_lines = [""]
+        # 弹窗正文按换行后的真实行数计算高度; 超过一屏时截断,
+        # 避免长错误文本压住按钮或溢出屏幕。
+        max_lines = max(1, (self.height - 120 - (70 if buttons else 0)) // line_height)
+        if len(wrapped_lines) > max_lines:
+            wrapped_lines = wrapped_lines[:max_lines]
+            wrapped_lines[-1] = self.fit_text(
+                wrapped_lines[-1] + "…", self.fonts["small"], width - 40)
+        height = max(180, 72 + line_height * len(wrapped_lines) + 70 * bool(buttons))
         x = (self.width - width) // 2
         y = (self.height - height) // 2
         self.draw.rounded_rectangle([x, y, x + width, y + height],
                                     radius=18, fill=self.theme.background,
                                     outline=self.theme.foreground, width=3)
         text_y = y + 46
-        for line in lines:
-            for wrapped in self.wrap(line, self.fonts["small"], width - 40):
-                self.centered_text(wrapped, self.fonts["small"],
-                                   self.width // 2, text_y)
-                text_y += line_height
+        for line in wrapped_lines:
+            self.centered_text(line, self.fonts["small"],
+                               self.width // 2, text_y)
+            text_y += line_height
         return self._popup_buttons(x, y, width, height, buttons)
 
     def _popup_buttons(self, x, y, width, height, buttons):
@@ -434,13 +445,13 @@ class ImageCache:
             self._fitted.clear()
             self._fitted_bytes = 0
 
-    def _lookup(self, key, url):
+    def _lookup(self, key, url=None):
         with self._lock:
             image = self._memory.get(key)
             if image is not None:
                 self._memory.move_to_end(key)
                 return image
-            if key != url:
+            if url is not None and key != url:
                 image = self._memory.get(url)
                 if image is not None:
                     self._memory.move_to_end(url)
@@ -456,10 +467,12 @@ class ImageCache:
         if image is not None:
             return image
         path = self._path(url, height)
+        memory_key = key
         if not path.exists():
             legacy = self._path(url)
-            if legacy.exists():
+            if height is not None and legacy.exists():
                 path = legacy
+                memory_key = url
             else:
                 return None
         try:
@@ -474,7 +487,7 @@ class ImageCache:
                 pass
             return None
         touch(path)
-        self._remember(key, image)
+        self._remember(memory_key, image)
         return image
 
     def is_cached(self, url, height=None):
@@ -482,9 +495,9 @@ class ImageCache:
             return False
         key = self._cache_key(url, height)
         with self._lock:
-            if key in self._memory or url in self._memory:
+            if key in self._memory or (height is None and url in self._memory):
                 return True
-        return self._path(url, height).exists() or self._path(url).exists()
+        return self._path(url, height).exists()
 
     def prefetch(self, url, strict_tls=False, height=None, callback=None,
                  priority=0, retry=False):
@@ -636,6 +649,14 @@ class ImageCache:
             self.prefetch(url, strict_tls=strict_tls, height=target)
             image = self.get(url, target)
         if image is None:
+            # 历史缓存或预取桶与当前显示尺寸不一致时, 复用最接近的已缓存变体。
+            for bucket in sorted(_IMAGE_HEIGHTS, key=lambda value: abs(value - target)):
+                if bucket == target:
+                    continue
+                image = self.get(url, bucket)
+                if image is not None:
+                    break
+        if image is None:
             image = self.get(url)
         if image is None:
             return None
@@ -665,6 +686,13 @@ class PageContext:
         self._ui_queue = queue.Queue()
         self._ui_loop_running = False
         self._refresh_requested = False
+        self._returning = False
+        self._async_slots = threading.BoundedSemaphore(6)
+
+    @property
+    def returning(self):
+        """True while ``enter`` runs because the user came back to this page."""
+        return self._returning
 
     @property
     def width(self):
@@ -677,6 +705,13 @@ class PageContext:
     def register(self, name, module):
         self.pages[name] = module
 
+    def _enter(self, returning=False):
+        self._returning = bool(returning)
+        try:
+            _call_enter(self.pages[self.page_name], self)
+        finally:
+            self._returning = False
+
     def navigate(self, name, push=True, **params):
         if name not in self.pages:
             raise KeyError("unknown page: " + name)
@@ -688,7 +723,7 @@ class PageContext:
         self.page_name = name
         self.params = dict(params)
         self.modal = None
-        _call_enter(self.pages[name], self)
+        self._enter(False)
         self.show()
 
     def replace(self, name, **params):
@@ -696,7 +731,7 @@ class PageContext:
         self.page_name = name
         self.params = dict(params)
         self.modal = None
-        _call_enter(self.pages[name], self)
+        self._enter(False)
         self.show()
 
     def back(self):
@@ -714,7 +749,7 @@ class PageContext:
         else:
             self.previous_page = self.page_name
             self.page_name, self.params = "home", {}
-        _call_enter(self.pages[self.page_name], self)
+        self._enter(True)
         self.show()
 
     def home(self):
@@ -723,7 +758,7 @@ class PageContext:
         self.page_name = "home"
         self.params = {}
         self.modal = None
-        _call_enter(self.pages["home"], self)
+        self._enter(False)
         self.show()
 
     def render(self):
@@ -908,31 +943,33 @@ class PageContext:
     def run_async(self, owner_page, operation, on_success=None,
                   on_error=None, refresh=True, sticky=False):
         def worker():
-            try:
-                result = operation()
-            except Exception as exc:
+            with self._async_slots:
+                try:
+                    result = operation()
+                except Exception as exc:
+                    if (sticky or self.page_name == owner_page) and not self._closed:
+                        def failed(error=exc):
+                            try:
+                                if callable(on_error):
+                                    on_error(error)
+                                else:
+                                    self.message("操作失败", on_close=None)
+                            except Exception as callback_error:
+                                self.message(["操作失败", str(callback_error)])
+                        self.post(failed)
+                    return
                 if (sticky or self.page_name == owner_page) and not self._closed:
-                    def failed(error=exc):
+                    def finished(value=result):
                         try:
-                            if callable(on_error):
-                                on_error(error)
-                            else:
-                                self.message("操作失败", on_close=None)
+                            if callable(on_success):
+                                on_success(value)
                         except Exception as callback_error:
-                            self.message(["操作失败", str(callback_error)])
-                    self.post(failed)
-                return
-            if (sticky or self.page_name == owner_page) and not self._closed:
-                def finished(value=result):
-                    try:
-                        if callable(on_success):
-                            on_success(value)
-                    except Exception as callback_error:
-                        self.message(["界面更新失败", str(callback_error)])
-                        return
-                    if refresh:
-                        self.request_show()
-                self.post(finished)
+                            self.message(["界面更新失败", str(callback_error)])
+                            return
+                        if refresh:
+                            self.request_show()
+                    self.post(finished)
+
         threading.Thread(target=worker, daemon=True).start()
 
     def prune_cache(self):

@@ -22,15 +22,16 @@ def _layout(ctx):
 
 
 def enter(ctx):
-    # 每次进入都重新拉第一页，不保留上次的翻页位置
-    _load(ctx)
+    # 从主页/其他页面新进入时回到第一页；从书籍详情返回时保留页码。
+    _load(ctx, reset_page=not ctx.returning)
 
 
-def _load(ctx):
+def _load(ctx, reset_page=True):
     STATE["generation"] += 1
     generation = STATE["generation"]
     STATE["loading"] = True
-    STATE["page"] = 1
+    if reset_page:
+        STATE["page"] = 1
     days = {"daily": 1, "weekly": 7, "monthly": 31}[STATE["kind"]]
 
     def success(result):

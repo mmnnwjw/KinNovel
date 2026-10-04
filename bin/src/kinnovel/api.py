@@ -12,6 +12,20 @@ from .utils import atomic_write, read_json, sha256_text
 
 SESSION_PATH = APP_DIR / "cache" / "session.json"
 
+# 这些方法重放可能产生重复副作用, 传输错误时只上报不自动重试。
+NON_IDEMPOTENT_METHODS = {
+    "BuyShopItem",
+    "SignIn",
+    "SaveBookShelf",
+    "MarkNotifications",
+    "ClearReadHistory",
+    "PostComment",
+    "ReplyComment",
+    "DeleteComment",
+    "SendDirectMessage",
+    "UseSignMakeupCard",
+}
+
 
 def dict_items(value):
     """只保留 dict 元素,服务端对失效 ID 可能返回 null。"""
@@ -71,7 +85,8 @@ class SessionStore:
     def __init__(self, path=SESSION_PATH):
         self.path = path
         self._lock = threading.RLock()
-        self.data = read_json(path, {}) or {}
+        data = read_json(path, {})
+        self.data = data if isinstance(data, dict) else {}
 
     def save(self):
         with self._lock:
@@ -120,7 +135,11 @@ class ApiClient:
         )
 
     def set_server(self, server):
-        self.server = str(server or "").rstrip("/")
+        new_server = str(server or "").rstrip("/")
+        if new_server != self.server and self.session.get("RefreshToken"):
+            # 不同服务器之间不共享 token, 避免把旧站点凭据发给新站点。
+            self.session.clear_credentials()
+        self.server = new_server
         self.config.set("api_server", self.server)
         self.hub.set_server(self.server)
 
@@ -170,7 +189,7 @@ class ApiClient:
         except urllib.error.HTTPError as exc:
             body = exc.read()
             status = exc.code
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise TransportError("网络错误: %s" % exc)
         try:
             content = json.loads(body.decode("utf-8"))
@@ -178,6 +197,10 @@ class ApiClient:
             if status >= 400:
                 raise ApiError("HTTP %s" % status, status)
             raise TransportError("响应不是 JSON")
+        if not isinstance(content, dict):
+            if status >= 400:
+                raise ApiError("HTTP %s" % status, status)
+            raise TransportError("响应 JSON 不是对象")
         success = content.get("Success", content.get("success"))
         if status >= 400 or success is False:
             message = content.get("Msg") or content.get("msg") or ("HTTP %s" % status)
@@ -190,7 +213,11 @@ class ApiClient:
             "password": sha256_text(password),
         })
         self._store_credentials(credentials)
-        user = self.get_my_info()
+        try:
+            user = self.get_my_info()
+        except Exception:
+            self.session.clear_credentials()
+            raise
         self.session.set_many({"User": user})
         return user
 
@@ -219,7 +246,7 @@ class ApiClient:
             try:
                 token = self._http("/api/user/refresh_token", {"token": refresh})
             except ApiError as exc:
-                if int(getattr(exc, "status", 500)) in (-100, 404):
+                if int(getattr(exc, "status", 500)) in (-100, 401, 404):
                     self.session.clear_credentials()
                 raise
             if not token:
@@ -245,8 +272,9 @@ class ApiClient:
         return user
 
     def invoke(self, method, params=None):
+        retry = method not in NON_IDEMPOTENT_METHODS
         try:
-            return self.hub.invoke(method, params or {})
+            return self.hub.invoke(method, params or {}, retry=retry)
         except ApiError as exc:
             if int(getattr(exc, "status", 500)) != 401:
                 raise
@@ -254,7 +282,7 @@ class ApiClient:
             if not self.refresh_access_token():
                 raise
             self.hub.close()
-            return self.hub.invoke(method, params or {})
+            return self.hub.invoke(method, params or {}, retry=retry)
 
     # Public catalogue methods
     def get_book_list(self, page=1, size=12, keywords=None, order="latest",
@@ -348,15 +376,15 @@ class ApiClient:
 
     def get_book_shelf(self):
         envelope = self.invoke("GetBookShelf")
+        if not isinstance(envelope, dict):
+            return [item for item in dict_items(envelope) if not is_comic(item)]
+        key = "data" if "data" in envelope else "Data"
         items = [
-            item for item in dict_items(
-                envelope.get("data") if isinstance(envelope, dict) else envelope)
-            if str(item.get("type") or "").strip().lower() != "comic"
+            item for item in dict_items(envelope.get(key))
+            if not is_comic(item)
         ]
-        if isinstance(envelope, dict):
-            envelope["data"] = items
-            return envelope
-        return items
+        envelope[key] = items
+        return envelope
 
     def save_book_shelf(self, items, version="20260921"):
         return self.invoke("SaveBookShelf", {"data": items, "ver": version})

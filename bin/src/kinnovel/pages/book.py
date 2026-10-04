@@ -1,4 +1,5 @@
 from ..utils import format_time
+from ..ui import height_bucket
 
 
 STATE = {
@@ -26,7 +27,7 @@ def _cover_ready(ctx, ok=True):
 def _load(ctx, force=False):
     if not ctx.api.user:
         ctx.toast("查看详情需要登录")
-        ctx.navigate("account")
+        ctx.replace("account")
         return
     book_id = int(ctx.params.get("book_id") or 0)
     if book_id <= 0:
@@ -38,6 +39,7 @@ def _load(ctx, force=False):
     # 切书时先清掉上一本的数据，避免加载窗口内渲染/操作到旧内容
     STATE["data"] = None
     STATE["bound"] = None
+    STATE["rects"] = {}
     STATE["loading"] = True
     STATE["generation"] += 1
     generation = STATE["generation"]
@@ -54,11 +56,13 @@ def _load(ctx, force=False):
         STATE["chapter_page"] = 0
         cover = (result.get("Book") or {}).get("Cover")
         if cover:
+            cover_height = int(int(ctx.width * 0.23) * 1.45)
+            target = height_bucket(cover_height)
             ctx.run_async(
                 "book",
                 lambda: ctx.images.prefetch(
                     cover, ctx.config.get("strict_tls"),
-                    height=512, priority=1,
+                    height=target, priority=1,
                     callback=lambda ok: _cover_ready(ctx, ok)),
                 refresh=False,
             )
@@ -96,6 +100,9 @@ def _load(ctx, force=False):
 
 
 def _prefetch_reading_target(ctx, book_info, book_id=None):
+    # 打开详情即预取正文会在服务端产生额外阅读记录, 因此默认关闭。
+    if not ctx.config.get("prefetch_reading_target"):
+        return
     chapters = ((book_info or {}).get("Book") or {}).get("Chapters") or []
     if not chapters:
         return
@@ -183,8 +190,11 @@ def render(ctx, canvas):
     cover_width = int(canvas.width * 0.23)
     cover_height = int(cover_width * 1.45)
     cover_y = top + 20
-    cover = ctx.images.cover(book.get("Cover"), cover_width, cover_height,
-                             strict_tls=ctx.config.get("strict_tls"))
+    cover = ctx.images.cover(
+        book.get("Cover"), cover_width, cover_height,
+        strict_tls=ctx.config.get("strict_tls"),
+        request_height=height_bucket(cover_height),
+    )
     if cover is not None:
         canvas.image.paste(cover, (margin, cover_y))
     canvas.draw.rectangle([margin, cover_y, margin + cover_width, cover_y + cover_height],
