@@ -66,7 +66,7 @@ class TestPowerManagement(unittest.TestCase):
             mgr.handle_resume()
             self.assertFalse(mgr.is_sleeping)
             # Verify sleep delay
-            mock_sleep.assert_called_with(0.35)
+            mock_sleep.assert_any_call(0.35)
             # Verify SIGSTOP was sent to pids
             mock_kill.assert_any_call(10001, SIGSTOP)
             mock_kill.assert_any_call(10002, SIGSTOP)

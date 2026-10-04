@@ -111,6 +111,17 @@ class PageSmokeTests(unittest.TestCase):
         if not FONT_PATH:
             self.skipTest("no CJK test font available")
         progress.clear()
+        book.STATE.update({
+            "book_id": 0,
+            "data": None,
+            "chapter_page": 0,
+            "bound": None,
+            "rects": {},
+            "loading": False,
+            "loaded": False,
+            "error": "",
+            "generation": 0,
+        })
         self.context = PageContext(App())
         for name, module in {
             "home": home,
@@ -478,6 +489,199 @@ class PageSmokeTests(unittest.TestCase):
         with patch.object(self.context, "run_async") as run_async:
             series.enter(self.context)
         run_async.assert_not_called()
+
+    def test_book_error_state_clears_old_data_and_retries(self):
+        self.context.page_name = "book"
+        self.context.params = {"book_id": 7}
+        self.context.api.get_book_info = MagicMock(side_effect=[
+            RuntimeError("offline"),
+            {"Book": {"Id": 7, "Title": "恢复", "Chapters": []}},
+        ])
+        self.context.api.get_book_shelf = MagicMock(return_value={"data": []})
+        book.STATE.update({
+            "book_id": 7,
+            "data": {"Book": {"Id": 7, "Title": "旧数据", "Chapters": []}},
+            "chapter_page": 0,
+            "bound": True,
+            "rects": {},
+            "loading": False,
+            "loaded": True,
+            "error": "",
+            "generation": 0,
+        })
+
+        def immediate(_owner, operation, on_success=None, on_error=None,
+                      **_kwargs):
+            try:
+                result = operation()
+            except Exception as exc:
+                if on_error:
+                    on_error(exc)
+                return
+            if on_success:
+                on_success(result)
+
+        with patch.object(self.context, "run_async", side_effect=immediate):
+            book._load(self.context, force=True)
+        self.assertIsNone(book.STATE["data"])
+        self.assertEqual(book.STATE["error"], "offline")
+        self.assertTrue(book.STATE["loaded"])
+        self.assertFalse(book.STATE["loading"])
+        self.assertIn(("retry", 0), book.STATE["rects"])
+
+        rect = book.STATE["rects"][("retry", 0)]
+        book.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        }, self.context)
+        self.assertEqual(self.context.api.get_book_info.call_count, 2)
+        self.assertEqual(book.STATE["data"]["Book"]["Title"], "恢复")
+        self.assertEqual(book.STATE["error"], "")
+        self.assertFalse(book.STATE["loading"])
+
+    def test_shelf_error_state_clears_old_data_and_retries_current_path(self):
+        self.context.page_name = "shelf"
+        items = [
+            {
+                "id": "folder",
+                "type": "FOLDER",
+                "index": -1,
+                "parents": [],
+                "title": "文件夹",
+            },
+        ] + [
+            {
+                "id": value,
+                "type": "NOVEL",
+                "index": value,
+                "parents": ["folder"],
+            }
+            for value in range(1, 31)
+        ]
+        calls = []
+
+        def get_shelf():
+            calls.append("shelf")
+            if len(calls) == 1:
+                raise RuntimeError("offline")
+            return {"data": [dict(item) for item in items]}
+
+        self.context.api.get_book_shelf = MagicMock(side_effect=get_shelf)
+        self.context.api.get_book_list_by_ids_chunked = MagicMock(
+            side_effect=lambda ids, _book_type=None, chunk_size=24: [
+                {"Id": value, "Title": "书%s" % value} for value in ids
+            ]
+        )
+        shelf.STATE.update({
+            "items": [{"id": 99, "type": "NOVEL"}],
+            "visible": [{"id": 99, "type": "NOVEL"}],
+            "books": {99: {"Id": 99, "Title": "旧书"}},
+            "path": ["folder"],
+            "page": 1,
+            "rects": {},
+            "loading": False,
+            "loaded": True,
+            "error": "",
+            "retry_reset_page": True,
+            "generation": 0,
+        })
+
+        def immediate(_owner, operation, on_success=None, on_error=None,
+                      **_kwargs):
+            try:
+                result = operation()
+            except Exception as exc:
+                if on_error:
+                    on_error(exc)
+                return
+            if on_success:
+                on_success(result)
+
+        with patch.object(self.context, "run_async", side_effect=immediate):
+            shelf._load(self.context, reset_page=False)
+        self.assertEqual(shelf.STATE["items"], [])
+        self.assertEqual(shelf.STATE["visible"], [])
+        self.assertEqual(shelf.STATE["books"], {})
+        self.assertEqual(shelf.STATE["path"], ["folder"])
+        self.assertEqual(shelf.STATE["error"], "offline")
+        self.assertFalse(shelf.STATE["retry_reset_page"])
+        self.assertIn(("retry", 0), shelf.STATE["rects"])
+
+        rect = shelf.STATE["rects"][("retry", 0)]
+        shelf.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        }, self.context)
+        self.assertEqual(calls, ["shelf", "shelf"])
+        self.assertEqual(shelf.STATE["error"], "")
+        self.assertEqual(shelf.STATE["page"], 1)
+        self.assertEqual(shelf.STATE["path"], ["folder"])
+        self.assertEqual(len(shelf.STATE["visible"]), 30)
+        self.assertEqual(shelf.STATE["books"][15]["Title"], "书15")
+
+    def test_series_error_state_clears_old_data_and_retries_current_page(self):
+        self.context.page_name = "series"
+        calls = []
+
+        def get_books_by_series(_name, page=1, size=24, **kwargs):
+            calls.append(page)
+            if len(calls) == 1:
+                raise RuntimeError("offline")
+            return {
+                "Data": [{"Id": 31, "Title": "恢复卷"}],
+                "Page": page,
+                "TotalPages": 5,
+            }
+
+        self.context.api.get_books_by_series = MagicMock(
+            side_effect=get_books_by_series
+        )
+        series.STATE.update({
+            "title": "测试系列",
+            "series_name": "测试系列",
+            "items": [{"Id": 1, "Title": "旧卷"}],
+            "current_id": 1,
+            "page": 2,
+            "total_pages": 5,
+            "server_paged": True,
+            "rects": {},
+            "loading": False,
+            "loaded": True,
+            "error": "",
+            "generation": 0,
+        })
+
+        def immediate(_owner, operation, on_success=None, on_error=None,
+                      **_kwargs):
+            try:
+                result = operation()
+            except Exception as exc:
+                if on_error:
+                    on_error(exc)
+                return
+            if on_success:
+                on_success(result)
+
+        with patch.object(self.context, "run_async", side_effect=immediate):
+            series._load(self.context, page=2)
+        self.assertEqual(series.STATE["items"], [])
+        self.assertEqual(series.STATE["total_pages"], 1)
+        self.assertEqual(series.STATE["page"], 2)
+        self.assertEqual(series.STATE["error"], "offline")
+        self.assertIn(("retry", 0), series.STATE["rects"])
+
+        rect = series.STATE["rects"][("retry", 0)]
+        series.handle({
+            "gesture": "tap",
+            "x-pixel": rect[0] + 4,
+            "y-pixel": rect[1] + 4,
+        }, self.context)
+        self.assertEqual(calls, [3, 3])
+        self.assertEqual(series.STATE["error"], "")
+        self.assertEqual(series.STATE["page"], 2)
+        self.assertEqual(series.STATE["items"][0]["Title"], "恢复卷")
 
     def test_reader_configures_native_swipe_animation(self):
         class Output:

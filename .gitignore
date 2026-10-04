@@ -7,7 +7,15 @@ logs/
 *.log
 .research/
 TESTACCOUNT.txt
+TESTACCOUNT*.txt
 GithubToken
+GithubToken*
 audit_bin.txt
 .env
 .env.*
+kindle_key*
+askpass.cmd
+send*.bat
+*.pem
+id_rsa*
+.kinovel-secrets/

@@ -11,6 +11,8 @@ STATE = {
     "bound": None,
     "rects": {},
     "loading": False,
+    "loaded": False,
+    "error": "",
     "generation": 0,
 }
 
@@ -31,7 +33,7 @@ def _load(ctx, force=False):
         ctx.toast("查看详情需要登录")
         ctx.replace("account")
         return
-    book_id = int(ctx.params.get("book_id") or 0)
+    book_id = int(ctx.params.get("book_id") or STATE.get("book_id") or 0)
     if book_id <= 0:
         ctx.message("书籍 ID 无效")
         return
@@ -40,12 +42,13 @@ def _load(ctx, force=False):
         return
     preserve_chapter_page = bool(force and same_book)
     STATE["book_id"] = book_id
-    if not same_book:
-        # 切书时先清掉上一本的数据，避免加载窗口内渲染/操作到旧内容
-        STATE["data"] = None
-        STATE["bound"] = None
-        STATE["rects"] = {}
+    # 加载期间先清掉上一批详情，避免失败后继续展示旧内容。
+    STATE["data"] = None
+    STATE["bound"] = None
+    STATE["rects"] = {}
     STATE["loading"] = True
+    STATE["loaded"] = False
+    STATE["error"] = ""
     STATE["generation"] += 1
     generation = STATE["generation"]
 
@@ -58,6 +61,8 @@ def _load(ctx, force=False):
         result = result or {}
         STATE["data"] = result
         STATE["loading"] = False
+        STATE["loaded"] = True
+        STATE["error"] = ""
         if not preserve_chapter_page:
             STATE["chapter_page"] = 0
         cover = (result.get("Book") or {}).get("Cover")
@@ -101,7 +106,12 @@ def _load(ctx, force=False):
         if generation != STATE["generation"] or book_id != STATE["book_id"]:
             return
         STATE["loading"] = False
-        ctx.message(["加载书籍失败", str(exc)])
+        STATE["loaded"] = True
+        STATE["error"] = str(exc)
+        STATE["data"] = None
+        STATE["bound"] = None
+        STATE["rects"] = {}
+        ctx.show()
 
     ctx.run_async("book", operation, success, error)
 
@@ -212,11 +222,22 @@ def _resume_sort_num(data, book_id):
 
 def render(ctx, canvas):
     top = canvas.header("书籍详情", left="返回", right="主页")
+    STATE["rects"] = {}
+    if STATE["error"]:
+        margin = int(canvas.width * 0.035)
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, canvas.height - 72, canvas.width - 2 * margin, 54)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        STATE["rects"][("retry", 0)] = rect
+        return
     if not STATE["data"]:
         canvas.centered_text("加载中…" if STATE["loading"] else "暂无数据",
                              ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
         return
-    STATE["rects"] = {}
     data = STATE["data"]
     book = data.get("Book") or {}
     classification = (book.get("Extra") or {}).get("classification") or {}
@@ -355,6 +376,8 @@ def handle(data, ctx):
             if STATE["chapter_page"] < pages - 1:
                 STATE["chapter_page"] += 1
                 ctx.show()
+        elif action == "retry":
+            _load(ctx, force=True)
         return
 
 

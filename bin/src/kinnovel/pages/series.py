@@ -103,13 +103,18 @@ def _load(ctx, page=None):
         STATE["server_paged"] = True
         STATE["loading"] = False
         STATE["loaded"] = True
+        STATE["error"] = ""
 
     def error(exc):
         if generation != STATE["generation"]:
             return
         STATE["loading"] = False
+        STATE["loaded"] = True
         STATE["error"] = str(exc)
-        ctx.message(["系列加载失败", str(exc)])
+        STATE["items"] = []
+        STATE["total_pages"] = 1
+        STATE["rects"] = {}
+        ctx.show()
 
     ctx.run_async("series", operation, success, error)
 
@@ -119,10 +124,20 @@ def render(ctx, canvas):
     margin = int(canvas.width * 0.035)
     _top, row_height, rows = _layout(ctx)
     start_y = top + 12
+    STATE["rects"] = {}
+    if STATE["error"]:
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, canvas.height - 68, canvas.width - 2 * margin, 52)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        STATE["rects"][("retry", 0)] = rect
+        return
     pages = _page_count(ctx)
     STATE["page"] = min(STATE["page"], pages - 1)
     items = _page_items(ctx)
-    STATE["rects"] = {}
     for row in range(rows):
         y = start_y + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 7)
@@ -196,6 +211,12 @@ def handle(data, ctx):
         return
     x = int(data.get("x-pixel") or 0)
     y = int(data.get("y-pixel") or 0)
+    retry = STATE["rects"].get(("retry", 0))
+    if retry:
+        rx, ry, width, height = retry
+        if rx <= x < rx + width and ry <= y < ry + height:
+            _load(ctx, page=STATE["page"])
+            return
     for key, rect in STATE["rects"].items():
         rx, ry, width, height = rect
         if not (rx <= x < rx + width and ry <= y < ry + height):

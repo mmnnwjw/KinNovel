@@ -11,6 +11,7 @@ STATE = {
     "loading": False,
     "loaded": False,
     "error": "",
+    "retry_reset_page": True,
     "generation": 0,
 }
 
@@ -124,13 +125,20 @@ def _load(ctx, reset_page=True):
         STATE["loading"] = False
         STATE["loaded"] = True
         STATE["error"] = ""
+        STATE["retry_reset_page"] = True
 
     def error(exc):
         if generation != STATE["generation"]:
             return
         STATE["loading"] = False
+        STATE["loaded"] = True
         STATE["error"] = str(exc)
-        ctx.message(["书架同步失败", str(exc)])
+        STATE["items"] = []
+        STATE["visible"] = []
+        STATE["books"] = {}
+        STATE["rects"] = {}
+        STATE["retry_reset_page"] = reset_page
+        ctx.show()
 
     ctx.run_async("shelf", operation, success, error)
 
@@ -170,7 +178,14 @@ def _load_page(ctx):
         if generation != STATE["generation"]:
             return
         STATE["loading"] = False
-        ctx.message(["加载失败", str(exc)])
+        STATE["loaded"] = True
+        STATE["error"] = str(exc)
+        STATE["items"] = []
+        STATE["visible"] = []
+        STATE["books"] = {}
+        STATE["rects"] = {}
+        STATE["retry_reset_page"] = False
+        ctx.show()
 
     ctx.run_async(
         "shelf",
@@ -189,11 +204,21 @@ def render(ctx, canvas):
     top = canvas.header("书架 · " + folder_name, left="返回", right="主页")
     margin = int(canvas.width * 0.035)
     _top, row_height, per_page = _layout(ctx)
+    STATE["rects"] = {}
+    if STATE["error"]:
+        canvas.centered_text("加载失败", ctx.fonts["body"],
+                             canvas.width // 2, canvas.height // 2 - 30)
+        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
+                             canvas.width // 2, canvas.height // 2 + 30,
+                             fill=canvas.theme.muted)
+        rect = (margin, canvas.height - 72, canvas.width - 2 * margin, 54)
+        canvas.button(rect, "重试", font=ctx.fonts["small"])
+        STATE["rects"][("retry", 0)] = rect
+        return
     items = STATE.get("visible") or []
     pages = max(1, (len(items) + per_page - 1) // per_page)
     STATE["page"] = min(STATE["page"], pages - 1)
     start = STATE["page"] * per_page
-    STATE["rects"] = {}
     for row in range(per_page):
         index = start + row
         y = top + 12 + row * row_height
@@ -242,6 +267,13 @@ def render(ctx, canvas):
 def handle(data, ctx):
     x = int(data.get("x-pixel") or 0)
     y = int(data.get("y-pixel") or 0)
+    if data.get("gesture") == "tap":
+        retry = STATE["rects"].get(("retry", 0))
+        if retry:
+            rx, ry, width, height = retry
+            if rx <= x < rx + width and ry <= y < ry + height:
+                _load(ctx, reset_page=bool(STATE.get("retry_reset_page")))
+                return
     if data.get("gesture") == "long":
         for key, rect in STATE["rects"].items():
             if key[0] == "item":
