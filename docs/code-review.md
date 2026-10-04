@@ -230,3 +230,25 @@ python -m compileall -q bin            -> OK
 live_account_smoke                     -> login/shelf/history/book/chapter/font/announcement/notification OK
 live_keepalive                         -> 45s idle, connects=1, socket unchanged
 ```
+
+## Ninth review round (2026-10-04, v0.7.6)
+
+针对实机偶发“翻页点一下没反应，需要再点一次”的问题，重做手势分类与
+阅读页交互映射。核心目标是消除所有“动作被静默丢弃”的分支。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P1 | `tap_max_duration_s=0.30` 与 `long_press_min_duration_s=0.5` 之间形成时间死区，慢按被判为 `long` 后阅读页忽略。 | 0.35–0.55 秒之间按 `tap` 处理；只有静止按压 ≥0.55 秒才产生 `long`。 |
+| P1 | `tap_max_move_px=30` 与 `swipe_min_distance_px=40` 之间 31–39px 被判为 `unknown`，手势不上报。 | 40–63px 位移按 `tap` 处理；只有 ≥64px 才判为滑动，消除位移死区。 |
+| P1 | `left/right` 滑动在 `PageContext.handle` 被全局丢弃。 | `PageContext` 转发 `left/right`；阅读页左滑下一页、右滑上一页，并收起控件层。 |
+| P1 | 控件层可见时侧边点击只收起控件层，第二次点击才翻页。 | 侧边点击直接翻页并保留控件层；中间点击收起控件层。 |
+| P1 | compact 视图中间 50% 点击无任何动作。 | 点击中间显示控件层，保证每次点击都有反馈。 |
+| P2 | 章节加载期间 `doc` 为空，`_turn` 静默返回。 | 记录一次 `pending_turn`，加载完成后执行，并提示“正在加载…”。 |
+| P2 | 只在 tracking id 变为 -1 时结算手势，`BTN_TOUCH=0` 或 tracking id 直接替换会丢手势。 | 增加 `BTN_TOUCH=0` 兜底与 tracking id 替换结算，并使用 evdev 事件时间戳。 |
+
+验证（v0.7.6）：
+
+```text
+python -m unittest discover -s tests  -> Ran 155 tests, OK (skipped=2)
+python -m compileall -q bin            -> OK
+```

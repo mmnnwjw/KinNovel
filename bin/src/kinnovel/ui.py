@@ -864,7 +864,7 @@ class PageContext:
 
     def handle(self, data):
         gesture = data.get("gesture")
-        if gesture not in ("tap", "long", "down"):
+        if gesture not in ("tap", "long", "down", "left", "right"):
             return None
         if gesture in ("tap", "long"):
             x = int(data.get("x-pixel") or 0)

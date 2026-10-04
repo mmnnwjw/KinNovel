@@ -629,6 +629,84 @@ class PageSmokeTests(unittest.TestCase):
         }, self.context)
         self.assertEqual(reader.STATE["page"], 5)
 
+    def test_reader_long_press_turns_page(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        reader.STATE["page"] = 5
+        reader.handle({
+            "gesture": "long",
+            "x-pixel": 10,
+            "y-pixel": self.context.height // 2,
+        }, self.context)
+        self.assertEqual(reader.STATE["page"], 4)
+
+    def test_reader_swipe_left_right_turn_pages(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        reader.STATE["page"] = 5
+        reader.handle({"gesture": "left"}, self.context)
+        self.assertEqual(reader.STATE["page"], 6)
+        reader.handle({"gesture": "right"}, self.context)
+        self.assertEqual(reader.STATE["page"], 5)
+
+    def test_reader_middle_tap_shows_chrome_in_compact(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = False
+        reader.STATE["page"] = 5
+        with patch.object(self.context, "show") as show:
+            reader.handle({
+                "gesture": "tap",
+                "x-pixel": self.context.width // 2,
+                "y-pixel": self.context.height // 2,
+            }, self.context)
+        self.assertTrue(reader.STATE["chrome_visible"])
+        self.assertEqual(reader.STATE["page"], 5)
+        show.assert_called_once()
+
+    def test_reader_chrome_side_tap_turns_page(self):
+        self._prime_reader()
+        reader.STATE["chrome_visible"] = True
+        reader.STATE["page"] = 5
+        reader.handle({
+            "gesture": "tap",
+            "x-pixel": 10,
+            "y-pixel": self.context.height // 2,
+        }, self.context)
+        self.assertEqual(reader.STATE["page"], 4)
+        self.assertTrue(reader.STATE["chrome_visible"])
+
+    def test_reader_pending_turn_when_document_missing(self):
+        self._prime_reader()
+        reader.STATE["doc"] = None
+        reader.STATE["pending_turn"] = None
+        with patch.object(self.context, "toast") as toast:
+            reader.handle({
+                "gesture": "tap",
+                "x-pixel": 10,
+                "y-pixel": self.context.height // 2,
+            }, self.context)
+        self.assertEqual(reader.STATE["pending_turn"], -1)
+        toast.assert_called_once()
+
+    def test_reader_guide_mentions_new_gestures(self):
+        self.assertIn("左右滑动：翻页", reader._GUIDE_LINES)
+        self.assertIn("点击中间：显示控件", reader._GUIDE_LINES)
+
+    def test_page_context_forwards_left_right(self):
+        class SwipePage:
+            @staticmethod
+            def render(_context, _canvas):
+                return None
+
+            @staticmethod
+            def handle(data, _context):
+                return data.get("gesture")
+
+        self.context.register("swipe", SwipePage)
+        self.context.page_name = "swipe"
+        self.assertEqual(self.context.handle({"gesture": "left"}), "left")
+        self.assertEqual(self.context.handle({"gesture": "right"}), "right")
+
     def test_core_pages_render_at_paperwhite_resolution(self):
         book.STATE["data"] = {
             "Book": {

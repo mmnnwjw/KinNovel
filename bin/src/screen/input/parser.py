@@ -21,10 +21,13 @@ except ImportError:
 
 @dataclass
 class GestureConfig:
-    tap_max_move_px: int = 30
-    tap_max_duration_s: float = 0.30
-    long_press_min_duration_s: float = 0.5
-    swipe_min_distance_px: int = 40
+    # 静止按压: 低于 long_press_min_duration_s 的慢按仍按 tap 处理,
+    # 避免电子墨水屏上常见的"慢一点的点击"被误判成长按。
+    tap_max_move_px: int = 40
+    tap_max_duration_s: float = 0.35
+    long_press_min_duration_s: float = 0.55
+    # 超过这个位移才算滑动, 40-63px 的轻微移动仍按 tap 处理, 不留死区。
+    swipe_min_distance_px: int = 64
     scale_x: float = 1.0
     scale_y: float = 1.0
 
@@ -75,7 +78,20 @@ class MultiTouchParser:
     def _scale(self, x, y):
         return int(x * self.config.scale_x), int(y * self.config.scale_y)
 
+    @staticmethod
+    def _event_time(ev):
+        timestamp = getattr(ev, "timestamp", None)
+        if callable(timestamp):
+            try:
+                value = float(timestamp())
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        return time.time()
+
     def handle_event(self, ev):
+        now = self._event_time(ev)
         if ev.type == ecodes.EV_ABS:
             code = ev.code
             val = ev.value
@@ -91,12 +107,15 @@ class MultiTouchParser:
                 prev_tid = self.slots[slot].get("tracking_id", -1)
                 if tid == -1:
                     if prev_tid != -1:
-                        self._do_up(slot, prev_tid)
+                        self._do_up(slot, prev_tid, now=now)
                     self.slots[slot] = {"tracking_id": -1, "x": None, "y": None}
                     if prev_tid in self.tracking_to_slot:
                         del self.tracking_to_slot[prev_tid]
                 else:
-                    now = time.time()
+                    if prev_tid not in (-1, None) and prev_tid != tid:
+                        # 有些驱动直接换 tracking id 而不发 -1, 先结算旧手势。
+                        self._do_up(slot, prev_tid, now=now)
+                        self.tracking_to_slot.pop(prev_tid, None)
                     self.slots[slot] = {
                         "tracking_id": tid,
                         "x": None,
@@ -110,22 +129,35 @@ class MultiTouchParser:
                 slot = self.current_slot
                 self._ensure_slot(slot)
                 x, _ = self._scale(val, 0)
-                self._update_pos(slot, x, None, set_x=True)
+                self._update_pos(slot, x, None, set_x=True, now=now)
             elif code in (ecodes.ABS_MT_POSITION_Y, ecodes.ABS_Y):
                 slot = self.current_slot
                 self._ensure_slot(slot)
                 _, y = self._scale(0, val)
-                self._update_pos(slot, None, y, set_x=False)
+                self._update_pos(slot, None, y, set_x=False, now=now)
 
         elif ev.type == ecodes.EV_KEY:
             if ev.code == ecodes.BTN_TOUCH:
                 self.btn_touch = ev.value
+                if ev.value == 0:
+                    # 部分驱动用 BTN_TOUCH=0 结束触摸而不发 tracking id -1。
+                    self._finish_btn_touch(now)
 
     def _ensure_slot(self, slot):
         return self.slots.setdefault(
             slot, {"tracking_id": -1, "x": None, "y": None})
 
-    def _update_pos(self, slot, x, y, set_x):
+    def _finish_btn_touch(self, now):
+        for slot in list(self.slots):
+            s = self.slots.get(slot) or {}
+            tid = s.get("tracking_id", -1)
+            if tid != -1 and self._slot_has_coords(slot):
+                self._do_up(slot, tid, now=now)
+            self.slots[slot] = {"tracking_id": -1, "x": None, "y": None}
+            if tid != -1:
+                self.tracking_to_slot.pop(tid, None)
+
+    def _update_pos(self, slot, x, y, set_x, now=None):
         # 电源线程在挂起/唤醒时会并发 reset() 清空 slots；setdefault 在 GIL 下
         # 是原子的，避免输入线程抛 KeyError 后触摸彻底失效
         s = self._ensure_slot(slot)
@@ -133,7 +165,7 @@ class MultiTouchParser:
             s["x"] = x
         else:
             s["y"] = y
-        s["last_ts"] = time.time()
+        s["last_ts"] = now if now is not None else time.time()
         sp = s.get("start_pos")
         if sp is None:
             s["start_pos"] = (s.get("x"), s.get("y"))
@@ -161,14 +193,14 @@ class MultiTouchParser:
         if self.on_move_cb is not None:
             self.on_move_cb(slot, tracking_id, x, y)
 
-    def _do_up(self, slot, tracking_id):
+    def _do_up(self, slot, tracking_id, now=None):
         s = self.slots.get(slot, {})
         end_x = s.get("x")
         end_y = s.get("y")
         start_ts = s.get("start_ts")
         start_pos = s.get("start_pos", (end_x, end_y))
-        now = time.time()
-        duration = (now - start_ts) if start_ts else 0.0
+        now = now if now is not None else time.time()
+        duration = max(0.0, (now - start_ts)) if start_ts else 0.0
         sx, sy = start_pos if start_pos else (None, None)
         ex, ey = end_x, end_y
         if sx is None:
@@ -188,12 +220,17 @@ class MultiTouchParser:
         cfg = self.config
         kind = "unknown"
         if dist <= cfg.tap_max_move_px:
-            # 短按为 tap,超过点按时长的静止按压为 long,不留判定死区
             if duration <= cfg.tap_max_duration_s:
                 kind = "tap"
-            else:
+            elif duration >= cfg.long_press_min_duration_s:
                 kind = "long"
-        elif dist >= cfg.swipe_min_distance_px:
+            else:
+                # 介于快速点按和长按之间: 按 tap 处理, 消除时间死区。
+                kind = "tap"
+        elif dist < cfg.swipe_min_distance_px:
+            # 轻微移动更可能是没点稳, 按 tap 处理, 消除 40-63px 位移死区。
+            kind = "tap"
+        else:
             # 滑动方向
             if abs(dx) > abs(dy):
                 kind = "left" if dx < 0 else "right"

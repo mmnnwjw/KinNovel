@@ -242,6 +242,7 @@ STATE = {
     "document_version": 0,
     "image_generation": 0,
     "chrome_visible": False,
+    "pending_turn": None,
     "layout_generation": 0,
 }
 
@@ -251,8 +252,9 @@ _CONTENT_CACHE_LIMIT = 3
 _GUIDE_LINES = [
     "点击左侧：上一页",
     "点击右侧：下一页",
-    "顶端下滑：呼出控件",
-    "点击中间：回到阅读",
+    "左右滑动：翻页",
+    "点击中间：显示控件",
+    "顶端下滑：显示控件",
     "点击图片：全屏预览",
     "再次点击：退出预览",
 ]
@@ -393,6 +395,9 @@ def enter(ctx):
             STATE["signature"] = signature
             STATE["last_saved"] = -1
             STATE["loading"] = False
+            pending = STATE.pop("pending_turn", None)
+            if pending:
+                _turn(ctx, int(pending))
 
         ctx.run_async("reader", lambda: _prepare_document(
             ctx, STATE["data"].get("Chapter") or {}), success,
@@ -401,7 +406,7 @@ def enter(ctx):
     STATE.update({"book_id": book_id, "sort_num": sort_num, "data": None,
                   "doc": None, "page": 0, "loading": True, "last_saved": -1,
                   "signature": signature, "fitted_cache": {},
-                  "content_cache": OrderedDict()})
+                  "content_cache": OrderedDict(), "pending_turn": None})
     ctx.show()
 
     def operation():
@@ -449,6 +454,9 @@ def enter(ctx):
         _prefetch_images(ctx, document)
         if swipe_delta:
             _configure_swipe(ctx, swipe_delta)
+        pending = STATE.pop("pending_turn", None)
+        if pending:
+            _turn(ctx, int(pending))
 
     def error(exc):
         if (generation != STATE["layout_generation"]
@@ -498,6 +506,9 @@ def upload_progress(ctx):
 def _turn(ctx, delta):
     doc = STATE["doc"]
     if not doc:
+        # 章节加载期间的手势不丢弃: 记住一次意图, 加载完成后执行。
+        STATE["pending_turn"] = int(delta)
+        ctx.toast("正在加载…")
         return
     target = int(STATE["page"]) + int(delta)
     if 0 <= target < doc.page_count:
@@ -671,6 +682,14 @@ def _render_chrome(ctx, canvas, title, doc):
     )
 
 
+def _image_at(x, y):
+    for rect in STATE["image_rects"].values():
+        rx, ry, width, height, url = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            return url
+    return None
+
+
 def handle(data, ctx):
     gesture = data.get("gesture")
     if gesture == "down":
@@ -679,16 +698,21 @@ def handle(data, ctx):
                 and float(start.get("y-ratio") or 1.0) < 0.16):
             _set_chrome_visible(ctx, True)
         return
-    if gesture != "tap":
+    if gesture not in ("tap", "long", "left", "right"):
         return
-    x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     if STATE["fullscreen_image"]:
         STATE["fullscreen_image"] = None
         ctx.show()
         return
+    if gesture in ("left", "right"):
+        # 左右滑动翻页; 控件层可见时顺带收起, 回到正文。
+        if STATE.get("chrome_visible"):
+            _set_chrome_visible(ctx, False)
+        _turn(ctx, 1 if gesture == "left" else -1)
+        return
+    x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
+    top, _ = _layout_metrics(ctx)
     if STATE.get("chrome_visible"):
-        # 控件层可见时只有顶栏（返回/主页由 PageContext 拦截）和底栏可操作，
-        # 点中间正文区仅收起控件层，不翻页
         if y >= ctx.height - _CHROME_FOOTER:
             for key, rect in STATE["rects"].items():
                 rx, ry, width, height = rect
@@ -710,23 +734,30 @@ def handle(data, ctx):
                     ctx.navigate("settings")
                 return
             return
-        _set_chrome_visible(ctx, False)
+        # 控件层可见时点到插图只收起控件, 避免误触全屏预览。
+        if _image_at(x, y):
+            _set_chrome_visible(ctx, False)
+            return
+        if x < int(ctx.width * 0.3):
+            _turn(ctx, -1)
+        elif x > int(ctx.width * 0.7):
+            _turn(ctx, 1)
+        else:
+            _set_chrome_visible(ctx, False)
         return
-    top, _ = _layout_metrics(ctx)
     if y < top:
         return
-    # 仅命中插图实际渲染区域才进预览；控件层可见时上面已优先收起控件
-    for rect in STATE["image_rects"].values():
-        rx, ry, width, height, url = rect
-        if rx <= x < rx + width and ry <= y < ry + height:
-            STATE["fullscreen_image"] = url
-            ctx.show()
-            return
-    if x < int(ctx.width * 0.25):
-        _turn(ctx, -1)
+    url = _image_at(x, y)
+    if url:
+        STATE["fullscreen_image"] = url
+        ctx.show()
         return
-    if x > int(ctx.width * 0.75):
+    if x < int(ctx.width * 0.3):
+        _turn(ctx, -1)
+    elif x > int(ctx.width * 0.7):
         _turn(ctx, 1)
+    else:
+        _set_chrome_visible(ctx, True)
 
 
 def _catalog_layout(ctx):

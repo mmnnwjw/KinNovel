@@ -92,6 +92,20 @@ the server remains the source of truth.
 back. List pages (shelf, history, rank, browse, series and announcements) use it
 to keep the previous page; a fresh navigation from home resets to page one.
 
+### Reader gestures
+
+- Compact view: tap left/right 30% turns the page, tap the middle shows the
+  chrome layer, swipe left/right turns the page.
+- Chrome visible: side taps still turn pages, middle tap hides the chrome layer,
+  footer buttons keep their chapter/catalog/settings actions.
+- A slow but stationary press is still a tap; only a stationary press of at
+  least 0.55s becomes `long`. Slight movement below the swipe threshold is
+  treated as a tap instead of being dropped as `unknown`.
+- If a turn arrives while a chapter is still loading, it is stored as
+  `pending_turn` and applied once the document is ready.
+- Gesture release also falls back to `BTN_TOUCH=0` when a driver does not send
+  `ABS_MT_TRACKING_ID=-1`.
+
 ## Implemented API families
 
 - REST authentication, email codes, registration and password reset.
