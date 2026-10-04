@@ -116,6 +116,11 @@ class ApiClient:
         self.session = session or SessionStore()
         self._refresh_lock = threading.Lock()
         self._request_lock = threading.RLock()
+        self._ssl_context_obj = None
+        self._flight_lock = threading.Lock()
+        self._inflight = {}
+        self._cache_lock = threading.Lock()
+        self._cache = {}
         self.server = str(self.config.get("api_server") or "").rstrip("/")
         visitor_path = APP_DIR / "cache" / "visitor-id"
         try:
@@ -157,11 +162,16 @@ class ApiClient:
 
     def _ssl_context(self):
         import ssl
-        context = ssl.create_default_context()
-        if not self.config.get("strict_tls"):
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        return context
+        if self._ssl_context_obj is None:
+            context = ssl.create_default_context()
+            if not self.config.get("strict_tls"):
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            self._ssl_context_obj = context
+        return self._ssl_context_obj
+
+    def shutdown(self):
+        self.hub.shutdown()
 
     def _http(self, path, payload=None, method="POST", token=None, timeout=30):
         url = path if str(path).startswith("http") else self.server + path
@@ -181,16 +191,31 @@ class ApiClient:
         if token:
             headers["Authorization"] = "Bearer " + token
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout,
-                                        context=self._ssl_context()) as response:
-                body = response.read()
-                status = response.status
-        except urllib.error.HTTPError as exc:
-            body = exc.read()
-            status = exc.code
-        except (OSError, ValueError) as exc:
-            raise TransportError("网络错误: %s" % exc)
+        body = b""
+        status = 0
+        for attempt in range(2):
+            # REST 与 Hub 共用同一个 9/5.5s 窗口, 避免登录/刷新额外占用服务端额度。
+            self.hub.rate_limit.wait()
+            try:
+                with urllib.request.urlopen(request, timeout=timeout,
+                                            context=self._ssl_context()) as response:
+                    body = response.read()
+                    status = response.status
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt == 0:
+                    retry_after = None
+                    try:
+                        retry_after = float(exc.headers.get("Retry-After"))
+                    except (TypeError, ValueError, AttributeError):
+                        retry_after = 5.0
+                    time.sleep(min(max(1.0, retry_after), 15.0))
+                    continue
+                body = exc.read()
+                status = exc.code
+                break
+            except (OSError, ValueError) as exc:
+                raise TransportError("网络错误: %s" % exc)
         try:
             content = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -259,10 +284,16 @@ class ApiClient:
         updated = float(self.session.get("TokenUpdatedAt") or 0)
         if token and time.time() - updated < 25:
             return token
+        if not self.has_refresh_token():
+            return None
         try:
             return self.refresh_access_token()
-        except Exception:
-            return None
+        except ApiError as exc:
+            if int(getattr(exc, "status", 500)) in (-100, 401, 404):
+                # refresh token 已失效: 清掉凭据后按匿名连接, 公开接口仍可用。
+                self.session.clear_credentials()
+                return None
+            raise
 
     def refresh_user(self):
         if not self.has_refresh_token():
@@ -271,10 +302,86 @@ class ApiClient:
         self.session.set_many({"User": user})
         return user
 
-    def invoke(self, method, params=None):
+    @staticmethod
+    def _flight_key(method, params):
+        return (method, json.dumps(params or {}, sort_keys=True,
+                                   ensure_ascii=False, default=str))
+
+    def _cache_get(self, key):
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            expires, value = entry
+            if time.monotonic() >= expires:
+                self._cache.pop(key, None)
+                return None
+            return value
+
+    def _cache_set(self, key, value, ttl):
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic() + float(ttl), value)
+            if len(self._cache) > 128:
+                for old_key in list(self._cache)[:64]:
+                    self._cache.pop(old_key, None)
+
+    def invoke(self, method, params=None, priority=0, cache_ttl=0.0,
+               coalesce=None):
+        params = params or {}
+        if coalesce is None:
+            coalesce = method not in NON_IDEMPOTENT_METHODS
+        key = None
+        if coalesce or cache_ttl:
+            key = self._flight_key(method, params)
+        if cache_ttl and key is not None:
+            cached = self._cache_get(key)
+            if cached is not None:
+                return cached
+        if coalesce:
+            with self._flight_lock:
+                entry = self._inflight.get(key)
+                if entry is None:
+                    entry = {"event": threading.Event(),
+                             "value": None, "error": None}
+                    self._inflight[key] = entry
+                    leader = True
+                else:
+                    leader = False
+            if not leader:
+                # 相同只读请求合并成一次 Hub 调用; 超时后自行直发, 不永久等待。
+                if not entry["event"].wait(50):
+                    return self._invoke_direct(method, params, priority)
+                if entry["error"] is not None:
+                    raise entry["error"]
+                return entry["value"]
+        return self._invoke_leader(method, params, priority, cache_ttl, key)
+
+    def _invoke_leader(self, method, params, priority, cache_ttl, key):
+        try:
+            value = self._invoke_direct(method, params, priority)
+        except BaseException as exc:
+            if key is not None:
+                with self._flight_lock:
+                    entry = self._inflight.pop(key, None)
+                if entry is not None:
+                    entry["error"] = exc
+                    entry["event"].set()
+            raise
+        if key is not None:
+            with self._flight_lock:
+                entry = self._inflight.pop(key, None)
+            if entry is not None:
+                entry["value"] = value
+                entry["event"].set()
+        if cache_ttl and key is not None:
+            self._cache_set(key, value, cache_ttl)
+        return value
+
+    def _invoke_direct(self, method, params, priority=0):
         retry = method not in NON_IDEMPOTENT_METHODS
         try:
-            return self.hub.invoke(method, params or {}, retry=retry)
+            return self.hub.invoke(method, params or {}, retry=retry,
+                                   priority=priority)
         except ApiError as exc:
             if int(getattr(exc, "status", 500)) != 401:
                 raise
@@ -282,7 +389,8 @@ class ApiClient:
             if not self.refresh_access_token():
                 raise
             self.hub.close()
-            return self.hub.invoke(method, params or {}, retry=retry)
+            return self.hub.invoke(method, params or {}, retry=retry,
+                                   priority=priority)
 
     # Public catalogue methods
     def get_book_list(self, page=1, size=12, keywords=None, order="latest",
@@ -302,7 +410,8 @@ class ApiClient:
 
     def get_book_categories(self, book_type="Novel"):
         return _normalize_list(
-            self.invoke("GetBookCategories", {"Type": book_type}))
+            self.invoke("GetBookCategories", {"Type": book_type},
+                        cache_ttl=300.0))
 
     def get_rank(self, days=1):
         return _novel_data(self.invoke("GetRank", {"Days": int(days)}))
@@ -310,7 +419,8 @@ class ApiClient:
     def get_announcement_list(self, page=1, size=12):
         return _normalize_data(
             self.invoke("GetAnnouncementList",
-                        {"Page": int(page), "Size": int(size)}))
+                        {"Page": int(page), "Size": int(size)},
+                        cache_ttl=60.0))
 
     def get_announcement_detail(self, announcement_id):
         return self.invoke("GetAnnouncementDetail", {"Id": int(announcement_id)})
@@ -340,11 +450,11 @@ class ApiClient:
             "IgnoreAI": bool(ignore_ai),
         }))
 
-    def get_novel_content(self, book_id, sort_num, convert=None):
+    def get_novel_content(self, book_id, sort_num, convert=None, priority=0):
         params = {"Bid": int(book_id), "SortNum": int(sort_num)}
         if convert:
             params["Convert"] = convert
-        return self.invoke("GetNovelContent", params)
+        return self.invoke("GetNovelContent", params, priority=priority)
 
     def save_read_position(self, book_id, chapter_id, xpath):
         return self.invoke("SaveReadPosition", {

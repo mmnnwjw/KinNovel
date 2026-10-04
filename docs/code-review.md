@@ -205,3 +205,28 @@ python -m unittest discover -s tests  -> Ran 133 tests, OK (skipped=2)
 python -m compileall -q bin            -> OK
 python tools/render_preview.py         -> home/browse/reader/settings/about OK
 ```
+
+## Eighth review round (2026-10-04, v0.7.5)
+
+本轮优化 SignalR 传输层。应用不需要通知/成长值/私信的实时推送，因此不引入
+服务器调用分发和读线程，而是先解决重连、排队、退出和重复请求问题。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| P1 | 空闲 20 秒主动断开，长时间阅读后首次操作要重新 negotiate + TLS + 握手。 | 改为协议 Ping（type 6）保活，每 10 秒检查一次；实测空闲 45 秒后 socket 未变化、连接次数仍为 1。 |
+| P1 | 后台 `GetNovelContent` 预取和用户操作共用一把全局锁，慢预取会阻塞交互请求。 | 增加 interactive(0)/prefetch(1) 调度；后台请求只有在没有交互请求等待时才会开始，`prefetch_chapter` 以 priority=1 调用。 |
+| P1 | `close()` 需要等待持有全局锁的接收循环，网络卡死时退出最长要等 25 秒。 | 新增 `shutdown()`：先 `socket.shutdown()` 打断阻塞 recv，再关闭连接；应用退出改用 `ApiClient.shutdown()`。 |
+| P1 | 连接/握手/单次调用超时叠加，最坏接近 90 秒。 | 连接与握手各 10 秒，接收循环按剩余 deadline 设置 socket timeout，单次调用最坏约 45 秒。 |
+| P2 | 相同只读请求会重复发送，分类/公告页面反复请求。 | 只读调用按 (method, params) 合并 in-flight；分类缓存 300 秒、公告缓存 60 秒。 |
+| P2 | REST/negotiate 不经过限流，429 没有退避。 | REST 与 Hub 共用 RateLimit；429 按 `Retry-After` 退避后重试一次。 |
+| P2 | 截断 gzip、`type=7 Close`、非对象消息、64MB 记录缓冲。 | 校验 gzip eof；显式处理 Close/握手 error；忽略非对象消息；缓冲上限收紧到 16MB。 |
+| P2 | `get_access_token()` 吞掉所有刷新异常并静默转为匿名连接。 | 只有 refresh token 明确失效（-100/401/404）才清理并匿名；临时网络错误向上抛出触发重试。 |
+
+验证（v0.7.5）：
+
+```text
+python -m unittest discover -s tests  -> Ran 141 tests, OK (skipped=2)
+python -m compileall -q bin            -> OK
+live_account_smoke                     -> login/shelf/history/book/chapter/font/announcement/notification OK
+live_keepalive                         -> 45s idle, connects=1, socket unchanged
+```

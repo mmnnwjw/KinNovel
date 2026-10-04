@@ -213,7 +213,7 @@ class KinNovelApp:
         try:
             if self.context:
                 self.context._closed = True
-            self.api.hub.close()
+            self.api.shutdown()
         except Exception:
             pass
         try:

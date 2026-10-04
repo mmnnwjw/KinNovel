@@ -21,7 +21,7 @@ Qt 或桌面环境。
 
 当前版本仅支持小说：书架、阅读历史、排行榜与最近/分类都会过滤漫画。
 
-当前版本：[`0.7.4`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.4)
+当前版本：[`0.7.5`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.5)
 
 ## 界面预览
 
@@ -96,7 +96,7 @@ Qt 或桌面环境。
 
 发布包只包含运行和安装所需文件，不包含测试、研究脚本和开发文档。
 
-1. 下载 Release 中的 [`KinNovel-v0.7.4.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.4/KinNovel-v0.7.4.zip)。
+1. 下载 Release 中的 [`KinNovel-v0.7.5.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.5/KinNovel-v0.7.5.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 

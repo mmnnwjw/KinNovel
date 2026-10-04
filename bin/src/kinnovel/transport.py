@@ -15,8 +15,8 @@ import zlib
 from collections import deque
 
 
-MAX_WEBSOCKET_MESSAGE_BYTES = 32 * 1024 * 1024
-MAX_SIGNALR_RECORD_BYTES = 64 * 1024 * 1024
+MAX_WEBSOCKET_MESSAGE_BYTES = 16 * 1024 * 1024
+MAX_SIGNALR_RECORD_BYTES = 16 * 1024 * 1024
 
 
 class TransportError(RuntimeError):
@@ -201,6 +201,19 @@ class WebSocketConnection:
     def send_pong(self, data):
         self._send_frame(0xA, data)
 
+    def settimeout(self, seconds):
+        if self.sock is not None:
+            self.sock.settimeout(max(0.1, float(seconds)))
+
+    def shutdown(self):
+        """Interrupt a blocked recv without waiting for the client lock."""
+        if self.sock is None:
+            return
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def receive(self):
         fragments = bytearray()
         message_opcode = None
@@ -277,11 +290,22 @@ class SignalRClient:
         self._lock = threading.RLock()
         self._socket = None
         self._visitor_id = visitor_id or uuid.uuid4().hex
-        self.notifications = deque(maxlen=100)
+        # 应用不需要实时推送, 只保留最后一条服务器调用用于诊断。
+        self.notifications = deque(maxlen=1)
         self.last_error = ""
         self._record_buffer = bytearray()
         self._last_used = 0.0
         self._idle_reconnect = 20.0
+        self._ssl_context_obj = None
+        self._shutdown = False
+        self._connect_timeout = min(float(timeout or 30), 10.0)
+        self._keepalive_interval = 10.0
+        self._keepalive_stop = threading.Event()
+        self._keepalive_thread = None
+        # interactive(0) 优先于 prefetch(1); 只允许一个请求真正进入 socket。
+        self._turn_cv = threading.Condition()
+        self._turn_waiting = {}
+        self._turn_active = False
 
     def set_server(self, server):
         with self._lock:
@@ -289,11 +313,13 @@ class SignalRClient:
             self.server = server.rstrip("/")
 
     def _ssl_context(self):
-        context = ssl.create_default_context()
-        if not self.strict_tls:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        return context
+        if self._ssl_context_obj is None:
+            context = ssl.create_default_context()
+            if not self.strict_tls:
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+            self._ssl_context_obj = context
+        return self._ssl_context_obj
 
     def _headers(self, token=None, json_body=False):
         headers = {
@@ -307,12 +333,13 @@ class SignalRClient:
             headers["Content-Type"] = "application/json"
         return headers
 
-    def _negotiate(self, token=None):
+    def _negotiate(self, token=None, timeout=None):
+        timeout = timeout or self.timeout
         url = self.server + "/hub/api/negotiate?negotiateVersion=1"
         request = urllib.request.Request(url, data=b"", method="POST",
                                          headers=self._headers(token))
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout,
+            with urllib.request.urlopen(request, timeout=timeout,
                                         context=self._ssl_context()) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -325,15 +352,100 @@ class SignalRClient:
             raise TransportError("Hub 协商网络错误: %s" % exc)
 
     def _close_locked(self):
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        self.close()
+
+    def close(self):
+        """Drop the current connection but keep the client reusable."""
+        socket_ = self._socket
+        self._socket = None
         self._record_buffer = bytearray()
+        if socket_ is not None:
+            try:
+                socket_.shutdown()
+            except Exception:
+                pass
+            try:
+                socket_.close()
+            except Exception:
+                pass
+
+    def shutdown(self):
+        """Final close: interrupt a blocked receive and stop reconnecting."""
+        self._shutdown = True
+        self._keepalive_stop.set()
+        with self._turn_cv:
+            self._turn_cv.notify_all()
+        self.close()
+
+    def _start_keepalive(self):
+        if self._shutdown:
+            return
+        if self._keepalive_thread is not None and self._keepalive_thread.is_alive():
+            return
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, daemon=True,
+            name="kinnovel-signalr-keepalive")
+        self._keepalive_thread.start()
+
+    def _keepalive_loop(self):
+        while not self._keepalive_stop.wait(self._keepalive_interval):
+            if self._shutdown:
+                return
+            try:
+                self._keepalive_ping()
+            except Exception as exc:
+                self.last_error = "keepalive: %s" % exc
+                self.close()
+
+    def _keepalive_ping(self):
+        """Send a protocol ping when the connection would otherwise idle out."""
+        with self._lock:
+            if self._shutdown or self._socket is None:
+                return False
+            if (self._last_used
+                    and time.monotonic() - self._last_used
+                    < self._keepalive_interval * 0.8):
+                return False
+            self._socket.send_text('{"type":6}' + self.RECORD_SEPARATOR)
+            self._last_used = time.monotonic()
+            return True
+
+    def _can_acquire_locked(self, priority):
+        if self._turn_active or self._shutdown:
+            return False
+        return not any(count for value, count in self._turn_waiting.items()
+                       if value < priority)
+
+    def _acquire_turn(self, priority):
+        priority = int(priority)
+        with self._turn_cv:
+            self._turn_waiting[priority] = self._turn_waiting.get(priority, 0) + 1
+            try:
+                while True:
+                    if self._shutdown:
+                        raise TransportError("SignalR 客户端已关闭")
+                    if self._can_acquire_locked(priority):
+                        self._turn_active = True
+                        return
+                    self._turn_cv.wait(timeout=0.5)
+            finally:
+                remaining = self._turn_waiting.get(priority, 1) - 1
+                if remaining > 0:
+                    self._turn_waiting[priority] = remaining
+                else:
+                    self._turn_waiting.pop(priority, None)
+
+    def _release_turn(self):
+        with self._turn_cv:
+            self._turn_active = False
+            self._turn_cv.notify_all()
 
     def _connect_locked(self):
+        if self._shutdown:
+            raise TransportError("SignalR 客户端已关闭")
         self._close_locked()
         token = self.token_provider() if self.token_provider else None
-        negotiation = self._negotiate(token)
+        negotiation = self._negotiate(token, timeout=self._connect_timeout)
         connection_token = negotiation.get("connectionToken")
         if not connection_token:
             raise TransportError("Hub 协商响应缺少 connectionToken")
@@ -349,7 +461,7 @@ class SignalRClient:
         socket_ = WebSocketConnection(
             url,
             headers={"Origin": "https://www.lightnovel.app"},
-            timeout=self.timeout,
+            timeout=self._connect_timeout,
             ssl_context=self._ssl_context(),
         ).connect()
         try:
@@ -357,13 +469,26 @@ class SignalRClient:
         except OSError as exc:
             socket_.close()
             raise TransportError("SignalR 握手发送失败: %s" % exc)
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + self._connect_timeout
         try:
             while time.monotonic() < deadline:
+                socket_.settimeout(deadline - time.monotonic())
                 messages = self._receive_messages(socket_)
-                if any(message == {} for message in messages):
-                    self._socket = socket_
-                    return
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("type") == 7:
+                        socket_.close()
+                        raise TransportError(
+                            "SignalR 握手被拒绝: %s" % (message.get("error") or ""))
+                    if message.get("error"):
+                        socket_.close()
+                        raise TransportError(
+                            "SignalR 握手失败: %s" % message.get("error"))
+                    if message == {}:
+                        self._socket = socket_
+                        self._start_keepalive()
+                        return
         except (OSError, TransportError) as exc:
             socket_.close()
             raise TransportError("SignalR 握手失败: %s" % exc)
@@ -371,20 +496,23 @@ class SignalRClient:
         raise TransportError("SignalR 握手超时")
 
     def _ensure_connected_locked(self):
+        if self._shutdown:
+            raise TransportError("SignalR 客户端已关闭")
         if (self._socket is not None and self._last_used
                 and time.monotonic() - self._last_used > self._idle_reconnect):
-            # 服务端 ClientTimeoutInterval(默认 30s) 会在客户端静默时关闭连接，
-            # 主动重连，避免下一次调用在死 socket 上等满超时。
+            # keepalive 正常情况下会持续刷新 _last_used; 走到这里说明
+            # 客户端休眠或保活线程失效, 旧连接很可能已经不可用。
             self._close_locked()
         if self._socket is None:
             self._connect_locked()
+        return self._socket
 
     def _receive_messages(self, socket_):
         _, data = socket_.receive()
         self._record_buffer.extend(data)
         if len(self._record_buffer) > MAX_SIGNALR_RECORD_BYTES:
             self._close_locked()
-            raise TransportError("SignalR 记录超过 64MB")
+            raise TransportError("SignalR 记录超过 16MB")
         separator = self.RECORD_SEPARATOR.encode("ascii")
         messages = []
         while True:
@@ -402,6 +530,8 @@ class SignalRClient:
         return messages
 
     def _handle_server_message(self, message):
+        if not isinstance(message, dict):
+            return
         if message.get("type") == 1:
             self.notifications.append(message)
         elif message.get("type") == 6:
@@ -436,10 +566,12 @@ class SignalRClient:
             return raw
 
     def _invoke_once(self, invocation, method, timeout):
+        if self._shutdown:
+            raise TransportError("SignalR 客户端已关闭")
         with self._lock:
-            self._ensure_connected_locked()
+            socket_ = self._ensure_connected_locked()
             try:
-                self._socket.send_text(
+                socket_.send_text(
                     json.dumps(invocation, ensure_ascii=False,
                                separators=(",", ":")) + self.RECORD_SEPARATOR)
             except OSError as exc:
@@ -448,15 +580,24 @@ class SignalRClient:
             self._last_used = time.monotonic()
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if self._shutdown:
+                    raise TransportError("SignalR 客户端已关闭")
                 try:
-                    messages = self._receive_messages(self._socket)
+                    socket_.settimeout(deadline - time.monotonic())
+                    messages = self._receive_messages(socket_)
                 except (OSError, TransportError) as exc:
                     self.last_error = str(exc)
                     self._close_locked()
                     raise TransportError(str(exc))
                 self._last_used = time.monotonic()
                 for message in messages:
+                    if not isinstance(message, dict):
+                        continue
                     self._handle_server_message(message)
+                    if message.get("type") == 7:
+                        error = str(message.get("error") or "服务器关闭连接")
+                        self._close_locked()
+                        raise TransportError("Hub 被服务器关闭: " + error)
                     if message.get("invocationId") != invocation.get("invocationId"):
                         continue
                     if message.get("type") == 3 and message.get("error"):
@@ -470,14 +611,21 @@ class SignalRClient:
                             return self._decode_response(envelope)
                         success = self._envelope_value(envelope, "success", True)
                         if not success:
-                            raise ApiError(
-                                str(self._envelope_value(envelope, "msg", "请求失败")),
-                                int(self._envelope_value(envelope, "status", 500) or 500),
-                            )
+                            message_text = str(
+                                self._envelope_value(envelope, "msg", "请求失败"))
+                            try:
+                                status = int(self._envelope_value(
+                                    envelope, "status", 500) or 500)
+                            except (TypeError, ValueError):
+                                status = 500
+                            raise ApiError(message_text, status)
                         return self._decode_response(self._envelope_value(envelope, "response"))
             raise TransportError("Hub 调用超时: " + method)
 
-    def invoke(self, method, params=None, use_gzip=True, timeout=None, retry=True):
+    def invoke(self, method, params=None, use_gzip=True, timeout=None,
+               retry=True, priority=0):
+        if self._shutdown:
+            raise TransportError("SignalR 客户端已关闭")
         timeout = timeout or min(self.timeout * 2, 25)
         invocation_id = uuid.uuid4().hex
         invocation = {
@@ -490,20 +638,20 @@ class SignalRClient:
         attempts = 2 if retry else 1
         for attempt in range(attempts):
             self.rate_limit.wait()
+            if self._shutdown:
+                raise TransportError("SignalR 客户端已关闭")
+            self._acquire_turn(priority)
             try:
                 return self._invoke_once(invocation, method, timeout)
             except ApiError:
                 raise
             except TransportError as exc:
                 last_error = exc
-                with self._lock:
-                    self._close_locked()
-                if attempt + 1 < attempts:
-                    time.sleep(1.0)
-                    continue
-                raise
+                self._close_locked()
+                if self._shutdown or attempt + 1 >= attempts:
+                    raise
+            finally:
+                self._release_turn()
+            # 让出 turn 后再退避, 否则会占着调度锁睡 1 秒。
+            time.sleep(1.0)
         raise last_error or TransportError("Hub 调用失败: " + method)
-
-    def close(self):
-        with self._lock:
-            self._close_locked()

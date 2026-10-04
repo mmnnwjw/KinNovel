@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -141,21 +143,29 @@ class TransportTests(unittest.TestCase):
 
     def test_api_client_marks_non_idempotent_methods(self):
         client = ApiClient.__new__(ApiClient)
+        client._flight_lock = threading.Lock()
+        client._inflight = {}
+        client._cache_lock = threading.Lock()
+        client._cache = {}
         hub = mock.Mock()
         hub.invoke.return_value = {"ok": True}
         client.hub = hub
 
         self.assertEqual(client.invoke("BuyShopItem", {"Key": "x"}), {"ok": True})
         hub.invoke.assert_called_once_with(
-            "BuyShopItem", {"Key": "x"}, retry=False)
+            "BuyShopItem", {"Key": "x"}, retry=False, priority=0)
 
         hub.reset_mock()
         hub.invoke.return_value = {"ok": True}
         self.assertEqual(client.invoke("GetMyInfo", {}), {"ok": True})
-        hub.invoke.assert_called_once_with("GetMyInfo", {}, retry=True)
+        hub.invoke.assert_called_once_with("GetMyInfo", {}, retry=True, priority=0)
 
     def test_api_401_refreshes_closes_hub_and_retries(self):
         client = ApiClient.__new__(ApiClient)
+        client._flight_lock = threading.Lock()
+        client._inflight = {}
+        client._cache_lock = threading.Lock()
+        client._cache = {}
         calls = []
 
         class Session:
@@ -211,6 +221,185 @@ class TransportTests(unittest.TestCase):
             client.invoke("BuyShopItem", {"Key": "x"}, retry=False)
         self.assertEqual(calls, ["BuyShopItem"])
 
+    def test_priority_scheduler_prefers_interactive(self):
+        client = SignalRClient("https://example.test")
+        client._turn_active = False
+        client._turn_waiting = {1: 1}
+        self.assertTrue(client._can_acquire_locked(0))
+        client._turn_waiting = {0: 1}
+        self.assertFalse(client._can_acquire_locked(1))
+
+    def test_keepalive_ping_sends_type6(self):
+        sent = []
+
+        class Socket:
+            @staticmethod
+            def send_text(text):
+                sent.append(text)
+
+        client = SignalRClient("https://example.test")
+        client._socket = Socket()
+        client._last_used = 0.0
+        self.assertTrue(client._keepalive_ping())
+        self.assertTrue(sent and sent[0].startswith('{"type":6}'))
+
+    def test_shutdown_interrupts_and_disables_reconnect(self):
+        class Socket:
+            def __init__(self):
+                self.shutdown_called = False
+                self.closed = False
+
+            def shutdown(self):
+                self.shutdown_called = True
+
+            def close(self):
+                self.closed = True
+
+        client = SignalRClient("https://example.test")
+        socket_ = Socket()
+        client._socket = socket_
+        client.shutdown()
+        self.assertTrue(socket_.shutdown_called)
+        self.assertTrue(socket_.closed)
+        self.assertIsNone(client._socket)
+        with self.assertRaises(TransportError):
+            client.invoke("GetMyInfo")
+
+    def test_shutdown_unblocks_inflight_receive(self):
+        class BlockingSocket:
+            def __init__(self):
+                self.started = threading.Event()
+                self.stop = threading.Event()
+                self.shutdown_called = False
+
+            @staticmethod
+            def send_text(_text):
+                return None
+
+            @staticmethod
+            def settimeout(_seconds):
+                return None
+
+            def receive(self):
+                self.started.set()
+                self.stop.wait(5)
+                raise OSError("connection closed")
+
+            def shutdown(self):
+                self.shutdown_called = True
+                self.stop.set()
+
+            def close(self):
+                self.stop.set()
+
+        client = SignalRClient("https://example.test")
+        socket_ = BlockingSocket()
+        client._socket = socket_
+        client._ensure_connected_locked = lambda: socket_
+
+        def worker():
+            try:
+                client.invoke("GetMyInfo")
+            except TransportError:
+                pass
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertTrue(socket_.started.wait(5))
+        started = time.monotonic()
+        client.shutdown()
+        thread.join(5)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(socket_.shutdown_called)
+
+    def test_type7_close_raises_with_reason(self):
+        class Socket:
+            @staticmethod
+            def send_text(_text):
+                return None
+
+            @staticmethod
+            def settimeout(_seconds):
+                return None
+
+        client = SignalRClient("https://example.test")
+        client._socket = Socket()
+        client._ensure_connected_locked = lambda: client._socket
+        client._receive_messages = lambda _socket: [
+            {"type": 7, "error": "bye"}]
+        invocation = {"type": 1, "invocationId": "abc",
+                      "target": "GetMyInfo", "arguments": [{}, {}]}
+        with self.assertRaisesRegex(TransportError, "bye"):
+            client._invoke_once(invocation, "GetMyInfo", 1)
+
+    def test_api_invoke_coalesces_identical_reads(self):
+        client = ApiClient.__new__(ApiClient)
+        client._flight_lock = threading.Lock()
+        client._inflight = {}
+        client._cache_lock = threading.Lock()
+        client._cache = {}
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        class Hub:
+            @staticmethod
+            def invoke(method, params, retry=True, priority=0):
+                calls.append(method)
+                started.set()
+                release.wait(5)
+                return {"Id": 7}
+
+        client.hub = Hub()
+        results = []
+
+        def worker():
+            results.append(client.invoke("GetBookInfo", {"Id": 1}))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        threads[0].start()
+        self.assertTrue(started.wait(5))
+        threads[1].start()
+        time.sleep(0.1)
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(results, [{"Id": 7}, {"Id": 7}])
+        self.assertEqual(calls, ["GetBookInfo"])
+
+    def test_access_token_only_downgrades_on_invalid_refresh(self):
+        class Session:
+            def __init__(self):
+                self.cleared = False
+
+            @staticmethod
+            def get(key, default=None):
+                return "refresh" if key == "RefreshToken" else default
+
+            def clear_credentials(self):
+                self.cleared = True
+
+        client = ApiClient.__new__(ApiClient)
+        client.session = Session()
+
+        def invalid():
+            raise ApiError("invalid refresh", 401)
+
+        client.refresh_access_token = invalid
+        self.assertIsNone(client.get_access_token())
+        self.assertTrue(client.session.cleared)
+
+        client.session.cleared = False
+
+        def transient():
+            raise TransportError("network down")
+
+        client.refresh_access_token = transient
+        with self.assertRaises(TransportError):
+            client.get_access_token()
+        self.assertFalse(client.session.cleared)
+
     def test_record_split_across_ws_messages(self):
         client = SignalRClient("https://example.test")
 
@@ -261,9 +450,13 @@ class TransportTests(unittest.TestCase):
             def send_text(_text):
                 return None
 
+            @staticmethod
+            def settimeout(_seconds):
+                return None
+
         client = SignalRClient("https://example.test")
         client._socket = Socket()
-        client._ensure_connected_locked = lambda: None
+        client._ensure_connected_locked = lambda: client._socket
         invocation = {
             "type": 1,
             "invocationId": "abc",

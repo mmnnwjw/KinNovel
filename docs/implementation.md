@@ -45,6 +45,21 @@ and invokes the Hub with:
 The response may be a JSON object or a base64-encoded gzip JSON byte array.
 `SignalRClient` handles both forms.
 
+### SignalR transport
+
+- One WebSocket, JSON hub protocol. Calls are still serialized on the wire, but
+  a priority turn scheduler lets interactive calls go before background chapter
+  prefetch (`priority=1`).
+- A protocol Ping (type 6) is sent when the connection would otherwise idle
+  out, so a long reading session does not pay a fresh negotiate/TLS/WebSocket
+  handshake on the next call.
+- Read-only calls with identical `(method, params)` are coalesced; categories
+  are cached for 5 minutes and announcement lists for 1 minute.
+- `shutdown()` interrupts a blocked receive with `socket.shutdown()` before
+  closing, so app exit does not wait for a hung network call.
+- Connect, handshake and per-invocation receive each have their own timeout
+  budget; the record buffer is capped at 16MB.
+
 ### Reading
 
 `reader.py` page code calls `GetNovelContent`. The response chapter is passed to

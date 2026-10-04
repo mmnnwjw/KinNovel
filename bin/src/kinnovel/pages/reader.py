@@ -53,7 +53,7 @@ def _load_progress(book_id, sort_num, convert=None):
     return {"path": path, "offset": offset, "page": page}
 
 
-def _load_chapter(ctx, book_id, sort_num):
+def _load_chapter(ctx, book_id, sort_num, priority=0):
     convert = ctx.config.get("convert")
     path = _chapter_cache_path(book_id, sort_num, convert)
     cached = read_json(path)
@@ -78,7 +78,7 @@ def _load_chapter(ctx, book_id, sort_num):
                 pass
         try:
             response = ctx.api.get_novel_content(
-                book_id, sort_num, convert=convert)
+                book_id, sort_num, convert=convert, priority=priority)
         except Exception:
             if cached:
                 return cached
@@ -89,7 +89,7 @@ def _load_chapter(ctx, book_id, sort_num):
 
 def prefetch_chapter(ctx, book_id, sort_num):
     try:
-        response = _load_chapter(ctx, book_id, sort_num)
+        response = _load_chapter(ctx, book_id, sort_num, priority=1)
     except Exception:
         return False
     font_url = (response.get("Chapter") or {}).get("Font")
