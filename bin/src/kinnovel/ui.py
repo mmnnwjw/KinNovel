@@ -1,4 +1,5 @@
 import heapq
+import math
 import os
 import queue
 import re
@@ -29,6 +30,99 @@ class Theme:
         self.mid = 85 if self.night else 170
         self.inverse_fg = self.background
         self.inverse_bg = self.foreground
+
+
+_ICON_TILES = OrderedDict()
+_ICON_TILES_LIMIT = 8
+_ICON_TILES_LOCK = threading.RLock()
+
+
+def _render_retry_icon(size, color, background):
+    """按 lucide ``rotate-cw`` SVG 的原始几何栅格化重试图标。
+
+    SVG(24x24 viewBox, stroke-width=2, round cap/join):
+      - 圆弧 ``M21 12a9 9 0 1 1 -9 -9``: 圆心(12,12) r=9, 从 3 点钟顺时针
+        经 6/9 点钟到 12 点钟(270°), 缺口正好是右上象限;
+      - ``c2.52 0 4.85.83 6.72 2.24 L21 8``: 从弧顶三次贝塞尔弯到 (21,8);
+      - ``M21 3v5h-5``: 右上角折线箭头 (21,3)->(21,8)->(16,8)。
+    Kindle 端没有 SVG 渲染器, 先在 4x 超采样 mask 上按上述几何绘制(含圆头/圆角),
+    再用 LANCZOS 缩小, 避免 1-bit 线段的锯齿。
+    """
+    size = max(12, int(size))
+    supersample = 4
+    tile = size * supersample
+    unit = tile / 24.0
+    stroke = max(2, int(round(2 * unit)))
+    half = stroke / 2.0
+
+    mask = Image.new("L", (tile, tile), 0)
+    mask_draw = ImageDraw.Draw(mask)
+
+    def scaled(x, y):
+        return (x * unit, y * unit)
+
+    def draw_path(points):
+        scaled_points = [scaled(x, y) for x, y in points]
+        if len(scaled_points) >= 2:
+            mask_draw.line(scaled_points, fill=255, width=stroke, joint="curve")
+        for px, py in (scaled_points[0], scaled_points[-1]):
+            mask_draw.ellipse(
+                [px - half, py - half, px + half, py + half], fill=255)
+
+    # 圆弧: PIL 角度从 3 点钟顺时针增大, 0 -> 270 度 = SVG 的 270 度大弧。
+    # Pillow 的 arc 把描边画在 bbox 内侧, 所以 bbox 半径要加上半个描边,
+    # 才能像 SVG 那样让 stroke 以路径为中心。
+    radius = 9.0 * unit
+    center = 12.0 * unit
+    arc_radius = radius + half
+    mask_draw.arc(
+        [center - arc_radius, center - arc_radius,
+         center + arc_radius, center + arc_radius],
+        start=0, end=270, fill=255, width=stroke)
+    for angle in (0.0, 270.0):
+        radians = math.radians(angle)
+        px = center + radius * math.cos(radians)
+        py = center + radius * math.sin(radians)
+        mask_draw.ellipse([px - half, py - half, px + half, py + half],
+                          fill=255)
+
+    # 弧顶 -> (18.72,5.24) 的三次贝塞尔, 再接直线到 (21,8)。
+    p0, c1, c2, p3 = (12.0, 3.0), (14.52, 3.0), (16.85, 3.83), (18.72, 5.24)
+    hook = [p0]
+    steps = 24
+    for step in range(1, steps + 1):
+        t = step / float(steps)
+        mt = 1.0 - t
+        hook.append((
+            (mt ** 3) * p0[0] + 3 * (mt ** 2) * t * c1[0]
+            + 3 * mt * (t ** 2) * c2[0] + (t ** 3) * p3[0],
+            (mt ** 3) * p0[1] + 3 * (mt ** 2) * t * c1[1]
+            + 3 * mt * (t ** 2) * c2[1] + (t ** 3) * p3[1],
+        ))
+    hook.append((21.0, 8.0))
+    draw_path(hook)
+    draw_path([(21.0, 3.0), (21.0, 8.0), (16.0, 8.0)])
+
+    icon = Image.new("L", (size, size), background)
+    icon.paste(color, (0, 0),
+               mask.resize((size, size), Image.Resampling.LANCZOS))
+    return icon
+
+
+def _retry_icon_tile(size, color, background):
+    """同一 (尺寸, 前景, 背景) 的图标只栅格化一次, 渲染时直接 paste。"""
+    key = (int(size), int(color), int(background))
+    with _ICON_TILES_LOCK:
+        tile = _ICON_TILES.get(key)
+        if tile is not None:
+            _ICON_TILES.move_to_end(key)
+            return tile
+    tile = _render_retry_icon(size, color, background)
+    with _ICON_TILES_LOCK:
+        _ICON_TILES[key] = tile
+        while len(_ICON_TILES) > _ICON_TILES_LIMIT:
+            _ICON_TILES.popitem(last=False)
+    return tile
 
 
 class Canvas:
@@ -181,6 +275,13 @@ class Canvas:
                        fill=color, width=4)
         self.draw.line([cx - size + 3, wall_y, cx + size - 3, wall_y],
                        fill=color, width=4)
+
+    def retry_icon(self, cx, cy, size=26, fill=None):
+        """画重试图标; 相同 (尺寸, 前景, 背景) 复用已栅格化的位图。"""
+        size = max(12, int(size))
+        color = self.theme.foreground if fill is None else fill
+        tile = _retry_icon_tile(size, color, self.theme.background)
+        self.image.paste(tile, (int(cx) - size // 2, int(cy) - size // 2))
 
     def popup(self, lines, buttons=None):
         width = int(self.width * 0.78)
@@ -379,6 +480,7 @@ class ImageCache:
         self._fitted_bytes = 0
         self._lock = threading.RLock()
         self._callbacks = {}
+        self._manual_callbacks = {}
         self._queued = {}
         self._running = set()
         self._failures = {}
@@ -562,11 +664,15 @@ class ImageCache:
         return self._path(url, height).exists()
 
     def prefetch(self, url, strict_tls=False, height=None, callback=None,
-                 priority=0, retry=False):
+                 priority=0, retry=False, force=False, manual_callback=None):
         """Schedule one download; never blocks, never raises.
 
         ``priority`` 越小越紧急：0 = 当前可见，3 = 邻近页预取，6 = 后台。
         返回 True 表示已缓存/已排队，False 表示该 URL 正处于失败退避期。
+
+        ``force=True`` 会清除该 URL 的失败退避并立即重新排队（手动重试按钮）。
+        ``manual_callback`` 只在本次手动请求成功/失败时立即回调, 失败不会
+        被折叠进自动重试队列, 因此可以据此弹窗提示"请求失败"。
         """
         if not url:
             return False
@@ -574,14 +680,20 @@ class ImageCache:
         if self.is_cached(url, height):
             if callable(callback):
                 callback(True)
+            if callable(manual_callback):
+                manual_callback(True)
             return True
         now = time.monotonic()
         with self._lock:
             failure = self._failures.get(key)
-            if failure is not None and now < failure[1] and not retry:
+            if force:
+                self._failures.pop(key, None)
+            elif failure is not None and now < failure[1] and not retry:
                 return False
             if callable(callback):
                 self._callbacks.setdefault(key, []).append(callback)
+            if callable(manual_callback):
+                self._manual_callbacks.setdefault(key, []).append(manual_callback)
             if key in self._running:
                 return True
             self._enqueue_locked(url, key, height, strict_tls, priority)
@@ -613,6 +725,7 @@ class ImageCache:
                 if len(self._failures) > 512:
                     self._failures.clear()
             callbacks = self._callbacks.pop(key, [])
+            manual_callbacks = self._manual_callbacks.pop(key, [])
             if not ok and callbacks and count <= 6:
                 # 失败不要立刻回调整屏重绘(会再次请求),而是按退避定时重试
                 with self._retry_cv:
@@ -624,6 +737,11 @@ class ImageCache:
                          min(int(priority), 3), callbacks))
                     self._retry_cv.notify()
                 callbacks = []
+        for callback in manual_callbacks:
+            try:
+                callback(ok)
+            except Exception:
+                pass
         for callback in callbacks:
             try:
                 callback(ok)

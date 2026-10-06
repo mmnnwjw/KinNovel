@@ -70,6 +70,7 @@ def sanitize_html(content):
 
 
 def _relative_xpath(element, root):
+    """Reference XPath builder (O(depth*siblings)); kept for regressions/tests."""
     if element is root:
         return "."
     if element.get("id"):
@@ -91,6 +92,26 @@ def _relative_xpath(element, root):
         current = parent
     steps.reverse()
     return "./" + "/".join(steps) if steps else "."
+
+
+def _node_tag(node):
+    tag = getattr(node, "tag", None)
+    return tag.lower() if isinstance(tag, str) else ""
+
+
+def _child_struct_path(parent_path, tag, index):
+    """在递归下行时增量拼 XPath，避免每个块都回溯扫描兄弟节点。"""
+    if parent_path == ".":
+        return "./%s[%d]" % (tag, index)
+    return "%s/%s[%d]" % (parent_path, tag, index)
+
+
+def _anchor_path(element, struct_path):
+    """块/插图的锚点：自身有 id 用 id 形式，否则用结构化路径，语义同旧实现。"""
+    element_id = element.get("id")
+    if element_id:
+        return '//*[@id="%s"]' % element_id.replace('"', '\\"')
+    return struct_path
 
 
 # 零宽/格式字符:在浏览器中不渲染,直接剥除,避免回退字体画出方框
@@ -128,13 +149,17 @@ def extract_blocks(content, base_url=""):
                             offset=offset))
         return offset + len(text)
 
-    def append_node(node, kind, level, path, buffer, offset):
+    def append_node(node, kind, level, path, struct_path, buffer, offset):
         if node.text:
             buffer.append(node.text)
+        counters = {}
         for child in node:
-            if not isinstance(child.tag, str):
+            tag = _node_tag(child)
+            if not tag:
                 continue
-            tag = child.tag.lower()
+            index = counters.get(tag, 0) + 1
+            counters[tag] = index
+            child_struct = _child_struct_path(struct_path, tag, index)
             if tag == "img":
                 offset = flush_text(buffer, offset, kind, level, path)
                 src = absolute_url(
@@ -151,7 +176,7 @@ def extract_blocks(content, base_url=""):
                     except (TypeError, ValueError):
                         image_height = 0
                     blocks.append(Block(
-                        "image", path=_relative_xpath(child, root),
+                        "image", path=_anchor_path(child, child_struct),
                         offset=offset, source_url=src,
                         width=image_width, height=image_height,
                     ))
@@ -163,21 +188,22 @@ def extract_blocks(content, base_url=""):
                               ("footnote" if tag == "aside" or kind == "footnote"
                                else "text"))
                 child_level = int(tag[1]) if child_kind == "heading" else 0
-                child_path = _relative_xpath(child, root)
+                child_path = _anchor_path(child, child_struct)
                 child_offset = append_node(
                     child, child_kind, child_level,
-                    child_path, buffer, 0,
+                    child_path, child_struct, buffer, 0,
                 )
                 flush_text(
                     buffer, child_offset, child_kind, child_level, child_path)
             else:
-                offset = append_node(child, kind, level, path, buffer, offset)
+                offset = append_node(
+                    child, kind, level, path, child_struct, buffer, offset)
             if child.tail:
                 buffer.append(child.tail)
         return offset
 
     buffer = []
-    offset = append_node(root, "text", 0, ".", buffer, 0)
+    offset = append_node(root, "text", 0, ".", ".", buffer, 0)
     flush_text(buffer, offset, "text", 0, ".")
     if not blocks:
         text = _plain_text(root)
@@ -647,7 +673,7 @@ _LINE_END_FORBIDDEN = "（《【「『“‘([{"
 
 
 def _wrap_line_parts(draw, text, font, max_width, fallback_font=None,
-                     remove_trailing_spaces=True):
+                     remove_trailing_spaces=True, metrics=None):
     text = str(text or "").replace("\u00a0", " ")
     if not text:
         return [("", 0)]
@@ -656,12 +682,21 @@ def _wrap_line_parts(draw, text, font, max_width, fallback_font=None,
     current_start = 0
     current_width = 0.0
 
+    def character_width(character):
+        # 命中每字体字符宽度表时只做一次 dict.get; 未命中才走
+        # char_font()/text_width() 的多层缓存查找。
+        if metrics is not None:
+            cached = metrics.get(character)
+            if cached is not None:
+                return cached
+        selected = char_font(font, fallback_font, character)
+        value = text_width(draw, character, selected)
+        if metrics is not None:
+            metrics[character] = value
+        return value
+
     def measure(value):
-        return sum(
-            text_width(draw, character,
-                       char_font(font, fallback_font, character))
-            for character in value
-        )
+        return sum(character_width(character) for character in value)
 
     def rendered(value):
         return value.rstrip() if remove_trailing_spaces else value
@@ -711,9 +746,8 @@ def _wrap_line_parts(draw, text, font, max_width, fallback_font=None,
                 current_width += run_width
             index = run_end
             continue
-        character_width = text_width(
-            draw, character, char_font(font, fallback_font, character))
-        if current and current_width + character_width > max_width:
+        char_width = character_width(character)
+        if current and current_width + char_width > max_width:
             cut = current
             carry_start = len(cut)
             while (carry_start > 0 and
@@ -730,7 +764,7 @@ def _wrap_line_parts(draw, text, font, max_width, fallback_font=None,
             if not current:
                 current_start = index
             current += character
-            current_width += character_width
+            current_width += char_width
         index += 1
     lines.append((rendered(current), current_start))
     return lines
@@ -794,6 +828,19 @@ class ReaderDocument:
         pages = []
         current = []
         y = 0
+        width_tables = {}
+
+        def width_table(font, fallback_font):
+            """每个 (正文字体, 回退字体) 一份字符宽度表, 跨块复用。
+
+            用 id 做键但校验对象身份, 避免字体被回收后 id 复用导致串号。
+            """
+            key = (id(font), id(fallback_font))
+            entry = width_tables.get(key)
+            if entry is None or entry[0] is not font or entry[1] is not fallback_font:
+                entry = (font, fallback_font, {})
+                width_tables[key] = entry
+            return entry[2]
 
         def new_page():
             nonlocal current, y
@@ -817,7 +864,8 @@ class ReaderDocument:
             prefix = "　　" if indent and self.config.get("first_line_indent") else ""
             for line, line_start in _wrap_line_parts(
                     draw, prefix + text, font, usable_width,
-                    fallback_font=fallback_font):
+                    fallback_font=fallback_font,
+                    metrics=width_table(font, fallback_font)):
                 if y + actual_height > usable_height and current:
                     new_page()
                 current.append({

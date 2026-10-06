@@ -116,6 +116,68 @@ def _image_ready(ctx, url, ok=True):
     ctx.post(apply)
 
 
+def _retry_button_at(x, y):
+    for rect in STATE.get("image_retry_rects", {}).values():
+        rx, ry, width, height, url, target = rect
+        if rx <= x < rx + width and ry <= y < ry + height:
+            return url, target
+    return None
+
+
+def _manual_retry(ctx, url, target):
+    """用户主动点重试: 清掉失败退避并以最高优先级重下。
+
+    只有这次手动请求失败才弹窗; 后台/自动重试失败仍然静默走退避。
+    """
+    STATE["manual_retry_url"] = url
+    ctx.toast("正在重试…")
+
+    def finished(ok, url=url):
+        def apply():
+            if STATE.get("manual_retry_url") == url:
+                STATE["manual_retry_url"] = None
+            if ok:
+                _image_ready(ctx, url, True)
+            elif ctx.page_name == "reader":
+                ctx.message(["图片加载失败", "请稍后重试"])
+        ctx.post(apply)
+
+    scheduled = ctx.images.prefetch(
+        url, ctx.config.get("strict_tls"), height=target,
+        priority=-1, retry=True, force=True, manual_callback=finished,
+    )
+    if not scheduled:
+        STATE["manual_retry_url"] = None
+        ctx.message(["图片加载失败", "请稍后重试"])
+
+
+# 正文字号默认 48px(Pillow 的 size 即像素), 按钮取约两个字宽/两倍行高便于点按。
+_RETRY_BUTTON_SIZE = 108
+_RETRY_BUTTON_MARGIN = 16
+
+
+def _draw_retry_button(ctx, canvas, item, url, target, top):
+    """在未加载插图区域的右下角画重试图标,并登记点击命中矩形。"""
+    region_x = int(item.get("x") or 0)
+    region_y = int(top + int(item.get("y") or 0))
+    region_w = int(item.get("width") or 0)
+    region_h = int(item.get("height") or 0)
+    if region_w <= 0 or region_h <= 0:
+        return
+    size = min(_RETRY_BUTTON_SIZE,
+               max(24, min(region_w, region_h) // 2))
+    # 按钮必须连同 margin 一起落在插图区域内(极扁/极窄的插图会自动缩小)。
+    size = min(size, max(16, min(region_w - 2 * _RETRY_BUTTON_MARGIN,
+                                region_h - 2 * _RETRY_BUTTON_MARGIN)))
+    x = region_x + region_w - size - _RETRY_BUTTON_MARGIN
+    y = region_y + region_h - size - _RETRY_BUTTON_MARGIN
+    x = max(0, min(x, canvas.width - size))
+    y = max(0, min(y, canvas.height - size))
+    canvas.retry_icon(x + size // 2, y + size // 2, size=int(size * 0.62))
+    STATE["image_retry_rects"][(item.get("path"), item.get("y"))] = (
+        x, y, size, size, url, target)
+
+
 def _fullscreen_ready(ctx, url, ok=True):
     if not ok:
         return
@@ -241,6 +303,8 @@ STATE = {
     "signature": None,
     "image_pending": set(),
     "image_rects": {},
+    "image_retry_rects": {},
+    "manual_retry_url": None,
     "fullscreen_image": None,
     "last_turn_at": 0.0,
     "fitted_cache": {},
@@ -708,6 +772,7 @@ def _turn(ctx, delta, upload=False):
 
 def leave(ctx):
     """离开阅读器: durable 落盘并 best-effort 上传云端。"""
+    STATE["manual_retry_url"] = None
     try:
         flush_progress(ctx, upload=True)
     except Exception:
@@ -823,6 +888,8 @@ def render(ctx, canvas):
     page_index = max(0, min(int(STATE["page"]), len(doc.pages) - 1))
     page = doc.pages[page_index]
     STATE["image_rects"] = {}
+    STATE["image_retry_rects"] = {}
+    missing_images = []
     for item in page:
         if item.get("type") != "image":
             continue
@@ -830,6 +897,7 @@ def render(ctx, canvas):
         target = height_bucket(item.get("height") or 1024)
         image = ctx.images.get(url, target)
         if image is None:
+            missing_images.append((item, url, target))
             ctx.images.prefetch(
                 url, ctx.config.get("strict_tls"), height=target,
                 priority=0,
@@ -847,6 +915,8 @@ def render(ctx, canvas):
     if chrome_visible:
         # 控件层画在正文之上：正文分页几何不随控件显隐变化
         _render_chrome(ctx, canvas, title, doc)
+    for item, url, target in missing_images:
+        _draw_retry_button(ctx, canvas, item, url, target, top)
 
 
 def _render_chrome(ctx, canvas, title, doc):
@@ -908,6 +978,11 @@ def handle(data, ctx):
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
     top, _ = _layout_metrics(ctx)
+    if gesture == "tap":
+        retry = _retry_button_at(x, y)
+        if retry is not None:
+            _manual_retry(ctx, retry[0], retry[1])
+            return
     if STATE.get("chrome_visible"):
         if y >= ctx.height - _CHROME_FOOTER:
             for key, rect in STATE["rects"].items():

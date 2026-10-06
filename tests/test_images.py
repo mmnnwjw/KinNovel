@@ -120,6 +120,58 @@ class ImageCacheTests(unittest.TestCase):
         # 退避期内必须拒绝再次排队
         self.assertFalse(self.cache.prefetch(url, height=256))
 
+    def test_manual_retry_forces_queue_and_reports_failure(self):
+        url = "http://127.0.0.1:1/missing.png?size=600x400"
+        self.assertTrue(self.cache.prefetch(url, height=256))
+        key = self.cache._cache_key(url, 256)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and key not in self.cache._failures:
+            time.sleep(0.02)
+        self.assertIn(key, self.cache._failures)
+        # 退避期内普通请求被拒绝，但手动重试必须强制清退避并立即排队
+        self.assertFalse(self.cache.prefetch(url, height=256))
+        manual = []
+        self.assertTrue(self.cache.prefetch(
+            url, height=256, priority=-1, retry=True, force=True,
+            manual_callback=manual.append))
+        self.assertNotIn(key, self.cache._failures)
+        deadline = time.monotonic() + 10
+        while not manual and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(manual, [False])
+
+    def test_background_failure_is_deferred_but_manual_failure_is_not(self):
+        url = "http://127.0.0.1:1/deferred.png?size=600x400"
+        key = self.cache._cache_key(url, 256)
+        automatic = []
+        self.assertTrue(self.cache.prefetch(
+            url, height=256, callback=automatic.append))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and key not in self.cache._failures:
+            time.sleep(0.02)
+        time.sleep(0.2)
+        # 自动回调被折叠进退避队列，不会立刻触发
+        self.assertEqual(automatic, [])
+        manual = []
+        self.cache.prefetch(url, height=256, priority=-1, retry=True,
+                            force=True, manual_callback=manual.append)
+        deadline = time.monotonic() + 10
+        while not manual and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(manual, [False])
+
+    def test_manual_retry_success_reports_true(self):
+        url = self.base + "/manual-ok.png?size=600x400"
+        manual = []
+        self.assertTrue(self.cache.prefetch(
+            url, height=256, priority=-1, force=True,
+            manual_callback=manual.append))
+        self.assertTrue(self._wait(url, 256))
+        deadline = time.monotonic() + 5
+        while not manual and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(manual, [True])
+
     def test_corrupt_cache_file_is_removed(self):
         url = self.base + "/bad.png?size=600x400"
         path = self.cache._path(url, 256)

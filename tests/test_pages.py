@@ -831,6 +831,17 @@ class PageSmokeTests(unittest.TestCase):
         from kinnovel import VERSION
         self.assertEqual(settings.ABOUT_LINES[0], "KinNovel " + VERSION)
 
+    def test_retry_icon_is_smooth_and_open_at_top_right(self):
+        image = Image.new("L", (240, 240), 255)
+        Canvas(image, {}, Theme(False)).retry_icon(120, 120, size=200)
+        values = set(image.getdata())
+        # 超采样 + LANCZOS 必须留下中间灰阶, 否则就是 1-bit 锯齿
+        self.assertTrue(any(10 < value < 245 for value in values))
+        # 圆弧覆盖底部(12,21): 应为前景
+        self.assertLess(image.getpixel((120, 195)), 60)
+        # SVG 缺口在右上象限(3 点钟到 12 点钟之间): 应为背景
+        self.assertGreater(image.getpixel((194, 107)), 200)
+
     def test_reader_image_tap_opens_and_closes_preview(self):
         self._prime_reader()
         reader.STATE["image_rects"] = {
@@ -1352,6 +1363,116 @@ class PageSmokeTests(unittest.TestCase):
         rect = reader.STATE["image_rects"][("p", 0)]
         self.assertEqual(rect[2], 1004)
         self.assertEqual(rect[3], 502)
+        # 图片已加载时不应出现重试按钮
+        self.assertEqual(reader.STATE["image_retry_rects"], {})
+
+    def test_reader_missing_image_registers_retry_button(self):
+        class Doc:
+            page_count = 1
+            pages = [[{
+                "type": "image", "url": "missing-illu", "x": 34, "y": 0,
+                "width": 1004, "height": 600, "path": "p",
+            }]]
+
+        reader.STATE.update({
+            "data": {"Chapter": {"Title": "测试"}},
+            "doc": Doc(),
+            "page": 0,
+            "fullscreen_image": None,
+            "chrome_visible": False,
+            "image_retry_rects": {},
+        })
+        self.context.page_name = "reader"
+        self.context.params = {}
+        with patch.object(self.context.images, "prefetch",
+                          return_value=True) as prefetch:
+            self.context.render()
+        rects = reader.STATE["image_retry_rects"]
+        self.assertIn(("p", 0), rects)
+        x, _y, width, height, url, _target = rects[("p", 0)]
+        self.assertEqual(url, "missing-illu")
+        self.assertEqual(width, height)
+        self.assertEqual(x + width,
+                         34 + 1004 - reader._RETRY_BUTTON_MARGIN)
+        self.assertTrue(any(call.kwargs.get("priority") == 0
+                            for call in prefetch.call_args_list))
+
+    def test_reader_retry_button_uses_top_priority_manual_request(self):
+        class Doc:
+            page_count = 1
+            pages = [[{
+                "type": "image", "url": "missing-illu", "x": 34, "y": 0,
+                "width": 1004, "height": 600, "path": "p",
+            }]]
+
+        reader.STATE.update({
+            "data": {"Chapter": {"Title": "测试"}},
+            "doc": Doc(),
+            "page": 0,
+            "fullscreen_image": None,
+            "chrome_visible": False,
+            "image_retry_rects": {},
+        })
+        self.context.page_name = "reader"
+        self.context.params = {}
+        with patch.object(self.context.images, "prefetch", return_value=True):
+            self.context.render()
+        x, y, width, height, _url, _target = (
+            reader.STATE["image_retry_rects"][("p", 0)])
+        calls = []
+
+        def fake_prefetch(url, strict_tls=False, height=None, callback=None,
+                          priority=0, retry=False, force=False,
+                          manual_callback=None):
+            calls.append({
+                "url": url, "height": height, "priority": priority,
+                "force": force, "manual": manual_callback,
+            })
+            if callable(manual_callback):
+                manual_callback(True)
+            return True
+
+        with patch.object(self.context, "show"), \
+                patch.object(self.context.images, "prefetch",
+                             side_effect=fake_prefetch):
+            reader.handle({
+                "gesture": "tap",
+                "x-pixel": x + width // 2,
+                "y-pixel": y + height // 2,
+            }, self.context)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["url"], "missing-illu")
+        self.assertEqual(calls[0]["priority"], -1)
+        self.assertTrue(calls[0]["force"])
+        self.assertTrue(callable(calls[0]["manual"]))
+        # 点重试按钮不能误触全屏预览
+        self.assertIsNone(reader.STATE["fullscreen_image"])
+
+    def test_reader_manual_retry_failure_only_manual_pops_message(self):
+        messages = []
+        self.context.page_name = "reader"
+
+        def fake_prefetch(url, strict_tls=False, height=None, callback=None,
+                          priority=0, retry=False, force=False,
+                          manual_callback=None):
+            if callable(manual_callback):
+                manual_callback(False)
+            return True
+
+        with patch.object(self.context, "toast"), \
+                patch.object(self.context, "show"), \
+                patch.object(self.context, "message",
+                             side_effect=lambda lines, **kwargs:
+                             messages.append(lines)), \
+                patch.object(self.context.images, "prefetch",
+                             side_effect=fake_prefetch):
+            reader._manual_retry(self.context, "u", 512)
+        self.assertTrue(messages)
+        self.assertIsNone(reader.STATE.get("manual_retry_url"))
+        # 后台/自动失败（ok=False）不弹窗
+        messages.clear()
+        reader._image_ready(self.context, "u", False)
+        self.assertEqual(messages, [])
 
     def test_header_left_uses_back_stack(self):
         self.context.stack = [("home", {})]

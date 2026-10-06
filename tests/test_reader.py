@@ -11,12 +11,14 @@ from kinnovel.config import APP_DIR, Config
 from kinnovel.reader import (
     FontResolver,
     ReaderDocument,
+    BLOCK_TAGS,
     _FONT_OBJECTS,
     _FREETYPE,
     _GLYPH_CACHE,
     _NOTDEF_BYTES,
     _TEXT_WIDTH_CACHE,
     _glyph_available_raster,
+    _relative_xpath,
     cached_font,
     cmap_available,
     extract_blocks,
@@ -92,6 +94,28 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(blocks[1].path, "./p[2]")
         self.assertEqual(blocks[2].path, "./h2[1]")
         self.assertEqual([block.offset for block in blocks], [0, 0, 0])
+
+    def test_nested_xpath_matches_reference(self):
+        html = ("<div><p>一</p><p id='anchor'>二<img src='a.jpg'></p></div>"
+                "<section><div><h2>三</h2><div><p>四</p></div></div></section>")
+        root = sanitize_html(html)
+        reference = {}
+        for element in root.iter():
+            if not isinstance(element.tag, str):
+                continue
+            reference[_relative_xpath(element, root)] = element
+        blocks = extract_blocks(html)
+        self.assertTrue(blocks)
+        for block in blocks:
+            self.assertIn(block.path, reference)
+            element = reference[block.path]
+            if block.kind == "image":
+                self.assertEqual(element.tag.lower(), "img")
+            else:
+                self.assertIn(element.tag.lower(), BLOCK_TAGS)
+        self.assertIn("./div[1]/p[1]", reference)
+        self.assertIn("./section[1]/div[1]/div[1]/p[1]", reference)
+        self.assertIn('//*[@id="anchor"]', reference)
 
     def test_pagination_outputs_text(self):
         chapter = {
