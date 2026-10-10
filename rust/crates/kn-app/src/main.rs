@@ -46,6 +46,8 @@ pub struct KinNovel {
     /// 当前加载的章节字体 (文件, FontId)。只保留一个: 换成别的字体时卸载旧的;
     /// 相邻章节常共用同一字体, 换章时可直接复用。
     pub chapter_font: Option<(PathBuf, FontId)>,
+    /// 前光亮度/色温 (阅读菜单的快捷面板)
+    pub light: kn_platform::Frontlight,
     /// 网络客户端; 离线模式 (主机预览, KN_OFFLINE=1) 下不使用
     net_client: kn_net::Client,
     online: bool,
@@ -68,7 +70,7 @@ impl KinNovel {
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
         net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, net_client, online }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light: kn_platform::Frontlight::detect(), net_client, online }
     }
 
     /// 在线时返回网络客户端 (廉价克隆, 可带进后台任务)。

@@ -44,6 +44,10 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   - **我的** — account card (login state, sign-in), settings, notifications, announcements, about, exit.
 - Pushed pages (book detail, catalog, series, settings sub-pages, reader) show a back arrow in the header and **no tab bar**.
 - The reader is full-screen; its overlay menu has back + home (home = shelf).
+  Under the menu header (novel and comic reader alike) a quick-light panel: rows 亮度 / 色温 = value · − · slider · ＋
+  (tap the slider to jump, swipe on it to drag; only the panel region refreshes, `Ui`). Values are powerd's own
+  (`flIntensity` 0..flMaxIntensity, `currentAmberLevel` 0..24 via `lipc-set-prop`), so they persist after exit;
+  rows the device doesn't support are hidden (no panel at all without a frontlight).
 - Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:
   one page fitted to the whole screen, no bars. Tap left/right 30 % = previous/next (mirrored when 翻页方向 = 从右往左),
   middle = overlay menu (话名 · 页码, progress bar filling from the reading side, 上一话 / 目录 / 放大 / 下一话,

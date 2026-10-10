@@ -687,6 +687,7 @@ impl ReaderPage {
         frame.fill_rect(Rect::new(0, bar.bottom(), w, 2), theme.foreground);
         cx.hits.add(HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
         cx.hits.add(HIT_HOME, Rect::new(w as i32 - bar.h as i32, 0, bar.h, bar.h));
+        super::light::draw(&mut ink, frame, cx.hits, &theme, &m, &cx.app.light, w, bar.bottom() + 2);
 
         // 底部面板
         let pad = m.margin as i32 / 2;
@@ -910,6 +911,7 @@ impl Page<KinNovel> for ReaderPage {
                     GestureKind::Tap | GestureKind::Long => {
                         if self.chrome {
                             return match cx.hits.at(p) {
+                                Some(id) if super::light::on_tap(cx, id, p) => Transition::None,
                                 Some(id) => self.on_chrome_hit(cx, id),
                                 None => {
                                     self.set_chrome(cx, false);
@@ -936,6 +938,11 @@ impl Page<KinNovel> for ReaderPage {
                             self.set_chrome(cx, true);
                             Transition::None
                         }
+                    }
+                    GestureKind::SwipeLeft | GestureKind::SwipeRight | GestureKind::SwipeUp | GestureKind::SwipeDown
+                        if self.chrome && super::light::on_swipe(cx, g) =>
+                    {
+                        Transition::None
                     }
                     GestureKind::SwipeLeft => {
                         self.chrome = false;

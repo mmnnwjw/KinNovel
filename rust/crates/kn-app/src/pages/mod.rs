@@ -10,6 +10,7 @@ pub mod comments;
 pub mod discover;
 pub mod history;
 pub mod image;
+pub mod light;
 pub mod me;
 pub mod notify;
 pub mod reader;
