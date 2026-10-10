@@ -29,7 +29,7 @@ cp "$SCRIPT_DIR/config.xml" "$TARGET/"
 cp "$SCRIPT_DIR/menu.json" "$TARGET/"
 cp "$SCRIPT_DIR/manifest.json" "$TARGET/"
 cp "$SCRIPT_DIR/LICENSE" "$TARGET/"
-cp "$SCRIPT_DIR/THIRD-PARTY-NOTICES.md" "$TARGET/"
+cp "$SCRIPT_DIR/THIRD-PARTY-NOTICES.md" "$SCRIPT_DIR/LICENSE-rime-pinyin-simp" "$TARGET/"
 cp "$SCRIPT_DIR/launch.sh" "$SCRIPT_DIR/uninstall.sh" "$TARGET/"
 chmod +x "$TARGET/bin/kinnovel.sh" "$TARGET/bin/kinnovel" 2>/dev/null || true
 

@@ -22,3 +22,6 @@ send*.bat
 *.pem
 id_rsa*
 .kinovel-secrets/
+
+# 本地 Claude Code 说明, 不入库
+CLAUDE.md
