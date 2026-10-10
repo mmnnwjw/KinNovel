@@ -618,6 +618,7 @@ pub fn run<A: App>(
     let mut feedback_shown = false;
     // 上一帧的配色: 日间/夜间切换后几乎每个像素都反转, 局部刷新残影很重, 要闪刷一次
     let mut last_theme = rt.app.theme();
+    scheduler.set_background(last_theme.background);
     // 电源键按下时刻: 框架进程 (awesome 等) 被我们 SIGSTOP 时, powerd 进入屏保要向 winmgr 查询,
     // 查询会一直挂到超时, 设备根本睡不下去 (KPW5 FW 5.17 实测)。所以一看到电源键按下就先 SIGCONT 框架,
     // 让 powerd 的流程走完; 若 POWER_KEY_GRACE 内没进入屏保, 再暂停框架并重画。
@@ -744,7 +745,7 @@ pub fn run<A: App>(
                         if let Some(rect) = rt.hits.feedback_rect(p) {
                             let mut pressed = scheduler.screen().clone();
                             pressed.invert_rect(rect);
-                            if let Some(req) = scheduler.plan(&pressed, RefreshHint::Feedback) {
+                            for req in scheduler.plan(&pressed, RefreshHint::Feedback) {
                                 if display.present(&pressed, &req).is_ok() {
                                     scheduler.commit(&pressed, &req, RefreshHint::Feedback);
                                     feedback_shown = true;
@@ -794,6 +795,7 @@ pub fn run<A: App>(
                 let theme = rt.app.theme();
                 if theme != last_theme {
                     last_theme = theme;
+                    scheduler.set_background(theme.background);
                     hint = RefreshHint::Flash;
                 }
                 let started = std::time::Instant::now();
@@ -807,17 +809,20 @@ pub fn run<A: App>(
                 let rendered = started.elapsed();
                 let swipe = rt.swipe.take();
                 let mut plan = scheduler.plan(&frame, hint);
-                if let Some(req) = plan.as_mut() {
+                if let [req] = plan.as_mut_slice() {
                     // 翻页刷新 (不闪) 或 request_flash_turn 的整屏闪刷才带动画; swipe 只由这两者设置
                     if (hint == RefreshHint::Turn && !req.flash) || (hint == RefreshHint::Flash && req.flash) {
                         req.swipe = swipe;
                     }
                 }
                 let planned = started.elapsed();
-                if let Some(req) = &plan {
+                for req in &plan {
                     match display.present(&frame, req) {
                         Ok(_) => scheduler.commit(&frame, req, hint),
-                        Err(_) => scheduler.invalidate(),
+                        Err(_) => {
+                            scheduler.invalidate();
+                            break;
+                        }
                     }
                 }
                 if debug {
@@ -827,7 +832,7 @@ pub fn run<A: App>(
                         rendered.as_secs_f32() * 1e3,
                         (planned - rendered).as_secs_f32() * 1e3,
                         (started.elapsed() - planned).as_secs_f32() * 1e3,
-                        plan.map(|r| (r.rect, r.waveform, r.flash, r.swipe))
+                        plan.iter().map(|r| (r.rect, r.waveform, r.flash, r.swipe)).collect::<Vec<_>>()
                     );
                 }
                 wants_idle = true;

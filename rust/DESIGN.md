@@ -40,7 +40,7 @@ crates/
 
 - 组件 `render(&mut Canvas, rect)`; 状态变化时 `mark_dirty(rect, RefreshKind)`。
 - 刷新类型 (对应 KOReader): `Ui`(GC16 局部)、`Partial`(翻页, MTK 用 REAGL)、`Fast`(按下反馈/菜单, DU/A2)、`Flash`(GC16 全刷)。
-- 调度器每帧合并脏区域 (相交/相邻合并, 面积过大升级为整屏), 沿用 0.8.0 的残影预算策略。
+- 调度器每帧把差分按纵向间隔拆成最多 4 个脏区域分别刷新 (KOReader 只合并相交的刷新), 面积过大升级为整屏, 沿用 0.8.0 的残影预算策略; 实心深色块被清回背景色时对该块单独闪刷 (KOReader 关闭弹窗的 `flashui`), 细则见 `kn-ui/src/refresh.rs` 模块说明。
 - 按钮按下立即 `Fast` 反相反馈 (~20 ms), 再执行动作 —— 解决"点了没反应"的墨水屏通病。
 - 帧缓冲写入: 直接写 FBInk 映射的 framebuffer (考虑 line_length 填充), 只写脏矩形。
 

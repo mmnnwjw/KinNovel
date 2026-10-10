@@ -74,8 +74,8 @@ All components draw immediately into the frame and register hits; they never kee
 |---|---|---|
 | Page turn in reader | `Turn` (REAGL full screen) | text everywhere, ghosting handled by REAGL + budget |
 | Page turn in comic reader | `Flash` + swipe animation (`request_flash_turn`, default `comic_page_flash`) or `Turn` + animation | large grey areas ghost badly under partial refresh; a page whose image is still decoding shows a note (`Ui`) and flashes (animated) when the image arrives; a prefetched next chapter opens in the same frame |
-| List page change / tab switch | `Ui` (GC16, diff rect) | mostly full screen, needs clean greys |
-| Press feedback | runtime (invert + A2) | instant |
+| List page change / tab switch | `Ui` (GC16, up to 4 diff regions) + region flash where a solid dark block (old selected tab/chip, inverted row) turns back to background | partial refresh leaves dark blocks as ghosts; text-only changes never flash |
+| Press feedback | runtime (invert + A2 for small targets such as keys, DU for larger ones) | instant; KOReader uses `a2` only on the keyboard, `fast` elsewhere |
 | Toast show/hide, overlay menu | `Ui` | small rect |
 | Night mode toggle, wake from sleep | `Flash` | full inversion |
 

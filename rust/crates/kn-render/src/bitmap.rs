@@ -376,6 +376,55 @@ impl Bitmap {
         ))
     }
 
+    /// 与 `other` 比较, 按纵向分成若干互不相交的变化区域 (KOReader 式的多脏区):
+    /// 相隔不少于 `gap` 行未变化的行就分开; 区域多于 `max_regions` 时反复合并间隔最小的相邻两块。
+    /// 每块的左右边界是块内所有变化行的并集。完全相同返回空。
+    pub fn diff_regions(&self, other: &Bitmap, gap: u32, max_regions: usize) -> Vec<Rect> {
+        if self.width != other.width || self.height != other.height {
+            return Vec::new();
+        }
+        let w = self.width as usize;
+        // (min_x, max_x, min_y, max_y)
+        let mut bands: Vec<(usize, usize, u32, u32)> = Vec::new();
+        for y in 0..self.height {
+            let a = &self.row(y)[..w];
+            let b = &other.row(y)[..w];
+            if rows_equal(a, b) {
+                continue;
+            }
+            match bands.last_mut() {
+                Some(band) if y - band.3 <= gap => {
+                    // 与 diff_bbox 相同: 只扫描当前左右边界之外的部分
+                    if let Some(x) = (0..band.0).find(|&x| a[x] != b[x]) {
+                        band.0 = x;
+                    }
+                    if let Some(x) = (band.1 + 1..w).rev().find(|&x| a[x] != b[x]) {
+                        band.1 = x;
+                    }
+                    band.3 = y;
+                }
+                _ => {
+                    let left = (0..w).find(|&x| a[x] != b[x]).unwrap_or(0);
+                    let right = (left..w).rev().find(|&x| a[x] != b[x]).unwrap_or(left);
+                    bands.push((left, right, y, y));
+                }
+            }
+        }
+        let max_regions = max_regions.max(1);
+        while bands.len() > max_regions {
+            let i = (0..bands.len() - 1).min_by_key(|&i| bands[i + 1].2 - bands[i].3).unwrap_or(0);
+            let next = bands.remove(i + 1);
+            let band = &mut bands[i];
+            band.0 = band.0.min(next.0);
+            band.1 = band.1.max(next.1);
+            band.3 = next.3;
+        }
+        bands
+            .into_iter()
+            .map(|(x0, x1, y0, y1)| Rect::new(x0 as i32, y0 as i32, (x1 - x0 + 1) as u32, y1 - y0 + 1))
+            .collect()
+    }
+
     /// 双线性/区域平均缩放到 (w, h), 用于封面与插图。缩小时用区域平均以免锯齿。
     pub fn resize(&self, w: u32, h: u32) -> Bitmap {
         if w == 0 || h == 0 {
@@ -840,6 +889,22 @@ mod tests {
         let a = Bitmap::new(10, 10, 5);
         let b = Bitmap::new(10, 10, 5);
         assert!(a.diff_bbox(&b).is_none());
+    }
+
+    #[test]
+    fn diff_regions_splits_on_vertical_gaps() {
+        let a = Bitmap::new(100, 200, 255);
+        let mut b = a.clone();
+        b.fill_rect(Rect::new(10, 5, 20, 10), 0);
+        b.fill_rect(Rect::new(50, 12, 5, 5), 0);
+        b.fill_rect(Rect::new(0, 150, 30, 20), 0);
+        assert!(a.diff_regions(&a.clone(), 16, 4).is_empty());
+        let r = a.diff_regions(&b, 16, 4);
+        assert_eq!(r, vec![Rect::new(10, 5, 45, 12), Rect::new(0, 150, 30, 20)]);
+        // gap 不够: 合成一块
+        assert_eq!(a.diff_regions(&b, 200, 4), vec![Rect::new(0, 5, 55, 165)]);
+        // 上限 1 块: 合并
+        assert_eq!(a.diff_regions(&b, 16, 1), vec![Rect::new(0, 5, 55, 165)]);
     }
 
     #[test]
