@@ -129,6 +129,13 @@ impl<'a, A: App> Cx<'a, A> {
         *self.swipe = swipe;
     }
 
+    /// 翻页且整屏闪刷 (漫画: 大面积灰阶, 每页清残影), 同样带 MTK 翻页动画 —— FBInk 的动画标志与
+    /// 闪刷互不排斥 (UPDATE_MODE_FULL + 动画)。小说阅读页不用它: 残影预算触发的闪刷仍不带动画。
+    pub fn request_flash_turn(&mut self, swipe: Option<SwipeDir>) {
+        self.request_redraw(RefreshHint::Flash);
+        *self.swipe = swipe;
+    }
+
     /// `delay` 之后调用当前页面实例的 `on_timer(token)` (页面已关闭则丢弃)。同一 token 重设会覆盖旧的。
     pub fn after(&mut self, delay: Duration, token: u32) {
         self.timers.add(std::time::Instant::now() + delay, self.instance, token);
@@ -779,7 +786,8 @@ pub fn run<A: App>(
                 let swipe = rt.swipe.take();
                 let mut plan = scheduler.plan(&frame, hint);
                 if let Some(req) = plan.as_mut() {
-                    if hint == RefreshHint::Turn && !req.flash {
+                    // 翻页刷新 (不闪) 或 request_flash_turn 的整屏闪刷才带动画; swipe 只由这两者设置
+                    if (hint == RefreshHint::Turn && !req.flash) || (hint == RefreshHint::Flash && req.flash) {
                         req.swipe = swipe;
                     }
                 }

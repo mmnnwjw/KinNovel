@@ -6,15 +6,21 @@
 //! - 菜单: 顶栏 (返回 / 书名 / 主页) + 底部面板 (话名与页码、进度条、上一话 / 目录 / 放大 / 下一话、
 //!   翻页方向 / 每页全刷 / 设置)。
 //! - 图片地址按 6 张一批向服务器要 (与网页版一致), 清单写缓存, 离线可读已缓存的页 (见 `crate::comic`)。
-//!   空闲时预取并解码前后页, 地址提前一批预取 (后台优先级)。
-//! - 刷新: 默认每页闪刷 (漫画大面积灰阶, 局部刷新残影明显); 关掉后走翻页刷新 (REAGL + 残影预算, 有翻页动画)。
-//!   翻到还没解码好的页时先画提示, 图片到了再按翻页的方式刷新。
+//! - 预取: 空闲时解码后面 `comic_prefetch` 页 (默认 2) 与前一页, 地址提前一批要 (后台优先级);
+//!   快翻时离当前页太远的排队任务在下载前 / 解码前自行放弃 (共享的当前页计数), 不占工作线程。
+//!   读到本话末尾附近时预取下一话的地址与第一页 (并解码), 换话时直接交给新页面, 打开即显示。
+//! - 画质 (`comic_quality`): 高清向 CDN 要不小于屏幕高的档位 (2048), 标准要 1536 (略放大, 解码与流量约少 40%)。
+//! - 刷新: 默认每页闪刷 (漫画大面积灰阶, 局部刷新残影明显); 关掉后走翻页刷新 (REAGL + 残影预算)。
+//!   两种方式都带 MTK 翻页动画 (`page_turn_animation`, PW5 及更新机型)。
+//!   翻到还没解码好的页时先画提示, 图片到了再按翻页的方式刷新 (动画补上)。
 //! - 进度: 本地 `progress/comic-<bid>.json` + 书架的 "继续阅读"; 服务器 `SaveReadPosition`
 //!   (XPath = 1 起的页码, 与网页版一致), 上传时机与小说阅读页相同: 退出、休眠时上传, 换话时低优先级上传,
 //!   打开目录 / 放大 / 设置时不上传, 位置没变不重复上传。
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
@@ -30,8 +36,8 @@ use crate::KinNovel;
 
 /// 进度落盘节流 (与小说阅读页一致), 离开/休眠时强制落盘。
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
-/// 保留解码结果的范围 (当前页前后几页, 每页 ~2 MB)。
-const KEEP_RADIUS: i64 = 3;
+/// 页面离开后让排队中的任务全部放弃 (当前页计数设到很远的地方)。
+const FOCUS_GONE: i64 = -1_000_000;
 
 const HIT_BACK: HitId = HitId(1);
 const HIT_HOME: HitId = HitId(2);
@@ -81,7 +87,16 @@ struct BatchLoaded {
 struct PageLoaded {
     chapter_id: i64,
     index: usize,
+    /// 任务开始时这页已离当前页太远, 没有下载/解码
+    cancelled: bool,
     result: Result<Option<Bitmap>, String>,
+}
+
+/// 下一话的预取结果 (换话时交给新页面)。
+struct NextPrefetched {
+    chapter_id: i64,
+    manifest: Option<Manifest>,
+    first: Option<Bitmap>,
 }
 
 pub struct ComicReaderPage {
@@ -97,8 +112,13 @@ pub struct ComicReaderPage {
     batches: HashSet<usize>,
     chrome: bool,
     note: String,
-    /// 当前页的图片到达时按翻页的方式刷新 (翻到未就绪的页、刚进入时)
-    flash_pending: bool,
+    /// 当前页的图片到达时按翻页的方式刷新 (翻到未就绪的页、刚进入时), 值是翻页方向 (0 = 无动画)
+    pending_present: Option<i64>,
+    /// 当前页 (给后台任务判断自己是否已过期)
+    focus: Arc<AtomicI64>,
+    /// 下一话预取: 已发起 / 结果
+    next_started: bool,
+    next: Option<NextPrefetched>,
     next_leave: Leave,
     last_saved: Option<Instant>,
 }
@@ -117,10 +137,39 @@ impl ComicReaderPage {
             batches: HashSet::new(),
             chrome: false,
             note: String::new(),
-            flash_pending: true,
+            pending_present: Some(0),
+            focus: Arc::new(AtomicI64::new(0)),
+            next_started: false,
+            next: None,
             next_leave: Leave::Exit,
             last_saved: None,
         }
+    }
+
+    /// 换到下一话, 带上预取好的地址清单与已解码的第一页 (打开即显示, 并补放翻页动画)。
+    fn with_prefetched(book_id: i64, next: NextPrefetched) -> Self {
+        let mut page = ComicReaderPage::new(book_id, next.chapter_id, Entry::First);
+        if let Some(m) = next.manifest {
+            page.manifest = m;
+        }
+        if let Some(first) = next.first {
+            page.slots.insert(0, Slot::Ready(first));
+        }
+        page.pending_present = Some(1);
+        page
+    }
+
+    fn prefetch_depth(cx: &Cx<KinNovel>) -> usize {
+        cx.app.config.int("comic_prefetch", 2).clamp(1, 4) as usize
+    }
+
+    /// 保留解码结果的范围: 预取深度 + 1 (每页 ~2 MB)。
+    fn keep_radius(cx: &Cx<KinNovel>) -> i64 {
+        Self::prefetch_depth(cx) as i64 + 1
+    }
+
+    fn high_quality(cx: &Cx<KinNovel>) -> bool {
+        cx.app.config.string("comic_quality", "high") != "standard"
     }
 
     fn rtl(cx: &Cx<KinNovel>) -> bool {
@@ -155,11 +204,12 @@ impl ComicReaderPage {
         let net = cx.app.net();
         let (book_id, chapter_id, entry) = (self.book_id, self.chapter_id, self.entry);
         let local = comic::load_progress(&paths, book_id);
+        let seeded = (self.manifest.total() > 0).then(|| self.manifest.clone());
         cx.spawn(move || -> Result<Loaded, String> {
             let started = Instant::now();
             let book = comic::load_book(&paths, net.as_ref(), book_id);
             let mut server = None;
-            let mut manifest = match Manifest::load(&paths, chapter_id) {
+            let mut manifest = match seeded.or_else(|| Manifest::load(&paths, chapter_id)) {
                 Some(m) if m.total() > 0 => m,
                 _ => {
                     let (m, position) = comic::fetch_batch(&paths, net.as_ref(), chapter_id, 0, 0)?;
@@ -225,13 +275,59 @@ impl ComicReaderPage {
         let net = cx.app.net();
         let (w, h) = (cx.width, cx.height);
         let chapter_id = self.chapter_id;
+        let focus = self.focus.clone();
+        let keep = Self::keep_radius(cx);
+        let high = Self::high_quality(cx);
         cx.spawn(move || {
-            let height = comic::request_height(&url, w, h);
-            let result = comic::page_bytes(&paths, net.as_ref(), &url, height).and_then(|bytes| match bytes {
+            // 排队期间读者可能已经翻远了: 下载前、解码前各查一次
+            let far = || (index as i64 - focus.load(Ordering::Relaxed)).abs() > keep;
+            let cancelled = PageLoaded { chapter_id, index, cancelled: true, result: Ok(None) };
+            if far() {
+                return cancelled;
+            }
+            let height = comic::request_height(&url, w, h, high);
+            let bytes = comic::page_bytes(&paths, net.as_ref(), &url, height);
+            if far() {
+                return cancelled;
+            }
+            let started = Instant::now();
+            let result = bytes.and_then(|bytes| match bytes {
                 None => Ok(None),
                 Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h))).map(|img| Some(img.fit_within(w, h))).map_err(|e| e.to_string()),
             });
-            PageLoaded { chapter_id, index, result }
+            if crate::debug() {
+                eprintln!("[comic] 第 {} 页解码 {} ms", index + 1, started.elapsed().as_millis());
+            }
+            PageLoaded { chapter_id, index, cancelled: false, result }
+        });
+    }
+
+    /// 读到本话末尾附近: 预取下一话的地址清单与第一页 (下载并解码), 换话时交给新页面。
+    fn prefetch_next_chapter(&mut self, cx: &mut Cx<KinNovel>) {
+        if self.next_started {
+            return;
+        }
+        let next = self.book.as_ref().and_then(|b| b.index_of(self.chapter_id).and_then(|i| b.chapters.get(i + 1)).cloned());
+        let Some(next) = next else { return };
+        self.next_started = true;
+        let paths = cx.app.paths.clone();
+        if !Self::online(cx) && Manifest::load(&paths, next.id).is_none() {
+            return;
+        }
+        let net = cx.app.net();
+        let (w, h) = (cx.width, cx.height);
+        let high = Self::high_quality(cx);
+        cx.spawn(move || {
+            let started = Instant::now();
+            let manifest = Manifest::load(&paths, next.id)
+                .filter(|m| m.total() > 0 && m.url(0).is_some())
+                .or_else(|| comic::fetch_batch(&paths, net.as_ref(), next.id, 0, crate::net::BACKGROUND_PRIORITY).ok().map(|(m, _)| m));
+            let first = manifest.as_ref().and_then(|m| m.url(0)).and_then(|url| {
+                let bytes = comic::page_bytes(&paths, net.as_ref(), url, comic::request_height(url, w, h, high)).ok()??;
+                kn_render::decode_gray(&bytes, Some((w, h))).ok().map(|img| img.fit_within(w, h))
+            });
+            eprintln!("[comic] 预取下一话 {}: 清单 {}, 第一页 {}, {} ms", next.id, manifest.is_some(), first.is_some(), started.elapsed().as_millis());
+            NextPrefetched { chapter_id: next.id, manifest, first }
         });
     }
 
@@ -240,10 +336,17 @@ impl ComicReaderPage {
         self.manifest = loaded.manifest;
         self.page = loaded.page;
         self.status = Status::Ready;
-        self.flash_pending = true;
+        self.focus.store(self.page as i64, Ordering::Relaxed);
         self.request_page(cx, self.page, 0);
         self.save_progress(cx, true);
-        cx.request_redraw(RefreshHint::Ui);
+        // 预取交来的第一页已经解码好: 直接显示
+        if matches!(self.slots.get(&self.page), Some(Slot::Ready(_))) {
+            let delta = self.pending_present.take().unwrap_or(0);
+            self.present(cx, delta);
+        } else {
+            self.pending_present.get_or_insert(0);
+            cx.request_redraw(RefreshHint::Ui);
+        }
     }
 
     fn on_batch(&mut self, cx: &mut Cx<KinNovel>, b: BatchLoaded) {
@@ -272,8 +375,10 @@ impl ComicReaderPage {
     }
 
     fn on_page(&mut self, cx: &mut Cx<KinNovel>, p: PageLoaded) {
-        if p.chapter_id != self.chapter_id || (p.index as i64 - self.page as i64).abs() > KEEP_RADIUS {
-            self.slots.remove(&p.index);
+        if p.chapter_id != self.chapter_id || p.cancelled || (p.index as i64 - self.page as i64).abs() > Self::keep_radius(cx) {
+            if matches!(self.slots.get(&p.index), Some(Slot::Pending)) {
+                self.slots.remove(&p.index);
+            }
             return;
         }
         let slot = match p.result {
@@ -287,26 +392,26 @@ impl ComicReaderPage {
         let ready = matches!(slot, Slot::Ready(_));
         self.slots.insert(p.index, slot);
         if p.index == self.page {
-            if ready && std::mem::take(&mut self.flash_pending) {
-                self.present(cx, 0);
-            } else {
-                cx.request_redraw(RefreshHint::Ui);
+            match self.pending_present.take().filter(|_| ready) {
+                Some(delta) => self.present(cx, delta),
+                None => cx.request_redraw(RefreshHint::Ui),
             }
         }
     }
 
     // ---- 翻页 ----
 
-    /// 刷新当前页: 每页全刷时闪刷, 否则走翻页刷新 (`delta` 决定翻页动画方向, 0 = 无动画)。
+    /// 刷新当前页: 每页全刷时整屏闪刷, 否则走翻页刷新; 两者都可带翻页动画
+    /// (`delta` 决定方向, 0 = 无动画; 设备不支持时显示层忽略)。
     fn present(&self, cx: &mut Cx<KinNovel>, delta: i64) {
-        if cx.app.config.bool("comic_page_flash", true) {
-            cx.request_redraw(RefreshHint::Flash);
-            return;
-        }
         let animate = delta != 0 && cx.app.config.bool("page_turn_animation", true);
         // 向后翻: 从左往右读时内容左移, 从右往左读时右移
         let swipe = animate.then(|| if (delta > 0) != Self::rtl(cx) { SwipeDir::Left } else { SwipeDir::Right });
-        cx.request_turn(swipe);
+        if cx.app.config.bool("comic_page_flash", true) {
+            cx.request_flash_turn(swipe);
+        } else {
+            cx.request_turn(swipe);
+        }
     }
 
     /// `delta` 是逻辑方向: +1 = 下一页 (与屏幕左右无关)。
@@ -324,14 +429,16 @@ impl ComicReaderPage {
         self.page = target as usize;
         self.note.clear();
         let page = self.page as i64;
-        self.slots.retain(|i, s| (*i as i64 - page).abs() <= KEEP_RADIUS || matches!(s, Slot::Pending));
+        self.focus.store(page, Ordering::Relaxed);
+        let keep = Self::keep_radius(cx);
+        self.slots.retain(|i, s| (*i as i64 - page).abs() <= keep || matches!(s, Slot::Pending));
         self.request_page(cx, self.page, 0);
         self.save_progress(cx, false);
         if matches!(self.slots.get(&self.page), Some(Slot::Ready(_))) {
-            self.flash_pending = false;
+            self.pending_present = None;
             self.present(cx, delta);
         } else {
-            self.flash_pending = true;
+            self.pending_present = Some(delta);
             cx.request_redraw(RefreshHint::Ui);
         }
         Transition::None
@@ -357,6 +464,11 @@ impl ComicReaderPage {
         }
         self.save_progress(cx, true);
         self.next_leave = Leave::Chapter;
+        if delta > 0 {
+            if let Some(next) = self.next.take().filter(|n| n.chapter_id == target.id) {
+                return Transition::Replace(Box::new(ComicReaderPage::with_prefetched(self.book_id, next)));
+            }
+        }
         let entry = if delta < 0 { Entry::Last } else { Entry::First };
         Transition::Replace(Box::new(ComicReaderPage::new(self.book_id, target.id, entry)))
     }
@@ -427,7 +539,7 @@ impl ComicReaderPage {
 
     fn zoom(&mut self, cx: &mut Cx<KinNovel>) -> Transition<KinNovel> {
         let Some(url) = self.manifest.url(self.page).map(str::to_string) else { return Transition::None };
-        let height = comic::request_height(&url, cx.width, cx.height);
+        let height = comic::request_height(&url, cx.width, cx.height, Self::high_quality(cx));
         self.next_leave = Leave::Child;
         Transition::Push(Box::new(super::image::ImagePage::comic(url, height)))
     }
@@ -573,13 +685,27 @@ impl Page<KinNovel> for ComicReaderPage {
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
         self.next_leave = Leave::Exit;
-        if !returning && matches!(self.status, Status::Loading) {
-            self.start_load(cx);
+        if returning || !matches!(self.status, Status::Loading) {
+            return;
         }
+        // 预取交来的下一话 (清单 + 已解码的第一页): 当场就绪, 换话这一帧直接是带动画的闪刷,
+        // 不先画一帧 "正在打开…"。书目只读缓存里的小 JSON。
+        let seeded = self.entry == Entry::First && self.manifest.total() > 0 && matches!(self.slots.get(&0), Some(Slot::Ready(_)));
+        if let Some(book) = seeded.then(|| ComicBook::load(&cx.app.paths, self.book_id)).flatten() {
+            let manifest = std::mem::take(&mut self.manifest);
+            eprintln!("[comic] 打开 {}/{}: {} 页, 预取的第一页", self.book_id, self.chapter_id, manifest.total());
+            self.on_loaded(cx, Loaded { book: Some(book), manifest, page: 0 });
+            return;
+        }
+        self.start_load(cx);
     }
 
     fn leave(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
+        if self.next_leave != Leave::Child {
+            // 排队中的预取全部放弃
+            self.focus.store(FOCUS_GONE, Ordering::Relaxed);
+        }
         match self.next_leave {
             Leave::Exit => self.upload_position(cx, 0),
             Leave::Chapter => self.upload_position(cx, crate::net::BACKGROUND_PRIORITY),
@@ -599,6 +725,13 @@ impl Page<KinNovel> for ComicReaderPage {
         };
         let msg = match msg.downcast::<BatchLoaded>() {
             Ok(b) => return self.on_batch(cx, *b),
+            Err(other) => other,
+        };
+        let msg = match msg.downcast::<NextPrefetched>() {
+            Ok(n) => {
+                self.next = Some(*n);
+                return;
+            }
             Err(other) => other,
         };
         let Ok(result) = msg.downcast::<Result<Loaded, String>>() else { return };
@@ -715,9 +848,10 @@ impl Page<KinNovel> for ComicReaderPage {
         if !matches!(self.status, Status::Ready) {
             return false;
         }
-        // 先解码前后页 (翻页只需拷贝), 再提前要下一批地址
+        // 先解码后面几页与前一页 (翻页只需拷贝), 再提前要下一批地址, 最后预取下一话
         let page = self.page;
-        for index in [page + 1, page + 2, page.wrapping_sub(1)] {
+        let depth = Self::prefetch_depth(cx);
+        for index in (page + 1..=page + depth).chain([page.wrapping_sub(1)]) {
             if index < self.total() && !self.slots.contains_key(&index) {
                 self.request_page(cx, index, crate::net::BACKGROUND_PRIORITY);
                 // 地址还在路上时没有占位, 不算做了事 (否则空闲循环会一直空转)
@@ -729,6 +863,9 @@ impl Page<KinNovel> for ComicReaderPage {
         let ahead = page + comic::BATCH / 2 + 1;
         if Self::online(cx) && self.manifest.needs_batch(ahead) {
             self.request_batch(cx, Manifest::batch_start(ahead), crate::net::BACKGROUND_PRIORITY);
+        }
+        if page + depth + 1 >= self.total() {
+            self.prefetch_next_chapter(cx);
         }
         false
     }

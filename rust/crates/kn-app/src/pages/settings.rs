@@ -36,6 +36,7 @@ const fn toggle(key: &'static str, label: &'static str, note: &'static str, defa
 
 const CONVERT: &[(&str, &str)] = &[("", "关闭"), ("t2s", "繁转简"), ("s2t", "简转繁")];
 const COMIC_DIRECTION: &[(&str, &str)] = &[("ltr", "从左往右"), ("rtl", "从右往左")];
+const COMIC_QUALITY: &[(&str, &str)] = &[("high", "高清"), ("standard", "标准")];
 /// 漫画分组的下标 (漫画阅读页的 "设置" 直接打开它)。
 const COMIC_GROUP: usize = 3;
 
@@ -73,6 +74,8 @@ const GROUPS: &[(&str, &[Setting])] = &[
         &[
             Setting { key: "comic_direction", label: "翻页方向", note: "日漫选从右往左", kind: Kind::Choice(COMIC_DIRECTION), default: 0.0 },
             toggle("comic_page_flash", "每页全屏刷新", "", true),
+            Setting { key: "comic_quality", label: "画质", note: "标准: 更快、更省流量", kind: Kind::Choice(COMIC_QUALITY), default: 0.0 },
+            step("comic_prefetch", "预加载页数", "", 1.0, 4.0, 1.0, 0, 2.0),
             step("comic_cache_mb", "漫画缓存 (MB)", "启动时清理", 64.0, 2048.0, 64.0, 0, 256.0),
         ],
     ),

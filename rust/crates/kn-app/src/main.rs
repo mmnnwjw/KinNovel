@@ -30,6 +30,12 @@ const SYSTEM_FONTS: &[&str] = &[
 ];
 
 /// 应用全局状态 (只在 UI 线程访问)。页面自己的状态放在各页面结构体里。
+/// `KN_DEBUG=1`: 额外的耗时日志 (与 kn-ui 每帧日志同一开关)。
+pub fn debug() -> bool {
+    static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var_os("KN_DEBUG").is_some())
+}
+
 pub struct KinNovel {
     pub paths: Paths,
     pub config: Config,

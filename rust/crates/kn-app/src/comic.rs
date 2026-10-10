@@ -241,7 +241,9 @@ pub fn save_progress(paths: &Paths, book_id: i64, p: &ComicProgress) -> std::io:
 
 /// 向 CDN 要多高的图: 按 URL 里的 `size=WxH` 算出适配屏幕后的高度, 再取档位;
 /// 没有尺寸信息时按屏幕高度。横向跨页图适配宽度后很矮, 不用要 2048 的版本。
-pub fn request_height(url: &str, screen_w: u32, screen_h: u32) -> u32 {
+/// `high = false` (画质 "标准") 时允许略小于显示高度 (最多小 10%, 显示时放大): KPW5 上
+/// 1648 高的页面会要 1536 档而不是 2048 档, 解码时间与流量约少 40%。
+pub fn request_height(url: &str, screen_w: u32, screen_h: u32, high: bool) -> u32 {
     let size = url.split_once('?').and_then(|(_, q)| {
         q.split('&').find_map(|kv| {
             let (w, h) = kv.strip_prefix("size=")?.split_once('x')?;
@@ -255,6 +257,7 @@ pub fn request_height(url: &str, screen_w: u32, screen_h: u32) -> u32 {
         }
         _ => screen_h,
     };
+    let height = if high { height } else { height * 9 / 10 };
     kn_render::height_bucket(height.max(1))
 }
 
@@ -333,11 +336,14 @@ mod tests {
     #[test]
     fn request_height_fits_screen() {
         // 竖版 1000x1500 适配 1236x1648: 高 1648 -> 档位 2048
-        assert_eq!(request_height("https://x/a.jpg?size=1000x1500", 1236, 1648), 2048);
+        assert_eq!(request_height("https://x/a.jpg?size=1000x1500", 1236, 1648, true), 2048);
         // 横向跨页 2000x1400: 宽度受限, 高 ~866 -> 1024
-        assert_eq!(request_height("https://x/a.jpg?size=2000x1400&t=1", 1236, 1648), 1024);
+        assert_eq!(request_height("https://x/a.jpg?size=2000x1400&t=1", 1236, 1648, true), 1024);
         // 没有尺寸: 按屏幕高
-        assert_eq!(request_height("https://x/a.jpg", 1236, 1648), 2048);
-        assert_eq!(request_height("https://x/a.jpg", 600, 800), 1024);
+        assert_eq!(request_height("https://x/a.jpg", 1236, 1648, true), 2048);
+        assert_eq!(request_height("https://x/a.jpg", 600, 800, true), 1024);
+        // 标准画质: 1648 -> 1536 档; 800 -> 768 档
+        assert_eq!(request_height("https://x/a.jpg?size=1000x1500", 1236, 1648, false), 1536);
+        assert_eq!(request_height("https://x/a.jpg", 600, 800, false), 768);
     }
 }

@@ -388,35 +388,44 @@ impl Bitmap {
             }
             return out;
         }
-        let mut out = Bitmap::new(w, h, 0);
-        let shrink = w <= self.width && h <= self.height;
-        if shrink && self.width > 0 && self.height > 0 {
-            return self.shrink(w, h);
+        if w <= self.width && h <= self.height && self.width > 0 && self.height > 0 {
+            self.shrink(w, h)
         } else {
-            // Bilinear upscale (or mixed dims).
-            let sw = self.width.max(1);
-            let sh = self.height.max(1);
-            let scale_x = (sw - 1) as f64 / (w.max(1) as f64 - 1.0).max(1.0);
-            let scale_y = (sh - 1) as f64 / (h.max(1) as f64 - 1.0).max(1.0);
-            for oy in 0..h {
-                let fy = if h > 1 { oy as f64 * scale_y } else { 0.0 };
-                let y0 = fy.floor() as u32;
-                let y1 = (y0 + 1).min(sh - 1);
-                let ty = fy - y0 as f64;
-                for ox in 0..w {
-                    let fx = if w > 1 { ox as f64 * scale_x } else { 0.0 };
-                    let x0 = fx.floor() as u32;
-                    let x1 = (x0 + 1).min(sw - 1);
-                    let tx = fx - x0 as f64;
-                    let p00 = self.row(y0)[x0 as usize] as f64;
-                    let p10 = self.row(y0)[x1 as usize] as f64;
-                    let p01 = self.row(y1)[x0 as usize] as f64;
-                    let p11 = self.row(y1)[x1 as usize] as f64;
-                    let top = p00 + (p10 - p00) * tx;
-                    let bot = p01 + (p11 - p01) * tx;
-                    let v = top + (bot - top) * ty;
-                    out.row_mut(oy)[ox as usize] = v.round().clamp(0.0, 255.0) as u8;
-                }
+            // 放大 (或一边放大一边缩小): 双线性
+            self.bilinear(w, h)
+        }
+    }
+
+    /// 双线性重采样 (10 位定点, 端点对齐: 输出首尾像素对应源首尾像素)。
+    fn bilinear(&self, w: u32, h: u32) -> Bitmap {
+        let (sw, sh) = (self.width.max(1) as usize, self.height.max(1) as usize);
+        let (dw, dh) = (w as usize, h as usize);
+        // 每个输出坐标 -> (源下标, 到下一个源像素的权重 0..1024)
+        let axis = |src: usize, dst: usize| -> Vec<(usize, u32)> {
+            (0..dst)
+                .map(|o| {
+                    if dst <= 1 || src <= 1 {
+                        return (0, 0);
+                    }
+                    // o * (src-1) / (dst-1), 定点 1/1024
+                    let pos = (o as u64 * (src as u64 - 1) * 1024 + (dst as u64 - 1) / 2) / (dst as u64 - 1);
+                    let i = (pos >> 10) as usize;
+                    if i >= src - 1 { (src - 1, 0) } else { (i, (pos & 1023) as u32) }
+                })
+                .collect()
+        };
+        let xs = axis(sw, dw);
+        let ys = axis(sh, dh);
+        let mut out = Bitmap::new(w, h, 0);
+        for (oy, &(y0, fy)) in ys.iter().enumerate() {
+            let y1 = (y0 + 1).min(sh - 1);
+            let (r0, r1) = (&self.row(y0 as u32)[..sw], &self.row(y1 as u32)[..sw]);
+            let dst = &mut out.row_mut(oy as u32)[..dw];
+            for (d, &(x0, fx)) in dst.iter_mut().zip(&xs) {
+                let x1 = (x0 + 1).min(sw - 1);
+                let top = r0[x0] as u32 * (1024 - fx) + r0[x1] as u32 * fx;
+                let bot = r1[x0] as u32 * (1024 - fx) + r1[x1] as u32 * fx;
+                *d = ((top * (1024 - fy) + bot * fy + (1 << 19)) >> 20) as u8;
             }
         }
         out
@@ -426,38 +435,58 @@ impl Bitmap {
     /// 精确区域平均缩小 (box filter), 全整数, 先横向后纵向。
     /// 源像素 i 在缩放坐标里占 [i*dst, (i+1)*dst), 输出像素 o 占 [o*src, (o+1)*src), 按重叠长度加权。
     /// 设备上比逐像素浮点版快一个数量级 (原版 1350x1920 → 600x853 约 175 ms)。
+    /// 区域平均缩小 (box filter): 每个输出像素 = 它覆盖的源区域的面积加权平均。
+    /// 先横向 (每行 sw -> dw) 再纵向; 权重是和为 2^16 的定点数, 逐像素只有乘加与移位
+    /// (纵向一遍是整行连续的乘加, 可向量化)。
     fn shrink(&self, w: u32, h: u32) -> Bitmap {
         let (sw, sh) = (self.width as usize, self.height as usize);
         let (dw, dh) = (w as usize, h as usize);
-        // 横向: 每个源行 → dw 个像素 (仍是 sh 行)
-        let spans_x = box_spans(sw, dw);
+        let tx = box_taps(sw, dw);
         let mut tmp = vec![0u8; dw * sh];
         for y in 0..sh {
             let src = &self.row(y as u32)[..sw];
             let dst = &mut tmp[y * dw..(y + 1) * dw];
-            for (o, span) in spans_x.iter().enumerate() {
-                let mut acc = 0u32;
-                for &(i, weight) in &span.parts {
-                    acc += src[i] as u32 * weight;
-                }
-                dst[o] = span.divide(acc);
+            match tx.taps {
+                1 => shrink_row::<1>(src, dst, &tx),
+                2 => shrink_row::<2>(src, dst, &tx),
+                3 => shrink_row::<3>(src, dst, &tx),
+                4 => shrink_row::<4>(src, dst, &tx),
+                _ => shrink_row_any(src, dst, &tx),
             }
         }
-        // 纵向: 按行加权累加 (内层是连续的整行, 可向量化)
-        let spans_y = box_spans(sh, dh);
+        let ty = box_taps(sh, dh);
         let mut out = Bitmap::new(w, h, 0);
         let mut acc = vec![0u32; dw];
-        for (oy, span) in spans_y.iter().enumerate() {
-            acc.iter_mut().for_each(|a| *a = 0);
-            for &(sy, weight) in &span.parts {
-                let row = &tmp[sy * dw..(sy + 1) * dw];
-                for (a, &v) in acc.iter_mut().zip(row) {
-                    *a += v as u32 * weight;
-                }
-            }
+        for oy in 0..dh {
+            let start = ty.start[oy];
+            let weights = &ty.weights[oy * ty.taps..(oy + 1) * ty.taps];
+            let row = |k: usize| &tmp[(start + k) * dw..(start + k + 1) * dw];
             let dst = &mut out.row_mut(oy as u32)[..dw];
-            for (d, &a) in dst.iter_mut().zip(&acc) {
-                *d = span.divide(a);
+            // 常见的 2 / 3 个抽头: 一遍算完 (整行连续, 可向量化); 其它按行累加
+            match *weights {
+                [w0, w1] => {
+                    for ((d, &a), &b) in dst.iter_mut().zip(row(0)).zip(row(1)) {
+                        *d = ((a as u32 * w0 + b as u32 * w1 + (1 << 15)) >> 16) as u8;
+                    }
+                }
+                [w0, w1, w2] => {
+                    for (((d, &a), &b), &c) in dst.iter_mut().zip(row(0)).zip(row(1)).zip(row(2)) {
+                        *d = ((a as u32 * w0 + b as u32 * w1 + c as u32 * w2 + (1 << 15)) >> 16) as u8;
+                    }
+                }
+                _ => {
+                    acc.iter_mut().for_each(|a| *a = 1 << 15);
+                    for (k, &weight) in weights.iter().enumerate() {
+                        if weight != 0 {
+                            for (a, &v) in acc.iter_mut().zip(row(k)) {
+                                *a += v as u32 * weight;
+                            }
+                        }
+                    }
+                    for (d, &a) in dst.iter_mut().zip(&acc) {
+                        *d = (a >> 16) as u8;
+                    }
+                }
             }
         }
         out
@@ -552,43 +581,79 @@ fn blend_row(drow: &mut [u8], mrow: &[u8], c: u16) {
     }
 }
 
-/// 一个输出像素覆盖的源像素及权重 (权重之和 = 源长度)。
-struct BoxSpan {
-    parts: Vec<(usize, u32)>,
-    /// acc / total 的倒数 (定点 2^32), 免去逐像素除法 (armv7 无硬件除法)
-    inv: u64,
+/// 一维缩小 (dst <= src) 的定点权重表: 输出像素 o 覆盖从 `start[o]` 起的 `taps` 个源像素,
+/// 权重在 `weights[o * taps..]`, 每组之和恰为 2^16 (覆盖不满 taps 个时其余权重为 0)。
+struct Taps {
+    taps: usize,
+    start: Vec<usize>,
+    weights: Vec<u32>,
 }
 
-impl BoxSpan {
-    #[inline]
-    fn divide(&self, acc: u32) -> u8 {
-        // + 半个单位四舍五入: (acc + total/2) * inv >> 32
-        ((acc as u64 * self.inv + (1u64 << 31)) >> 32).min(255) as u8
-    }
-}
-
-/// 把长度 src 的一维缩到 dst (dst <= src) 时每个输出像素的覆盖关系。
-fn box_spans(src: usize, dst: usize) -> Vec<BoxSpan> {
-    let total = src as u64;
-    let inv = ((1u64 << 32) + total - 1) / total;
-    let mut spans = Vec::with_capacity(dst);
+fn box_taps(src: usize, dst: usize) -> Taps {
+    // 先求精确覆盖: 输出 o 对应源区间 [o*src, (o+1)*src) (单位 1/dst 像素)
+    let mut spans: Vec<Vec<(usize, u64)>> = Vec::with_capacity(dst);
     let mut i = 0usize;
     for o in 0..dst {
-        let start = o * src;
-        let end = start + src;
-        let mut cur = start;
-        let mut parts = Vec::with_capacity(src / dst + 2);
+        let (begin, end) = (o * src, (o + 1) * src);
+        let mut cur = begin;
+        let mut parts = Vec::with_capacity(src / dst.max(1) + 2);
         while cur < end {
             while (i + 1) * dst <= cur {
                 i += 1;
             }
             let seg_end = ((i + 1) * dst).min(end);
-            parts.push((i, (seg_end - cur) as u32));
+            parts.push((i, (seg_end - cur) as u64));
             cur = seg_end;
         }
-        spans.push(BoxSpan { parts, inv });
+        spans.push(parts);
     }
-    spans
+    let taps = spans.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut start = Vec::with_capacity(dst);
+    let mut weights = vec![0u32; dst * taps];
+    for (o, parts) in spans.iter().enumerate() {
+        // 起点往前挪, 保证 start + taps <= src (挪出来的位置权重为 0)
+        let first = parts[0].0;
+        let s0 = first.min(src.saturating_sub(taps));
+        start.push(s0);
+        let total = src as u64;
+        let w = &mut weights[o * taps..(o + 1) * taps];
+        let mut sum = 0u32;
+        let mut largest = first - s0;
+        for &(idx, units) in parts {
+            let k = idx - s0;
+            w[k] = ((units << 16) + total / 2).checked_div(total).unwrap_or(0) as u32;
+            sum += w[k];
+            if w[k] > w[largest] {
+                largest = k;
+            }
+        }
+        // 舍入误差补到最大的权重上, 使和恰为 2^16 (纯色缩小后不变)
+        w[largest] = (w[largest] as i64 + (1i64 << 16) - sum as i64) as u32;
+    }
+    Taps { taps, start, weights }
+}
+
+#[inline]
+fn shrink_row<const N: usize>(src: &[u8], dst: &mut [u8], t: &Taps) {
+    for (o, d) in dst.iter_mut().enumerate() {
+        let s = t.start[o];
+        let px: &[u8; N] = src[s..s + N].try_into().expect("taps");
+        let w: &[u32; N] = t.weights[o * N..(o + 1) * N].try_into().expect("taps");
+        let mut acc = 1u32 << 15;
+        for k in 0..N {
+            acc += px[k] as u32 * w[k];
+        }
+        *d = (acc >> 16) as u8;
+    }
+}
+
+fn shrink_row_any(src: &[u8], dst: &mut [u8], t: &Taps) {
+    let n = t.taps;
+    for (o, d) in dst.iter_mut().enumerate() {
+        let s = t.start[o];
+        let acc: u32 = src[s..s + n].iter().zip(&t.weights[o * n..(o + 1) * n]).map(|(&p, &w)| p as u32 * w).sum();
+        *d = ((acc + (1 << 15)) >> 16) as u8;
+    }
 }
 
 /// 两行是否完全相同。按 64 字节块做异或 OR 归约, 块内无分支, 块间提前退出。
@@ -819,6 +884,59 @@ mod tests {
         let b = Bitmap::new(1350, 1920, 77);
         let r = b.resize(600, 853);
         assert!((0..853).all(|y| r.row(y)[..600].iter().all(|&v| v == 77)));
+    }
+
+    /// 定点实现与浮点参考 (精确面积平均 / 端点对齐双线性) 相差不超过 1。
+    #[test]
+    fn fixed_point_resize_matches_float_reference() {
+        let (sw, sh) = (143u32, 205u32);
+        let mut b = Bitmap::new(sw, sh, 0);
+        let mut seed = 12345u32;
+        for y in 0..sh {
+            for x in 0..sw {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                b.row_mut(y)[x as usize] = (seed >> 16) as u8;
+            }
+        }
+        let px = |x: usize, y: usize| b.row(y as u32)[x] as f64;
+        // 缩小: 面积平均
+        for &(dw, dh) in &[(115u32, 165u32), (70, 100), (37, 51)] {
+            let r = b.resize(dw, dh);
+            let (fx, fy) = (sw as f64 / dw as f64, sh as f64 / dh as f64);
+            for oy in 0..dh as usize {
+                for ox in 0..dw as usize {
+                    let (x0, x1, y0, y1) = (ox as f64 * fx, (ox + 1) as f64 * fx, oy as f64 * fy, (oy + 1) as f64 * fy);
+                    let mut acc = 0.0;
+                    for y in y0.floor() as usize..(y1.ceil() as usize).min(sh as usize) {
+                        let wy = (y1.min(y as f64 + 1.0) - y0.max(y as f64)).max(0.0);
+                        for x in x0.floor() as usize..(x1.ceil() as usize).min(sw as usize) {
+                            let wx = (x1.min(x as f64 + 1.0) - x0.max(x as f64)).max(0.0);
+                            acc += px(x, y) * wx * wy;
+                        }
+                    }
+                    let want = acc / (fx * fy);
+                    let got = r.row(oy as u32)[ox] as f64;
+                    assert!((got - want).abs() <= 1.0, "shrink {dw}x{dh} @({ox},{oy}): {got} vs {want}");
+                }
+            }
+        }
+        // 放大: 端点对齐双线性
+        let (dw, dh) = (200u32, 300u32);
+        let r = b.resize(dw, dh);
+        let (sx, sy) = ((sw - 1) as f64 / (dw - 1) as f64, (sh - 1) as f64 / (dh - 1) as f64);
+        for oy in 0..dh as usize {
+            for ox in 0..dw as usize {
+                let (fx, fy) = (ox as f64 * sx, oy as f64 * sy);
+                let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                let (x1, y1) = ((x0 + 1).min(sw as usize - 1), (y0 + 1).min(sh as usize - 1));
+                let (tx, ty) = (fx - x0 as f64, fy - y0 as f64);
+                let top = px(x0, y0) + (px(x1, y0) - px(x0, y0)) * tx;
+                let bot = px(x0, y1) + (px(x1, y1) - px(x0, y1)) * tx;
+                let want = top + (bot - top) * ty;
+                let got = r.row(oy as u32)[ox] as f64;
+                assert!((got - want).abs() <= 1.0, "upscale @({ox},{oy}): {got} vs {want}");
+            }
+        }
     }
 
     #[test]

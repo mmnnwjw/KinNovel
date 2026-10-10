@@ -69,7 +69,7 @@ All components draw immediately into the frame and register hits; they never kee
 | Interaction | Hint | Why |
 |---|---|---|
 | Page turn in reader | `Turn` (REAGL full screen) | text everywhere, ghosting handled by REAGL + budget |
-| Page turn in comic reader | `Flash` (default, `comic_page_flash`) or `Turn` | large grey areas ghost badly under partial refresh; a page whose image is still decoding shows a note (`Ui`) and flashes when the image arrives |
+| Page turn in comic reader | `Flash` + swipe animation (`request_flash_turn`, default `comic_page_flash`) or `Turn` + animation | large grey areas ghost badly under partial refresh; a page whose image is still decoding shows a note (`Ui`) and flashes (animated) when the image arrives; a prefetched next chapter opens in the same frame |
 | List page change / tab switch | `Ui` (GC16, diff rect) | mostly full screen, needs clean greys |
 | Press feedback | runtime (invert + A2) | instant |
 | Toast show/hide, overlay menu | `Ui` | small rect |
