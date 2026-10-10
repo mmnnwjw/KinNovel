@@ -78,30 +78,44 @@ fn is_fresh(file: &std::path::Path) -> bool {
         .is_some_and(|age| age < CHAPTER_TTL)
 }
 
-/// 章节 JSON 字节: 新鲜缓存直接用; 否则下载并写缓存; 下载失败时退回旧缓存 (Python `_load_chapter`)。
+/// 章节 JSON 字节 (Python `_load_chapter` 的缓存语义, 但不再为过期缓存阻塞):
+/// - 有缓存: 立即返回。缓存过期 (> 12 h) 且服务器未被标记为不可用时, 后台线程重新下载写回,
+///   下次打开生效 —— 打开章节永远不用等网络。
+/// - 无缓存: 下载并写缓存 (必须等)。
 /// `net` 为 None (离线/预览) 时只读缓存。
 pub fn chapter_bytes(paths: &Paths, net: Option<&Client>, book_id: i64, sort_num: i64, convert: &str) -> Result<Vec<u8>, String> {
     let file = paths.chapter_file(book_id, sort_num, convert);
-    let cached = std::fs::read(&file).ok();
-    if let Some(bytes) = &cached {
-        if net.is_none() || is_fresh(&file) {
-            return Ok(bytes.clone());
+    if let Ok(bytes) = std::fs::read(&file) {
+        if let Some(net) = net {
+            if !is_fresh(&file) && !net.server_down() {
+                let (paths, net, convert) = (paths.clone(), net.clone(), convert.to_string());
+                std::thread::spawn(move || {
+                    if let Err(e) = download_chapter(&paths, &net, book_id, sort_num, &convert, BACKGROUND_PRIORITY) {
+                        eprintln!("[net] 章节后台刷新 {book_id}#{sort_num} 失败: {e}");
+                    }
+                });
+            }
         }
+        return Ok(bytes);
     }
     let Some(net) = net else {
         return Err("章节未缓存 (离线)".into());
     };
+    download_chapter(paths, net, book_id, sort_num, convert, 0)
+}
+
+/// 后台请求的优先级: 让给用户正在等待的请求 (turn 调度器里数字越小越优先)。
+pub const BACKGROUND_PRIORITY: i32 = 5;
+
+/// 下载章节并写缓存。
+pub fn download_chapter(paths: &Paths, net: &Client, book_id: i64, sort_num: i64, convert: &str, priority: i32) -> Result<Vec<u8>, String> {
     let convert_opt = (!convert.is_empty()).then_some(convert);
-    match net.get_novel_content(book_id, sort_num, convert_opt, 0) {
-        Ok(value) => {
-            let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-            if let Err(e) = store::atomic_write(&file, &bytes) {
-                eprintln!("[net] 章节缓存写入失败: {e}");
-            }
-            Ok(bytes)
-        }
-        Err(e) => cached.ok_or_else(|| e.to_string()),
+    let value = net.get_novel_content(book_id, sort_num, convert_opt, priority).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    if let Err(e) = store::atomic_write(&paths.chapter_file(book_id, sort_num, convert), &bytes) {
+        eprintln!("[net] 章节缓存写入失败: {e}");
     }
+    Ok(bytes)
 }
 
 /// 章节字体文件: 已缓存直接返回, 否则下载 (Python `ensure_font`)。
@@ -163,9 +177,72 @@ pub fn image_bytes(paths: &Paths, net: Option<&Client>, url: &str, height: u32) 
     Ok(Some(bytes))
 }
 
+/// CDN 能否给出比阅读页所用版本更高的分辨率: 只有带 `size=` 的站内图片支持缩放参数,
+/// 其它 URL 阅读页拿到的就是原图。
+pub fn has_original_variant(url: &str) -> bool {
+    scaled_image_url(url, 0) != url
+}
+
+/// 插图原图字节 (不带缩放参数, 全屏预览的 "原图"): 先查缓存, 缺失时下载并写缓存。
+/// 离线且未缓存返回 Ok(None)。
+pub fn original_image_bytes(paths: &Paths, net: Option<&Client>, url: &str) -> Result<Option<Vec<u8>>, String> {
+    let file = paths.original_image_file(url);
+    if let Ok(bytes) = std::fs::read(&file) {
+        store::touch(&file);
+        return Ok(Some(bytes));
+    }
+    let Some(net) = net else { return Ok(None) };
+    let original = strip_height(url);
+    let bytes = net.download(&original, IMAGE_LIMIT).map_err(|e| e.to_string())?;
+    if let Err(e) = store::atomic_write(&file, &bytes) {
+        eprintln!("[net] 原图缓存写入失败: {e}");
+    }
+    Ok(Some(bytes))
+}
+
+/// 去掉 URL 里的 `height=` 缩放参数 (章节 HTML 里的地址通常不带, 防御性处理)。
+fn strip_height(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else { return url.to_string() };
+    let parts: Vec<&str> = query.split('&').filter(|kv| !kv.is_empty() && !kv.starts_with("height=")).collect();
+    if parts.is_empty() { base.to_string() } else { format!("{base}?{}", parts.join("&")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 过期缓存 + 服务器不可达: 必须立即返回缓存, 不能等网络失败。
+    #[test]
+    fn stale_chapter_returns_cache_without_waiting() {
+        let dir = std::env::temp_dir().join(format!("kn-swr-test-{}", std::process::id()));
+        let paths = Paths { app_dir: dir.clone() };
+        let file = paths.chapter_file(1, 2, "");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"{\"cached\":true}").unwrap();
+        let old = SystemTime::now() - CHAPTER_TTL - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+        // 不可路由的地址: 真去连接的话要等到超时
+        let net = Client::new(kn_net::ClientConfig {
+            server: "http://10.255.255.1:9".into(),
+            session_path: dir.join("session.json"),
+            ..Default::default()
+        });
+        let started = std::time::Instant::now();
+        let bytes = chapter_bytes(&paths, Some(&net), 1, 2, "").unwrap();
+        assert_eq!(bytes, b"{\"cached\":true}");
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn original_variant_detection() {
+        assert!(has_original_variant("https://x/a.jpg?size=1089x1600&t=5"));
+        assert!(!has_original_variant("https://x/a.jpg"));
+        assert!(!has_original_variant("https://x/a.jpg?t=1"));
+        assert_eq!(strip_height("https://x/a.jpg?size=1x2&height=512&t=5"), "https://x/a.jpg?size=1x2&t=5");
+        assert_eq!(strip_height("https://x/a.jpg?height=512"), "https://x/a.jpg");
+    }
 
     #[test]
     fn scaled_url_only_for_system_images() {

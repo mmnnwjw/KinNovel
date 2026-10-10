@@ -140,6 +140,21 @@ mod linux_impl {
             std::mem::size_of::<InputAbsInfo>() as u64,
         )
     }
+    /// MT 触点数上限 (读 EVIOCGMTSLOTS 用; KPW5 是 10 个 slot)。
+    const MT_SLOTS: usize = 16;
+    fn eviocgmtslots() -> u32 {
+        ioc(IOC_READ, EV_IOC_TYPE, 0x0a, (std::mem::size_of::<i32>() * (1 + MT_SLOTS)) as u64)
+    }
+
+    /// slot 0 上某个 MT 轴的当前值。MT 轴的 `EVIOCGABS` value 并不跟踪各 slot 的实际坐标
+    /// (内核把 MT 值存在 input_mt 的 slot 里), 实测 KPW5 重启后读到 0, 只能用 EVIOCGMTSLOTS。
+    fn mt_slot0_value(fd: RawFd, code: u16) -> Option<i32> {
+        let mut buf = [0i32; 1 + MT_SLOTS];
+        buf[0] = code as i32;
+        let rc = unsafe { libc::ioctl(fd, eviocgmtslots() as _, buf.as_mut_ptr()) };
+        (rc >= 0).then_some(buf[1])
+    }
+
     fn eviocgbit(ev_type: u16, size: usize) -> u32 {
         ioc(IOC_READ, EV_IOC_TYPE, 0x20 + ev_type as u64, size as u64)
     }
@@ -266,7 +281,10 @@ mod linux_impl {
             };
 
             // 内核当前的 slot 坐标: 下一次触摸若落在同一 X/Y, 该轴不会重发 (见 GestureRecognizer::last_pos)
-            let mut seed = (rc == 0 && rc_y == 0).then_some((abs.value, abs_y.value));
+            let mut seed = match (mt_slot0_value(fd, ABS_MT_POSITION_X), mt_slot0_value(fd, ABS_MT_POSITION_Y)) {
+                (Some(x), Some(y)) => Some((x, y)),
+                _ => (rc == 0 && rc_y == 0).then_some((abs.value, abs_y.value)),
+            };
             let mut single_axis = false;
             if x_max <= x_min || y_max <= y_min {
                 seed = None;

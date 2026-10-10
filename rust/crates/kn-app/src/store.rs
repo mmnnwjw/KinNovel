@@ -68,6 +68,11 @@ impl Paths {
         self.cache_dir().join("covers").join(sha256_hex(&key) + ".jpg")
     }
 
+    /// 插图原图 (不带 CDN 缩放参数) 的缓存: 只有 1.0 的全屏预览用, 键与缩放档位区分开。
+    pub fn original_image_file(&self, url: &str) -> PathBuf {
+        self.cache_dir().join("covers").join(sha256_hex(&format!("{url}#original")) + ".jpg")
+    }
+
     pub fn progress_file(&self, book_id: i64, sort_num: i64, convert: &str) -> PathBuf {
         let suffix = if convert.is_empty() { String::new() } else { format!("-{convert}") };
         self.cache_dir().join("progress").join(format!("{book_id}-{sort_num}{suffix}.json"))

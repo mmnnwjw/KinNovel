@@ -43,7 +43,7 @@ impl PageItem {
 
 pub type Page = Vec<PageItem>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayoutParams {
     pub width: i64,
     pub height: i64,
@@ -51,6 +51,12 @@ pub struct LayoutParams {
     pub line_spacing: f64,
     pub margin: i64,
     pub first_line_indent: bool,
+    /// 插图最大高度占可用高度的比例。Python 版是 0.62 (金标准测试用这个);
+    /// 1.0 版阅读器用 1.0, 封面/彩页这类整页插图可以占满一页。
+    pub image_max_ratio: f64,
+    /// `<img>` 没写宽高时: false = Python 规则 (高 = 宽 × 0.72, 不超过上限);
+    /// true = 直接给最大高度 (阅读器: 轻小说插图几乎都是整页图, 实际图片在框内等比适配)。
+    pub unknown_image_full: bool,
 }
 
 impl Default for LayoutParams {
@@ -62,9 +68,14 @@ impl Default for LayoutParams {
             line_spacing: 1.42,
             margin: 34,
             first_line_indent: true,
+            image_max_ratio: PYTHON_IMAGE_MAX_RATIO,
+            unknown_image_full: false,
         }
     }
 }
+
+/// Python 版 `reader.py` 的插图高度上限比例。
+pub const PYTHON_IMAGE_MAX_RATIO: f64 = 0.62;
 
 const FIRST_LINE_INDENT_PREFIX: &str = "\u{3000}\u{3000}";
 
@@ -181,10 +192,12 @@ impl Paginator {
         let path = block.path.clone();
         match block.kind {
             BlockKind::Image => {
-                let max_image_height = (self.usable_height as f64 * 0.62) as i64;
+                let max_image_height = (self.usable_height as f64 * self.params.image_max_ratio.clamp(0.1, 1.0)) as i64;
                 let image_height = if block.width > 0 && block.height > 0 {
                     let h = (self.usable_width * block.height as f64 / block.width as f64) as i64;
                     h.max(1).min(max_image_height)
+                } else if self.params.unknown_image_full {
+                    max_image_height
                 } else {
                     max_image_height.min((self.usable_width * 0.72) as i64)
                 };

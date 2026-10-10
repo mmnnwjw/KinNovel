@@ -225,7 +225,8 @@ impl SignalRClient {
             self.tls_config(),
         )?;
         if response.status >= 500 {
-            return Err(NetError::network(format!("Hub 协商失败 ({})", response.status)));
+            // 服务器故障是明确的应答: 用 Api 错误 (不重试), 由 ServerHealth 记为不可用
+            return Err(NetError::api(format!("服务器暂不可用 ({})", response.status), response.status as i32));
         }
         let body_text = String::from_utf8_lossy(&response.body).to_string();
         if response.status >= 400 {

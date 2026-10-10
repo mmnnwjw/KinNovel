@@ -114,8 +114,14 @@ impl Page<KinNovel> for ShelfPage {
         let paths = cx.app.paths.clone();
         cx.spawn(move || load(&paths));
         if use_cloud(cx) {
-            self.cloud_loading = true;
             let net = cx.app.net();
+            if net.as_ref().is_some_and(|n| n.server_down()) {
+                // 服务器刚刚还不可用: 直接显示本地缓存, 到探测时间后下次进入书架再试
+                self.cloud_loading = false;
+                self.cloud = Some(Err("服务器暂不可用".into()));
+                return;
+            }
+            self.cloud_loading = true;
             cx.spawn(move || CloudLoaded(api::load_book_shelf(net.as_ref())));
         } else {
             self.cloud = None;

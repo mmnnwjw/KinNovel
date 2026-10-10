@@ -52,6 +52,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         "显示",
         &[
             toggle("night_mode", "夜间模式", "", false),
+            toggle("page_turn_animation", "翻页动画", "PW5 及更新机型", true),
             toggle("page_flash", "翻页全屏刷新", "重启后生效", false),
             step("full_refresh_every", "残影清理间隔 (屏)", "重启后生效", 2.0, 12.0, 1.0, 0, 6.0),
         ],
@@ -194,7 +195,8 @@ impl Page<KinNovel> for SettingsPage {
                 let group = (id - GROUP_BASE) as usize;
                 if group != self.group {
                     self.group = group;
-                    cx.request_redraw(RefreshHint::Ui);
+                    // 换分组相当于换页: 闪刷, 否则下方空白处的旧残影不会被刷到 (差分只刷变化的像素)
+                    cx.request_redraw(RefreshHint::Flash);
                 }
             }
             HitId(id) if id >= SET_BASE => {

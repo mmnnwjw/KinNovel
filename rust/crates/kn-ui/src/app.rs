@@ -10,7 +10,7 @@
 use std::any::Any;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kn_platform::{Display, GestureKind, InputEvent, InputReader, KeyCode, PowerEvent, PowerMonitor};
+use kn_platform::{Display, GestureKind, InputEvent, InputReader, KeyCode, PowerEvent, PowerMonitor, SwipeDir};
 
 /// 按下电源键后等待系统进入屏保的时限; 超时说明这次按键没有引起休眠, 重新接管屏幕。
 const POWER_KEY_GRACE: Duration = Duration::from_secs(15);
@@ -75,6 +75,7 @@ pub struct Cx<'a, A: App> {
     instance: u64,
     tasks: &'a Tasks<Delivery<A>>,
     redraw: &'a mut Option<RefreshHint>,
+    swipe: &'a mut Option<SwipeDir>,
     timers: &'a mut Timers,
 }
 
@@ -119,6 +120,13 @@ impl<'a, A: App> Cx<'a, A> {
             Some(old) if old.strength() >= hint.strength() => old,
             _ => hint,
         });
+    }
+
+    /// 阅读翻页: 等同 `request_redraw(Turn)`, 并请求 MTK 原生翻页动画 (方向 = 内容移动方向;
+    /// 设备不支持时显示层忽略, 本次要闪刷时动画让位)。
+    pub fn request_turn(&mut self, swipe: Option<SwipeDir>) {
+        self.request_redraw(RefreshHint::Turn);
+        *self.swipe = swipe;
     }
 
     /// `delay` 之后调用当前页面实例的 `on_timer(token)` (页面已关闭则丢弃)。同一 token 重设会覆盖旧的。
@@ -203,6 +211,12 @@ pub trait Page<A: App> {
         false
     }
 
+    /// 进入/返回本页面时运行时是否整屏闪刷 (默认是)。内容异步加载的页面 (阅读页) 返回 false,
+    /// 改为内容就绪时自己请求 `RefreshHint::Flash`, 免得闪刷落在 "加载中" 画面上、正文反而留下残影。
+    fn flash_on_enter(&self) -> bool {
+        true
+    }
+
     /// 空闲时调用 (无输入、无手指按下); 返回 true 表示还有空闲工作要做。
     /// 每次调用应在 ~50 ms 内返回 (例如只预渲染一页)。
     fn on_idle(&mut self, _cx: &mut Cx<A>) -> bool {
@@ -225,6 +239,7 @@ struct Runtime<A: App> {
     hits: Hits,
     tasks: Tasks<Delivery<A>>,
     redraw: Option<RefreshHint>,
+    swipe: Option<SwipeDir>,
     width: u32,
     height: u32,
     next_instance: u64,
@@ -245,6 +260,7 @@ impl<A: App> Runtime<A> {
             instance,
             tasks: &self.tasks,
             redraw: &mut self.redraw,
+            swipe: &mut self.swipe,
             timers: &mut self.timers,
         }
     }
@@ -280,6 +296,7 @@ impl<A: App> Stack<A> {
 
     /// 执行导航; 返回 false 表示应退出。
     fn apply(&mut self, rt: &mut Runtime<A>, transition: Transition<A>) -> bool {
+        let nav_flash = matches!(transition, Transition::Push(_) | Transition::Replace(_) | Transition::Back | Transition::Home);
         match transition {
             Transition::None => {}
             Transition::Push(page) => {
@@ -331,6 +348,11 @@ impl<A: App> Stack<A> {
                 return false;
             }
         }
+        if nav_flash && self.top().page.flash_on_enter() {
+            // 进入/离开二级页面: 整屏闪刷, 清掉上一页的残影 (含被点那一行的按下反相)。
+            // 切换标签 (Root) 画面结构相同, 走普通刷新 + 残影预算。
+            rt.redraw = Some(RefreshHint::Flash);
+        }
         true
     }
 
@@ -376,12 +398,13 @@ pub fn render_once<A: App>(
 ) {
     let tasks: Tasks<Delivery<A>> = Tasks::new(1, Waker::new().expect("waker"));
     let mut redraw = None;
+    let mut swipe = None;
     let mut timers = Timers::default();
     let theme = app.theme();
     frame.fill_rect(frame.bounds(), theme.background);
     hits.clear();
     let (width, height) = (frame.width(), frame.height());
-    let mut cx = Cx { app, fonts, glyphs, hits, theme, width, height, instance: 0, tasks: &tasks, redraw: &mut redraw, timers: &mut timers };
+    let mut cx = Cx { app, fonts, glyphs, hits, theme, width, height, instance: 0, tasks: &tasks, redraw: &mut redraw, swipe: &mut swipe, timers: &mut timers };
     page.render(&mut cx, frame);
 }
 
@@ -466,6 +489,7 @@ impl<A: App> Headless<A> {
             hits: Hits::default(),
             tasks: Tasks::new(2, waker.clone()),
             redraw: None,
+            swipe: None,
             width,
             height,
             next_instance: 0,
@@ -567,6 +591,7 @@ pub fn run<A: App>(
         hits: Hits::default(),
         tasks: Tasks::new(2, waker.clone()),
         redraw: None,
+        swipe: None,
         width,
         height,
         next_instance: 0,
@@ -584,6 +609,8 @@ pub fn run<A: App>(
     let mut last_minute = minute_now();
     // 按下反馈是否已经画在屏幕上 (需要随后的正常重绘把它还原)
     let mut feedback_shown = false;
+    // 上一帧的配色: 日间/夜间切换后几乎每个像素都反转, 局部刷新残影很重, 要闪刷一次
+    let mut last_theme = rt.app.theme();
     // 电源键按下时刻: 框架进程 (awesome 等) 被我们 SIGSTOP 时, powerd 进入屏保要向 winmgr 查询,
     // 查询会一直挂到超时, 设备根本睡不下去 (KPW5 FW 5.17 实测)。所以一看到电源键按下就先 SIGCONT 框架,
     // 让 powerd 的流程走完; 若 POWER_KEY_GRACE 内没进入屏保, 再暂停框架并重画。
@@ -733,8 +760,13 @@ pub fn run<A: App>(
         }
 
         // 6. 重绘
-        if let Some(hint) = rt.redraw.take() {
+        if let Some(mut hint) = rt.redraw.take() {
             if !sleeping {
+                let theme = rt.app.theme();
+                if theme != last_theme {
+                    last_theme = theme;
+                    hint = RefreshHint::Flash;
+                }
                 let started = std::time::Instant::now();
                 let top = stack.top();
                 if !top.page.opaque() {
@@ -744,7 +776,13 @@ pub fn run<A: App>(
                 let instance = top.instance;
                 top.page.render(&mut rt.cx(instance), &mut frame);
                 let rendered = started.elapsed();
-                let plan = scheduler.plan(&frame, hint);
+                let swipe = rt.swipe.take();
+                let mut plan = scheduler.plan(&frame, hint);
+                if let Some(req) = plan.as_mut() {
+                    if hint == RefreshHint::Turn && !req.flash {
+                        req.swipe = swipe;
+                    }
+                }
                 let planned = started.elapsed();
                 if let Some(req) = &plan {
                     match display.present(&frame, req) {
@@ -759,7 +797,7 @@ pub fn run<A: App>(
                         rendered.as_secs_f32() * 1e3,
                         (planned - rendered).as_secs_f32() * 1e3,
                         (started.elapsed() - planned).as_secs_f32() * 1e3,
-                        plan.map(|r| (r.rect, r.waveform, r.flash))
+                        plan.map(|r| (r.rect, r.waveform, r.flash, r.swipe))
                     );
                 }
                 wants_idle = true;

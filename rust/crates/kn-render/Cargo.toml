@@ -11,3 +11,5 @@ woff2-patched.workspace = true
 # 纯 Rust 解码 (JPEG 支持 DCT 缩放), 不需要 C 依赖
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
+# 轻书架 CDN 的新插图/封面是 WebP (即使 URL 以 .jpg 结尾); 纯 Rust, image-rs 维护
+image-webp = "0.2"

@@ -18,6 +18,6 @@ pub use html::{absolute_url, extract_blocks, Block, BlockKind};
 pub use measure::{FontMeasure, WidthCache};
 pub use paginate::{
     first_anchor_on_page, first_path_on_page, page_for_path, paginate_all, LayoutParams, Page,
-    PageItem, Paginator,
+    PageItem, Paginator, PYTHON_IMAGE_MAX_RATIO,
 };
 pub use wrap::{wrap, Measure};

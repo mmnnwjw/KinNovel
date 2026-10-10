@@ -1,10 +1,12 @@
 //! 阅读页。
 //!
 //! 版式 (1.0 重新设计, 不沿用 Python 版):
-//! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏) 只有章节名与页码, 底边一条细进度线。
-//! - 点击: 左 30% 上一页, 右 30% 下一页, 中间呼出控件层; 左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
+//! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏): 左章节名、中间时间 · 电量、右页码; 底边一条细进度线。
+//! - 点击: 插图 (仅图片实际绘制区域) 进入全屏预览; 其余左 30% 上一页, 右 30% 下一页, 中间呼出控件层;
+//!   左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
 //! - 控件层是覆盖在正文上的浮层 (不触发重排): 顶栏 (返回 / 书名 / 主页) + 底部面板
-//!   (章节信息与进度条、上一章 / 目录 / 下一章、字号 − / + 、日夜切换), 按钮 ≥ 9 mm。
+//!   (章节信息与进度条、上一章 / 目录 / 设置 / 下一章、字号 − / + 、日夜切换), 按钮 ≥ 9 mm。
+//!   从设置返回时: 排版参数变了就重排 (保持阅读位置), 简繁转换变了就重新加载章节 (同样保持位置)。
 //!
 //! 性能结构:
 //! - 章节 JSON 解析、HTML 分块、字体读取 (WOFF2 解码只做一次, 结果旁路缓存为 TTF) 在后台线程。
@@ -15,9 +17,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Instant;
 
-use kn_platform::{GestureKind, InputEvent, KeyCode};
+use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
 use kn_render::{Bitmap, FontId, Point, Rect, TextStyle};
 use kn_text::{first_anchor_on_page, page_for_path, Block, FontMeasure, LayoutParams, Page as TextPage, PageItem, Paginator, WidthCache};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
@@ -53,6 +56,22 @@ const HIT_FONT_DOWN: HitId = HitId(6);
 const HIT_FONT_UP: HitId = HitId(7);
 const HIT_NIGHT: HitId = HitId(8);
 const HIT_PANEL: HitId = HitId(9);
+const HIT_SETTINGS: HitId = HitId(10);
+
+/// 离开阅读页的原因 (决定是否上传阅读进度)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leave {
+    /// 退出阅读界面 (返回、回主页、退出): 上传
+    Exit,
+    /// 换章: 上传, 但用后台优先级 (让位给用户正在等的请求)
+    Chapter,
+    /// 打开目录 / 插图预览, 之后还会回到阅读页: 不上传
+    Child,
+}
+
+/// 最近一次上传成功的 (书, 章节, XPath): 位置没变就不再上传。
+/// 换章会新建阅读页实例, 所以放在模块级。
+static LAST_UPLOAD: Mutex<Option<(i64, i64, String)>> = Mutex::new(None);
 
 /// 后台加载结果。
 struct Loaded {
@@ -102,7 +121,15 @@ pub struct ReaderPage {
     /// (页号, 正文位图), 最近使用的在末尾
     cache: Vec<(usize, Bitmap)>,
     images: HashMap<String, ImageSlot>,
+    /// 当前页已显示插图的实际绘制区域 (屏幕坐标) 与 (URL, 请求高度), 点击预览用
+    image_hits: Vec<(Rect, String, u32)>,
     chrome: bool,
+    /// 下一次 `leave` 的原因 (返回 Push/Replace 前设置, 回到本页时复位)
+    next_leave: Leave,
+    /// 加载章节时的简繁转换设置 (从设置页返回时比较)
+    convert: String,
+    /// 重新加载 (简繁转换变化) 时要回到的位置, 优先于本地/服务器进度
+    resume_override: Option<Progress>,
     /// 控件层上方的提示 (例如 "下一章尚未缓存")
     note: String,
     saved: Option<Progress>,
@@ -126,7 +153,11 @@ impl ReaderPage {
             page: 0,
             cache: Vec::new(),
             images: HashMap::new(),
+            image_hits: Vec::new(),
             chrome: false,
+            next_leave: Leave::Exit,
+            convert: String::new(),
+            resume_override: None,
             note: String::new(),
             saved: None,
             last_write: None,
@@ -150,6 +181,9 @@ impl ReaderPage {
             line_spacing: c.float("line_spacing", 1.42),
             margin: c.int("reader_margin", 34),
             first_line_indent: c.bool("first_line_indent", true),
+            // 整页插图 (封面、彩页) 占满一页; 放不下当前页剩余空间时另起一页
+            image_max_ratio: 1.0,
+            unknown_image_full: true,
         }
     }
 
@@ -232,17 +266,23 @@ impl ReaderPage {
     }
 
     /// 把当前页的首个锚点上传为服务器阅读位置 (登录时; 后台进行, 失败忽略 —— 与 Python 版的 best-effort 一致)。
-    fn upload_position(&mut self, cx: &mut Cx<KinNovel>) {
+    /// 只在退出阅读界面、换章 (后台优先级) 与休眠时调用; 与上次成功上传的位置相同则跳过。
+    fn upload_position(&mut self, cx: &mut Cx<KinNovel>, priority: i32) {
         let Some(net) = cx.app.net() else { return };
-        if net.user().is_none() || self.pages.is_empty() || self.chapter.chapter_id == 0 {
+        // 服务器故障期间不上传 (本地进度已保存), 免得每次换章都多一个注定失败的请求
+        if net.user().is_none() || net.server_down() || self.pages.is_empty() || self.chapter.chapter_id == 0 {
             return;
         }
         let xpath = kn_text::first_path_on_page(&self.pages, self.page as i64);
         let (book_id, chapter_id) = (self.book_id, self.chapter.chapter_id);
-        std::thread::spawn(move || {
-            if let Err(e) = net.save_read_position(book_id, chapter_id, &xpath) {
-                eprintln!("[reader] 进度上传失败: {e}");
-            }
+        let key = (book_id, chapter_id, xpath);
+        if LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&key) {
+            return;
+        }
+        eprintln!("[reader] 上传进度 {}#{} (优先级 {priority})", key.0, key.1);
+        std::thread::spawn(move || match net.save_read_position(key.0, key.1, &key.2, priority) {
+            Ok(_) => *LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(key),
+            Err(e) => eprintln!("[reader] 进度上传失败: {e}"),
         });
     }
 
@@ -295,7 +335,11 @@ impl ReaderPage {
                     .filter(|(id, path)| *id == self.chapter.chapter_id && !path.is_empty())
                     .map(|(_, path)| (path, None));
                 let local = loaded.local.map(|p| (p.path, Some(p.offset as i64)));
-                let anchors: Vec<(String, Option<i64>)> = server.into_iter().chain(local).collect();
+                let anchors: Vec<(String, Option<i64>)> = match self.resume_override.take() {
+                    // 设置里改了简繁转换后重新加载: 回到改之前的位置 (XPath 与转换无关)
+                    Some(p) => vec![(p.path, Some(p.offset as i64))],
+                    None => server.into_iter().chain(local).collect(),
+                };
                 if anchors.is_empty() {
                     self.paginate_step(cx);
                     0
@@ -324,7 +368,8 @@ impl ReaderPage {
         );
         self.save_progress(cx, true);
         self.prefetch_neighbors(cx);
-        cx.request_redraw(RefreshHint::Ui);
+        // 进入阅读器/换章: 正文第一屏闪刷, 清掉上一页面与 "正在打开章节" 的残影
+        cx.request_redraw(RefreshHint::Flash);
     }
 
     /// 设置了 "预加载前后章节" 时, 后台把前后两章 (及其字体) 下载进缓存 (Python `_prefetch_neighbors`)。
@@ -332,7 +377,7 @@ impl ReaderPage {
         if !cx.app.config.bool("prefetch_chapters", false) {
             return;
         }
-        let Some(net) = cx.app.net() else { return };
+        let Some(net) = cx.app.net().filter(|n| !n.server_down()) else { return };
         let total = self.chapter.chapters.len() as i64;
         let convert = cx.app.config.convert();
         let api = cx.app.config.api_server();
@@ -341,7 +386,7 @@ impl ReaderPage {
                 continue;
             }
             let (paths, net, convert, api, book_id) = (cx.app.paths.clone(), net.clone(), convert.clone(), api.clone(), self.book_id);
-            std::thread::spawn(move || match crate::net::chapter_bytes(&paths, Some(&net), book_id, target, &convert) {
+            std::thread::spawn(move || match crate::net::download_chapter(&paths, &net, book_id, target, &convert, crate::net::BACKGROUND_PRIORITY) {
                 Ok(bytes) => {
                     if let Some(font) = Chapter::parse(&bytes, false).map(|c| c.font).filter(|f| !f.is_empty()) {
                         crate::net::ensure_font(&paths, Some(&net), &api, &font);
@@ -383,10 +428,10 @@ impl ReaderPage {
                 }
                 PageItem::Image { url, x, y, width, height, .. } => {
                     let r = Rect::new(*x as i32, *y as i32, *width as u32, *height as u32);
-                    if let Some(ImageSlot::Ready(img)) = self.images.get(url) {
-                        // 水平居中, 顶对齐 (与 Python 版一致)
-                        let dx = r.x + (r.w as i32 - img.width() as i32) / 2;
-                        bmp.blit(img, img.bounds(), dx, r.y);
+                    if let Some(rect) = self.image_rect(url, r) {
+                        if let Some(ImageSlot::Ready(img)) = self.images.get(url) {
+                            bmp.blit(img, img.bounds(), rect.x, rect.y);
+                        }
                         continue;
                     }
                     let label = match self.images.get(url) {
@@ -403,6 +448,26 @@ impl ReaderPage {
             }
         }
         bmp
+    }
+
+    /// 已解码插图在排版框 `r` 里的实际绘制区域 (水平居中, 顶对齐, 与 Python 版一致); 未就绪返回 None。
+    fn image_rect(&self, url: &str, r: Rect) -> Option<Rect> {
+        let Some(ImageSlot::Ready(img)) = self.images.get(url) else { return None };
+        let dx = r.x + (r.w as i32 - img.width() as i32) / 2;
+        Some(Rect::new(dx, r.y, img.width(), img.height()))
+    }
+
+    /// 当前页插图的点击区域 (屏幕坐标; 正文位图画在 y = top 处)。
+    fn update_image_hits(&mut self, top: i32) {
+        self.image_hits.clear();
+        let Some(items) = self.pages.get(self.page) else { return };
+        for item in items {
+            let PageItem::Image { url, x, y, width, height, .. } = item else { continue };
+            let r = Rect::new(*x as i32, *y as i32, *width as u32, *height as u32);
+            if let Some(rect) = self.image_rect(url, r) {
+                self.image_hits.push((Rect::new(rect.x, rect.y + top, rect.w, rect.h), url.clone(), *height as u32));
+            }
+        }
     }
 
     /// 为某页的插图发起后台解码 (已请求过的跳过)。
@@ -472,7 +537,9 @@ impl ReaderPage {
         self.page = target;
         self.note.clear();
         self.save_progress(cx, false);
-        cx.request_redraw(RefreshHint::Turn);
+        // MTK 原生翻页动画 (Python `page_turn_animation`, 默认开): 向后翻内容左移, 向前翻右移
+        let swipe = cx.app.config.bool("page_turn_animation", true).then_some(if delta > 0 { SwipeDir::Left } else { SwipeDir::Right });
+        cx.request_turn(swipe);
         Transition::None
     }
 
@@ -495,6 +562,7 @@ impl ReaderPage {
         }
         self.save_progress(cx, true);
         let entry = if delta < 0 { Entry::Last } else { Entry::First };
+        self.next_leave = Leave::Chapter;
         Transition::Replace(Box::new(ReaderPage::new(self.book_id, target, entry)))
     }
 
@@ -504,15 +572,73 @@ impl ReaderPage {
         if size == current {
             return;
         }
-        let anchor = self.anchor();
         cx.app.config.set("font_size", serde_json::Value::from(size));
+        self.relayout_keep_position(cx);
+        cx.request_redraw(RefreshHint::Ui);
+    }
+
+    /// 按当前配置重新分页, 停在原来第一行所在的页。
+    fn relayout_keep_position(&mut self, cx: &mut Cx<KinNovel>) {
+        let anchor = self.anchor();
         self.restart_layout(cx);
         self.paginate_all(cx);
         self.page = anchor
             .map(|a| page_for_path(&self.pages, &a.path, Some(a.offset as i64), 0))
             .unwrap_or(0)
             .min(self.pages.len().saturating_sub(1));
-        cx.request_redraw(RefreshHint::Ui);
+    }
+
+    /// 从上层页面 (设置、目录、插图预览) 返回。
+    fn on_return(&mut self, cx: &mut Cx<KinNovel>) {
+        // 主题可能变了: 正文位图重画
+        self.cache.clear();
+        if !matches!(self.status, Status::Ready) {
+            return;
+        }
+        if cx.app.config.convert() != self.convert {
+            // 简繁转换变了: 章节内容不同, 重新加载, 回到当前位置
+            self.save_progress(cx, true);
+            self.resume_override = self.anchor();
+            self.entry = Entry::Resume;
+            self.status = Status::Loading;
+            self.pages.clear();
+            self.paginator = None;
+            self.start_load(cx);
+        } else if self.params.as_ref() != Some(&Self::layout_params(cx)) {
+            // 字号/行距/页边距/首行缩进变了
+            self.relayout_keep_position(cx);
+            self.save_progress(cx, true);
+        }
+    }
+
+    /// 后台读取章节、字体与本地进度 (结果回到 on_message)。
+    fn start_load(&mut self, cx: &mut Cx<KinNovel>) {
+        self.convert = cx.app.config.convert();
+        let paths = cx.app.paths.clone();
+        let convert = cx.app.config.convert();
+        let api = cx.app.config.api_server();
+        let loaded_font = cx.app.chapter_font.as_ref().map(|(p, _)| p.clone());
+        let net = cx.app.net();
+        let (book_id, sort_num) = (self.book_id, self.sort_num);
+        cx.spawn(move || -> Result<Loaded, String> {
+            let started = Instant::now();
+            let bytes = crate::net::chapter_bytes(&paths, net.as_ref(), book_id, sort_num, &convert)?;
+            let chapter = Chapter::parse(&bytes, true).ok_or("章节数据损坏")?;
+            let blocks = kn_text::extract_blocks(&chapter.content, store::SITE_BASE);
+            let font_path = match &chapter.font {
+                f if f.is_empty() => None,
+                f => crate::net::ensure_font(&paths, net.as_ref(), &api, f).or_else(|| paths.font_file(&api, f)),
+            };
+            let font_bytes = match &font_path {
+                Some(p) if Some(p) == loaded_font.as_ref() => None,
+                Some(p) => Some(store::load_chapter_font(p)),
+                None => None,
+            };
+            let local = store::load_progress(&paths.progress_file(book_id, sort_num, &convert));
+            let mut chapter = chapter;
+            chapter.content = String::new();
+            Ok(Loaded { chapter, blocks, font_path, font_bytes, local, millis: started.elapsed().as_millis() })
+        });
     }
 
     fn draw_header(&self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap, top: i32) {
@@ -526,7 +652,12 @@ impl ReaderPage {
         let label_w = ink.width(&label, m.tiny).ceil() as i32;
         let style_top = (top - (m.tiny * 1.2) as i32) / 2 + 4;
         ink.text(frame, cx.width as i32 - margin - label_w, style_top, &label, m.tiny, theme.muted);
-        let title_w = (cx.width as i32 - 3 * margin - label_w).max(0) as f32;
+        // 时间 · 电量居中 (每分钟随 on_minute 重绘, 只刷顶栏这一小块)
+        let status = super::status_text();
+        let status_w = ink.width(&status, m.tiny).ceil() as i32;
+        let status_x = (cx.width as i32 - status_w) / 2;
+        ink.text(frame, status_x, style_top, &status, m.tiny, theme.muted);
+        let title_w = (status_x - margin - margin / 2).max(0) as f32;
         let title = ink.fit(&self.chapter.title, m.tiny, title_w);
         ink.text(frame, margin, style_top, &title, m.tiny, theme.muted);
         // 底部进度线
@@ -587,10 +718,10 @@ impl ReaderPage {
         }
         y += track_h + gap;
 
-        // 上一章 / 目录 / 下一章
-        let cols = 3;
+        // 上一章 / 目录 / 设置 / 下一章
+        let cols = 4;
         let col_w = (inner_w - gap * (cols - 1)) / cols;
-        let row = [(HIT_PREV_CHAPTER, "上一章"), (HIT_TOC, "目录"), (HIT_NEXT_CHAPTER, "下一章")];
+        let row = [(HIT_PREV_CHAPTER, "上一章"), (HIT_TOC, "目录"), (HIT_SETTINGS, "设置"), (HIT_NEXT_CHAPTER, "下一章")];
         for (i, (id, label)) in row.iter().enumerate() {
             let r = Rect::new(side + i as i32 * (col_w + gap), y, col_w as u32, btn_h as u32);
             widgets::button(&mut ink, frame, &theme, &m, r, label, ButtonStyle::Secondary);
@@ -649,7 +780,12 @@ impl ReaderPage {
                     .enumerate()
                     .map(|(i, title)| crate::api::ChapterRef { id: 0, sort_num: i as i64 + 1, title: title.clone() })
                     .collect();
+                self.next_leave = Leave::Child;
                 Transition::Push(Box::new(super::book::CatalogPage::new(self.book_id, chapters, Some(self.sort_num))))
+            }
+            HIT_SETTINGS => {
+                self.next_leave = Leave::Child;
+                Transition::Push(Box::new(super::settings::SettingsPage::default()))
             }
             HIT_FONT_DOWN => {
                 self.change_font_size(cx, -FONT_STEP);
@@ -677,46 +813,26 @@ impl Page<KinNovel> for ReaderPage {
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
-        if returning || !matches!(self.status, Status::Loading) {
-            // 从上层页面返回: 主题/字号可能变了
-            self.cache.clear();
-            return;
+        self.next_leave = Leave::Exit;
+        if returning {
+            self.on_return(cx);
+        } else if matches!(self.status, Status::Loading) {
+            self.start_load(cx);
         }
-        let paths = cx.app.paths.clone();
-        let convert = cx.app.config.convert();
-        let api = cx.app.config.api_server();
-        let loaded_font = cx.app.chapter_font.as_ref().map(|(p, _)| p.clone());
-        let net = cx.app.net();
-        let (book_id, sort_num) = (self.book_id, self.sort_num);
-        cx.spawn(move || -> Result<Loaded, String> {
-            let started = Instant::now();
-            let bytes = crate::net::chapter_bytes(&paths, net.as_ref(), book_id, sort_num, &convert)?;
-            let chapter = Chapter::parse(&bytes, true).ok_or("章节数据损坏")?;
-            let blocks = kn_text::extract_blocks(&chapter.content, store::SITE_BASE);
-            let font_path = match &chapter.font {
-                f if f.is_empty() => None,
-                f => crate::net::ensure_font(&paths, net.as_ref(), &api, f).or_else(|| paths.font_file(&api, f)),
-            };
-            let font_bytes = match &font_path {
-                Some(p) if Some(p) == loaded_font.as_ref() => None,
-                Some(p) => Some(store::load_chapter_font(p)),
-                None => None,
-            };
-            let local = store::load_progress(&paths.progress_file(book_id, sort_num, &convert));
-            let mut chapter = chapter;
-            chapter.content = String::new();
-            Ok(Loaded { chapter, blocks, font_path, font_bytes, local, millis: started.elapsed().as_millis() })
-        });
     }
 
     fn leave(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
-        self.upload_position(cx);
+        match self.next_leave {
+            Leave::Exit => self.upload_position(cx, 0),
+            Leave::Chapter => self.upload_position(cx, crate::net::BACKGROUND_PRIORITY),
+            Leave::Child => {}
+        }
     }
 
     fn on_suspend(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
-        self.upload_position(cx);
+        self.upload_position(cx, 0);
     }
 
     fn on_message(&mut self, cx: &mut Cx<KinNovel>, msg: Box<dyn Any + Send>) {
@@ -736,6 +852,11 @@ impl Page<KinNovel> for ReaderPage {
 
     fn opaque(&self) -> bool {
         matches!(self.status, Status::Ready)
+    }
+
+    fn flash_on_enter(&self) -> bool {
+        // 加载中: 等正文就绪再闪刷 (on_loaded)
+        !matches!(self.status, Status::Loading)
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
@@ -766,6 +887,7 @@ impl Page<KinNovel> for ReaderPage {
             Status::Ready => {}
         }
         self.request_images(cx, self.page);
+        self.update_image_hits(top);
         let slot = self.content_bitmap(cx, self.page);
         let bmp = &self.cache[slot].1;
         frame.blit(bmp, bmp.bounds(), 0, top);
@@ -794,6 +916,13 @@ impl Page<KinNovel> for ReaderPage {
                         }
                         if matches!(self.status, Status::Failed(_)) {
                             return Transition::Back;
+                        }
+                        // 只认插图实际绘制区域 (不含排版框两侧留白)
+                        if g.kind == GestureKind::Tap {
+                            if let Some((_, url, h)) = self.image_hits.iter().find(|(r, _, _)| r.contains(p)) {
+                                self.next_leave = Leave::Child;
+                                return Transition::Push(Box::new(super::image::ImagePage::new(url.clone(), *h)));
+                            }
                         }
                         let w = cx.width as i32;
                         if p.x < w * 3 / 10 {

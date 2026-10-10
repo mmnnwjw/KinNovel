@@ -25,6 +25,7 @@
 pub mod client;
 pub mod error;
 pub mod gzip;
+pub mod health;
 pub mod helpers;
 pub mod http;
 pub mod rate_limit;

@@ -223,7 +223,8 @@ impl Page<KinNovel> for MePage {
                 HIT_DIALOG_EXIT => return Transition::Exit,
                 HIT_DIALOG_CLOSE => {
                     self.dialog = None;
-                    cx.request_redraw(RefreshHint::Ui);
+                    // 弹窗区域局部闪刷: 深色按钮在普通局部刷新下残留严重
+                    cx.request_redraw(RefreshHint::Clean);
                 }
                 _ => {}
             }

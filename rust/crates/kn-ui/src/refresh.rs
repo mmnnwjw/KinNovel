@@ -4,9 +4,11 @@
 //! - `Flash`: 强制整屏 GC16 闪刷, 预算清零。
 //! - 差分为空 → 不刷新 (返回 None)。
 //! - 变化矩形四周外扩 4 px; 面积 >= 95% 屏视为整屏。
-//! - 大面积 (>= 50% 屏) 且 (hint == Turn 且 policy.flash_every_turn) 或 预算 >= policy.full_refresh_every → 闪刷。
-//! - 波形: Turn → Reagl (设备支持时, 否则 Gl16); Ui → Gc16; Fast → Du; Feedback → A2; Flash → Gc16 + flash。
-//! - 预算累计: 非闪刷时 += 面积占比, Turn 且使用 Reagl 时 × 0.25。
+//! - 大面积 (>= 50% 屏) 且 (hint == Turn 且 policy.flash_every_turn) 或 预算 >= 阈值 → 闪刷。
+//!   阈值: 翻页用 policy.full_refresh_every; 其它界面最多 `UI_FLASH_EVERY` 屏 (列表/菜单的残影比正文明显)。
+//! - `Clean`: 只对变化区域闪刷 (关闭弹窗等, 深色按钮在局部刷新下残留严重)。
+//! - 波形: Turn → Reagl (设备支持时, 否则 Gl16); Ui → Gc16; Fast → Du; Feedback → A2; Flash/Clean → Gc16 + flash。
+//! - 预算累计: 非闪刷时 += 面积占比, Turn 且使用 Reagl 时 × 0.25; 局部闪刷扣掉对应面积。
 //! - Turn 跳过差分直接整屏 (几乎全屏都变, 省掉 diff 开销)。
 //! - 首帧或 `invalidate()` 之后: 整屏刷新 (不闪, 除非 hint 为 Flash)。
 
@@ -21,6 +23,8 @@ pub enum RefreshHint {
     Turn,
     /// 菜单/弹层等追求速度的变化
     Fast,
+    /// 变化区域闪刷 (关闭弹窗: 原弹窗区域彻底清掉)
+    Clean,
     /// 按下反馈 (由运行时内部使用)
     Feedback,
     /// 强制闪刷 (唤醒恢复、用户手动全刷)
@@ -28,11 +32,12 @@ pub enum RefreshHint {
 }
 
 impl RefreshHint {
-    /// 合并多次重绘请求时的优先级: Flash > Turn > Ui > Fast > Feedback。
+    /// 合并多次重绘请求时的优先级: Flash > Turn > Clean > Ui > Fast > Feedback。
     pub fn strength(self) -> u8 {
         match self {
-            RefreshHint::Flash => 4,
-            RefreshHint::Turn => 3,
+            RefreshHint::Flash => 5,
+            RefreshHint::Turn => 4,
+            RefreshHint::Clean => 3,
             RefreshHint::Ui => 2,
             RefreshHint::Fast => 1,
             RefreshHint::Feedback => 0,
@@ -64,6 +69,8 @@ const LARGE_RATIO: f32 = 0.5;
 const FULL_RATIO: f32 = 0.95;
 /// REAGL 翻页自带残影抑制, 计入预算时打折。
 const REAGL_TURN_WEIGHT: f32 = 0.25;
+/// 阅读页以外: 局部刷新累计多少屏后, 下一次大面积刷新升级为闪刷 (配置值更小时用配置值)。
+const UI_FLASH_EVERY: f32 = 3.0;
 
 pub struct RefreshScheduler {
     /// 屏幕上当前内容 (仅 screen_valid 时可信)
@@ -91,11 +98,12 @@ impl RefreshScheduler {
         self.screen.bounds()
     }
 
-    fn threshold(&self) -> f32 {
-        if self.policy.full_refresh_every > 0.0 {
-            self.policy.full_refresh_every
+    fn threshold(&self, hint: RefreshHint) -> f32 {
+        let configured = if self.policy.full_refresh_every > 0.0 { self.policy.full_refresh_every } else { 6.0 };
+        if hint == RefreshHint::Turn {
+            configured
         } else {
-            6.0
+            configured.min(UI_FLASH_EVERY)
         }
     }
 
@@ -103,7 +111,7 @@ impl RefreshScheduler {
         match hint {
             RefreshHint::Turn if self.policy.supports_reagl => Waveform::Reagl,
             RefreshHint::Turn => Waveform::Gl16,
-            RefreshHint::Ui | RefreshHint::Flash => Waveform::Gc16,
+            RefreshHint::Ui | RefreshHint::Flash | RefreshHint::Clean => Waveform::Gc16,
             RefreshHint::Fast => Waveform::Du,
             RefreshHint::Feedback => Waveform::A2,
         }
@@ -130,9 +138,12 @@ impl RefreshScheduler {
         let rect = if ratio >= FULL_RATIO { full } else { rect };
         if ratio >= LARGE_RATIO && hint != RefreshHint::Feedback {
             let turn_flash = hint == RefreshHint::Turn && self.policy.flash_every_turn;
-            if turn_flash || self.budget >= self.threshold() {
+            if turn_flash || self.budget >= self.threshold(hint) {
                 return Some(self.flash_request());
             }
+        }
+        if hint == RefreshHint::Clean {
+            return Some(if rect == full { self.flash_request() } else { RefreshRequest { rect, waveform: Waveform::Gc16, flash: true, swipe: None } });
         }
         Some(RefreshRequest { rect, waveform: self.waveform(hint), flash: false, swipe: None })
     }
@@ -146,11 +157,12 @@ impl RefreshScheduler {
         } else {
             self.screen.blit(frame, req.rect, req.rect.x, req.rect.y);
         }
+        let mut weight = req.rect.area() as f32 / full.area().max(1) as f32;
         if req.flash {
-            self.budget = 0.0;
+            // 整屏闪刷清零; 局部闪刷只清掉那一块
+            self.budget = if req.rect == full { 0.0 } else { (self.budget - weight).max(0.0) };
             return;
         }
-        let mut weight = req.rect.area() as f32 / full.area().max(1) as f32;
         if hint == RefreshHint::Turn && req.waveform == Waveform::Reagl {
             weight *= REAGL_TURN_WEIGHT;
         }
@@ -300,9 +312,45 @@ mod tests {
     }
 
     #[test]
+    fn ui_flashes_sooner_than_reader() {
+        // 配置 6 屏: 翻页 (Gl16) 要攒 6 屏, 其它界面 3 屏就闪
+        let mut s = sched(RefreshPolicy::default());
+        let mut flashed_at = None;
+        for i in 0..6u8 {
+            let f = Bitmap::new(W, H, i.wrapping_mul(40).wrapping_add(10));
+            if present(&mut s, &f, RefreshHint::Ui).unwrap().flash {
+                flashed_at = Some(i);
+                break;
+            }
+        }
+        assert_eq!(flashed_at, Some(3));
+        let mut s = sched(RefreshPolicy::default());
+        for i in 0..6u8 {
+            let f = Bitmap::new(W, H, i.wrapping_mul(40).wrapping_add(10));
+            assert!(!present(&mut s, &f, RefreshHint::Turn).unwrap().flash, "turn {i}");
+        }
+    }
+
+    #[test]
+    fn clean_flashes_only_changed_region() {
+        let mut s = sched(RefreshPolicy::default());
+        let mut f = Bitmap::new(W, H, 255);
+        present(&mut s, &f, RefreshHint::Ui);
+        f.fill_rect(Rect::new(0, 0, W, 100), 0);
+        present(&mut s, &f, RefreshHint::Ui);
+        let before = s.ghost_budget();
+        f.fill_rect(Rect::new(10, 20, 30, 40), 255);
+        let req = present(&mut s, &f, RefreshHint::Clean).unwrap();
+        assert!(req.flash);
+        assert_eq!(req.rect, Rect::new(6, 16, 38, 48));
+        assert!(s.ghost_budget() < before && s.ghost_budget() > 0.0);
+    }
+
+    #[test]
     fn hint_strength_order() {
         assert!(RefreshHint::Flash.strength() > RefreshHint::Turn.strength());
-        assert!(RefreshHint::Turn.strength() > RefreshHint::Ui.strength());
+        assert!(RefreshHint::Turn.strength() > RefreshHint::Clean.strength());
+        assert!(RefreshHint::Clean.strength() > RefreshHint::Ui.strength());
         assert!(RefreshHint::Ui.strength() > RefreshHint::Fast.strength());
     }
 }

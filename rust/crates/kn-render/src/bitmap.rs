@@ -476,6 +476,52 @@ impl Bitmap {
         self.resize(w, h)
     }
 
+    /// 把自己按 `scale` (目标像素 / 源像素) 双线性采样到 `out` 的 `dst` 区域:
+    /// 目标像素 (x, y) 对应源坐标 (src_x + (x - dst.x) / scale, src_y + (y - dst.y) / scale)。
+    /// 落在源图外的目标像素保持不变。用于插图预览的放大/平移 (只渲染可见部分)。
+    /// 定点 16.16 运算; 每行先算好源列下标与权重, 内循环只有整数乘加。
+    pub fn sample_into(&self, out: &mut Bitmap, dst: Rect, scale: f32, src_x: f32, src_y: f32) {
+        let Some(dst) = dst.intersect(&out.bounds()) else { return };
+        if self.width == 0 || self.height == 0 || scale <= 0.0 {
+            return;
+        }
+        let inv = 1.0 / scale;
+        let (sw, sh) = (self.width as i64, self.height as i64);
+        // 列表: (起始目标列, 源列 x0, 权重 0..=256); 源坐标取像素中心
+        let mut cols: Vec<(usize, u32, u32)> = Vec::with_capacity(dst.w as usize);
+        for dx in 0..dst.w {
+            let fx = src_x + (dx as f32 + 0.5) * inv - 0.5;
+            if fx < -0.5 || fx > sw as f32 - 0.5 {
+                continue;
+            }
+            let fx = fx.clamp(0.0, (sw - 1) as f32);
+            let x0 = fx.floor() as u32;
+            let w = ((fx - x0 as f32) * 256.0) as u32;
+            cols.push(((dst.x as u32 + dx) as usize, x0, w));
+        }
+        for dy in 0..dst.h {
+            let fy = src_y + (dy as f32 + 0.5) * inv - 0.5;
+            if fy < -0.5 || fy > sh as f32 - 0.5 {
+                continue;
+            }
+            let fy = fy.clamp(0.0, (sh - 1) as f32);
+            let y0 = fy.floor() as u32;
+            let y1 = (y0 + 1).min(sh as u32 - 1);
+            let wy = ((fy - y0 as f32) * 256.0) as u32;
+            let r0 = self.row(y0);
+            let r1 = self.row(y1);
+            let last = sw as usize - 1;
+            let orow = out.row_mut(dst.y as u32 + dy);
+            for &(ox, x0, wx) in &cols {
+                let x0 = x0 as usize;
+                let x1 = (x0 + 1).min(last);
+                let top = r0[x0] as u32 * (256 - wx) + r0[x1] as u32 * wx;
+                let bot = r1[x0] as u32 * (256 - wx) + r1[x1] as u32 * wx;
+                orow[ox] = ((top * (256 - wy) + bot * wy + (1 << 15)) >> 16) as u8;
+            }
+        }
+    }
+
     /// 导出为二进制 PGM (P5), 便于在主机上查看/测试快照。
     pub fn to_pgm(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + self.width as usize * self.height as usize);
@@ -574,6 +620,29 @@ fn blend(dst: u8, color: u8, coverage: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sample_into_scales_and_offsets() {
+        // 2x1 源: 黑, 白; 放大 2 倍到 4x1
+        let mut src = Bitmap::new(2, 1, 0);
+        src.row_mut(0)[1] = 255;
+        let mut out = Bitmap::new(6, 1, 77);
+        src.sample_into(&mut out, Rect::new(1, 0, 4, 1), 2.0, 0.0, 0.0);
+        let row = out.row(0);
+        assert_eq!(row[0], 77, "dst 区域外不动");
+        assert_eq!(row[1], 0);
+        assert!(row[2] > 0 && row[2] < 128 && row[3] > 128 && row[3] < 255, "{row:?}");
+        assert_eq!(row[4], 255);
+        assert_eq!(row[5], 77);
+        // 平移到源图外: 目标保持不变
+        let mut out = Bitmap::new(4, 1, 9);
+        src.sample_into(&mut out, Rect::new(0, 0, 4, 1), 1.0, 10.0, 0.0);
+        assert_eq!(out.row(0)[..4], [9, 9, 9, 9]);
+        // 1:1 原样拷贝
+        let mut out = Bitmap::new(2, 1, 9);
+        src.sample_into(&mut out, Rect::new(0, 0, 2, 1), 1.0, 0.0, 0.0);
+        assert_eq!(out.row(0)[..2], [0, 255]);
+    }
+
     use super::*;
 
     #[test]

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::error::NetError;
+use crate::health::ServerHealth;
 use crate::helpers::{self, dict_items, int_items};
 use crate::http;
 use crate::session::SessionStore;
@@ -99,6 +100,7 @@ struct Inner {
     refresh_lock: Mutex<()>,
     flight: Mutex<HashMap<String, Arc<Inflight>>>,
     cache: Mutex<HashMap<String, CacheEntry>>,
+    health: ServerHealth,
 }
 
 /// Blocking, thread-safe API client. Cheap to `clone()` (shares one `Arc`),
@@ -140,6 +142,7 @@ impl Client {
                 refresh_lock: Mutex::new(()),
                 flight: Mutex::new(HashMap::new()),
                 cache: Mutex::new(HashMap::new()),
+                health: ServerHealth::default(),
             }
         });
         Client(inner)
@@ -175,6 +178,17 @@ impl Client {
             .unwrap_or(0)
     }
 
+    /// 服务器最近不可用且还没到下一次探测时间: 自动请求 (后台刷新、进度上传、云端书架)
+    /// 应直接用本地缓存。用户主动打开的页面照常请求。
+    pub fn server_down(&self) -> bool {
+        self.0.health.is_down()
+    }
+
+    /// 最近一次 API 请求因服务器故障失败 (可能已到探测时间)。
+    pub fn server_degraded(&self) -> bool {
+        self.0.health.degraded()
+    }
+
     pub fn has_refresh_token(&self) -> bool {
         self.0.session.has_refresh_token()
     }
@@ -201,6 +215,18 @@ impl Client {
     // ---- plain HTTP (login / refresh token) ----
 
     fn http_call(
+        &self,
+        path: &str,
+        payload: Option<Value>,
+        method: &str,
+        token: Option<&str>,
+    ) -> Result<Value, NetError> {
+        let result = self.http_call_inner(path, payload, method, token);
+        self.0.health.record(&result);
+        result
+    }
+
+    fn http_call_inner(
         &self,
         path: &str,
         payload: Option<Value>,
@@ -475,6 +501,12 @@ impl Client {
     }
 
     fn invoke_direct(&self, method: &str, params: Value, priority: i32) -> Result<Value, NetError> {
+        let result = self.invoke_direct_inner(method, params, priority);
+        self.0.health.record(&result);
+        result
+    }
+
+    fn invoke_direct_inner(&self, method: &str, params: Value, priority: i32) -> Result<Value, NetError> {
         let retry = !is_non_idempotent(method);
         match self.0.hub.invoke(method, params.clone(), true, None, retry, priority) {
             Ok(v) => Ok(v),
@@ -621,12 +653,13 @@ impl Client {
         self.invoke("GetNovelContent", params, priority, Duration::ZERO)
     }
 
-    pub fn save_read_position(&self, book_id: i64, chapter_id: i64, xpath: &str) -> Result<Value, NetError> {
+    /// `priority`: 0 = 交互级; 数字越大越让位给其它请求 (换章时的上传用后台优先级)。
+    pub fn save_read_position(&self, book_id: i64, chapter_id: i64, xpath: &str, priority: i32) -> Result<Value, NetError> {
         let xpath = if xpath.is_empty() { "." } else { xpath };
         self.invoke(
             "SaveReadPosition",
             json!({"Bid": book_id, "Cid": chapter_id, "XPath": xpath}),
-            0,
+            priority,
             Duration::ZERO,
         )
     }

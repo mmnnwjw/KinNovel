@@ -110,6 +110,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "byteorder-lite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
+
+[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,6 +294,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -311,7 +327,7 @@ checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "kn-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kn-net",
  "kn-platform",
@@ -324,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "kn-net"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64",
  "flate2",
@@ -339,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "kn-platform"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "cc",
  "kn-render",
@@ -348,8 +364,9 @@ dependencies = [
 
 [[package]]
 name = "kn-render"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
+ "image-webp",
  "jpeg-decoder",
  "png",
  "skrifa",
@@ -359,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "kn-text"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "html5ever",
  "kn-render",
@@ -370,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "kn-ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "kn-platform",
  "kn-render",
@@ -563,6 +580,12 @@ checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quote"

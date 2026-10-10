@@ -114,6 +114,20 @@ fn decode_png(bytes: &[u8]) -> Result<Bitmap, ImageError> {
     from_pixels(frame.width, frame.height, &buf[..frame.buffer_size()], channels)
 }
 
+fn decode_webp(bytes: &[u8]) -> Result<Bitmap, ImageError> {
+    let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|e| ImageError::Decode(e.to_string()))?;
+    let (w, h) = decoder.dimensions();
+    if w as u64 * h as u64 > MAX_PIXELS {
+        return Err(ImageError::TooLarge);
+    }
+    let channels = if decoder.has_alpha() { 4 } else { 3 };
+    let size = decoder.output_buffer_size().ok_or(ImageError::TooLarge)?;
+    let mut buf = vec![0; size];
+    // 动图只取第一帧
+    decoder.read_image(&mut buf).map_err(|e| ImageError::Decode(e.to_string()))?;
+    from_pixels(w, h, &buf, channels)
+}
+
 /// 解码为灰度位图。`target` 给出最终要显示的大致尺寸时, JPEG 会做 DCT 缩放 (结果不小于 target);
 /// 调用方再按需 `fit_within`。
 pub fn decode_gray(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
@@ -121,6 +135,8 @@ pub fn decode_gray(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, I
         decode_jpeg(bytes, target)
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         decode_png(bytes)
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        decode_webp(bytes)
     } else {
         Err(ImageError::Unsupported)
     }
@@ -169,6 +185,19 @@ mod tests {
         assert_eq!(b.get(0, 0), 255);
         assert_eq!(b.get(1, 0), 0);
         assert_eq!(b.get(2, 1), 128);
+    }
+
+    #[test]
+    fn webp_round_trip() {
+        // 2x1 RGB 无损 WebP: 红、白
+        let mut bytes = Vec::new();
+        image_webp::WebPEncoder::new(&mut bytes)
+            .encode(&[255, 0, 0, 255, 255, 255], 2, 1, image_webp::ColorType::Rgb8)
+            .unwrap();
+        let bmp = decode_gray(&bytes, None).unwrap();
+        assert_eq!((bmp.width(), bmp.height()), (2, 1));
+        assert_eq!(bmp.get(0, 0), luma(255, 0, 0));
+        assert_eq!(bmp.get(1, 0), 255);
     }
 
     #[test]

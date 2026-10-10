@@ -4,7 +4,7 @@ members = ["crates/kn-render", "crates/kn-platform", "crates/kn-ui", "crates/kn-
 exclude = ["spike-hello", "spike-fbink", "spike-font", "spike-net"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/mmnnwjw/KinNovel"

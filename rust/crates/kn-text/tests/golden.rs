@@ -206,6 +206,8 @@ fn run_golden(stem: &str, dir: &Path) {
         line_spacing: golden.params.line_spacing,
         margin: golden.params.reader_margin,
         first_line_indent: golden.params.first_line_indent,
+        image_max_ratio: kn_text::PYTHON_IMAGE_MAX_RATIO,
+        unknown_image_full: false,
     };
     let mut m = GoldenMeasure;
     let pages = paginate_all(&blocks, params, &mut m);

@@ -207,7 +207,8 @@ impl Page<KinNovel> for ShopPage {
             match hit {
                 HIT_DIALOG_CANCEL => {
                     self.pending_buy = None;
-                    cx.request_redraw(RefreshHint::Ui);
+                    // 弹窗区域局部闪刷 (见 me.rs)
+                    cx.request_redraw(RefreshHint::Clean);
                 }
                 HIT_DIALOG_CONFIRM => {
                     if let Some(item) = self.pending_buy.take() {
@@ -216,7 +217,7 @@ impl Page<KinNovel> for ShopPage {
                         let key = item.key.clone();
                         cx.spawn(move || BoughtDone(item, api::buy_shop_item(net.as_ref(), &key)));
                     }
-                    cx.request_redraw(RefreshHint::Ui);
+                    cx.request_redraw(RefreshHint::Clean);
                 }
                 _ => {}
             }
