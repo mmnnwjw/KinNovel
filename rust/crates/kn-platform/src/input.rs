@@ -13,7 +13,7 @@
 #[allow(unused_imports)]
 use crate::display::DeviceInfo;
 #[allow(unused_imports)]
-use crate::gesture::{Gesture, GestureConfig};
+use crate::gesture::{Gesture, GestureConfig, TouchSample};
 
 /// 物理按键 (Voyage/Oasis 翻页键等), evdev code 见 research-kindle-devices.md。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,10 +79,47 @@ fn map_key_code(code: u16, reversed: bool) -> KeyCode {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn screen_scale(raw: i32, min: i32, max: i32, screen: u32) -> i32 {
+    if max <= min {
+        return raw;
+    }
+    let span = (max - min).max(1) as i64;
+    let v = ((raw - min) as i64 * screen as i64) / span;
+    v.clamp(0, screen as i64 - 1) as i32
+}
+
+/// 一个原始轴的值 → 屏幕坐标样本。`raw_x`: 来自触摸芯片的 X 轴 (ABS_X / ABS_MT_POSITION_X)。
+/// 先按 swap 决定落到屏幕哪一轴 (并按那一轴的像素数缩放), 再按该轴 mirror (FBInk 语义: 先交换后镜像)。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn axis_sample(info: &DeviceInfo, raw_x: bool, raw: i32, min: i32, max: i32) -> TouchSample {
+    if raw_x != info.touch_swap_axes {
+        let x = screen_scale(raw, min, max, info.width);
+        TouchSample::X(if info.touch_mirror_x { info.width as i32 - 1 - x } else { x })
+    } else {
+        let y = screen_scale(raw, min, max, info.height);
+        TouchSample::Y(if info.touch_mirror_y { info.height as i32 - 1 - y } else { y })
+    }
+}
+
+/// 一对原始坐标 → 屏幕 (x, y)。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn to_screen(info: &DeviceInfo, raw: (i32, i32), xr: (i32, i32), yr: (i32, i32)) -> (i32, i32) {
+    let (mut x, mut y) = (0, 0);
+    for s in [axis_sample(info, true, raw.0, xr.0, xr.1), axis_sample(info, false, raw.1, yr.0, yr.1)] {
+        match s {
+            TouchSample::X(v) => x = v,
+            TouchSample::Y(v) => y = v,
+            _ => {}
+        }
+    }
+    (x, y)
+}
+
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::evcodes::*;
-    use super::{map_key_code, InputEvent};
+    use super::{axis_sample, map_key_code, to_screen, InputEvent};
     use crate::display::DeviceInfo;
     use crate::ffi;
     use crate::gesture::{GestureConfig, GestureRecognizer, TouchSample};
@@ -183,26 +220,6 @@ mod linux_impl {
         devices: Vec<Device>,
         info: DeviceInfo,
         key_reversed: bool,
-    }
-
-    fn screen_scale(raw: i32, min: i32, max: i32, screen: u32) -> i32 {
-        if max <= min {
-            return raw;
-        }
-        let span = (max - min).max(1) as i64;
-        let v = ((raw - min) as i64 * screen as i64) / span;
-        v.clamp(0, screen as i64 - 1) as i32
-    }
-
-    fn transform(x: i32, y: i32, info: &DeviceInfo) -> (i32, i32) {
-        let (mut x, mut y) = if info.touch_swap_axes { (y, x) } else { (x, y) };
-        if info.touch_mirror_x {
-            x = info.width as i32 - 1 - x;
-        }
-        if info.touch_mirror_y {
-            y = info.height as i32 - 1 - y;
-        }
-        (x, y)
     }
 
     impl InputReader {
@@ -309,19 +326,20 @@ mod linux_impl {
                     seed = Some((ax.value, ay.value));
                 }
             }
+            // 读不到范围时按屏幕像素 (交换轴时原始 X 对应屏幕高度)
+            let (raw_x_px, raw_y_px) = if info.touch_swap_axes { (info.height, info.width) } else { (info.width, info.height) };
             if x_max <= x_min {
                 x_min = 0;
-                x_max = info.width as i32;
+                x_max = raw_x_px as i32;
             }
             if y_max <= y_min {
                 y_min = 0;
-                y_max = info.height as i32;
+                y_max = raw_y_px as i32;
             }
 
             let mut recognizer = GestureRecognizer::new(config);
-            if let Some((rx, ry)) = seed {
-                let (sx, _) = transform(screen_scale(rx, x_min, x_max, info.width), 0, info);
-                let (_, sy) = transform(0, screen_scale(ry, y_min, y_max, info.height), info);
+            if let Some(raw) = seed {
+                let (sx, sy) = to_screen(info, raw, (x_min, x_max), (y_min, y_max));
                 recognizer.seed_position(0, sx, sy);
             }
 
@@ -556,16 +574,8 @@ mod linux_impl {
             t if t == EV_ABS => match ev.code {
                 c if c == ABS_MT_SLOT => push(TouchSample::Slot(ev.value)),
                 c if c == ABS_MT_TRACKING_ID => push(TouchSample::TrackingId(ev.value)),
-                c if c == ABS_MT_POSITION_X || c == ABS_X => {
-                    let scaled = screen_scale(ev.value, x_min, x_max, info.width);
-                    let (sx, _sy) = transform(scaled, 0, info);
-                    push(TouchSample::X(sx));
-                }
-                c if c == ABS_MT_POSITION_Y || c == ABS_Y => {
-                    let scaled = screen_scale(ev.value, y_min, y_max, info.height);
-                    let (_sx, sy) = transform(0, scaled, info);
-                    push(TouchSample::Y(sy));
-                }
+                c if c == ABS_MT_POSITION_X || c == ABS_X => push(axis_sample(info, true, ev.value, x_min, x_max)),
+                c if c == ABS_MT_POSITION_Y || c == ABS_Y => push(axis_sample(info, false, ev.value, y_min, y_max)),
                 _ => {}
             },
             t if t == EV_KEY => {
@@ -615,5 +625,27 @@ impl InputReader {
 
     pub fn touch_active(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(swap: bool, mx: bool, my: bool) -> DeviceInfo {
+        DeviceInfo { width: 600, height: 800, touch_swap_axes: swap, touch_mirror_x: mx, touch_mirror_y: my, ..Default::default() }
+    }
+
+    #[test]
+    fn touch_axes_scale_swap_and_mirror() {
+        // 原始范围 0..4095, 屏幕 600x800
+        let r = (0, 4095);
+        assert_eq!(to_screen(&info(false, false, false), (2048, 1024), r, r), (300, 200));
+        // 交换轴: 原始 X 是屏幕 Y (按高度缩放), 原始 Y 是屏幕 X
+        assert_eq!(to_screen(&info(true, false, false), (2048, 1024), r, r), (150, 400));
+        // 交换后镜像屏幕 X
+        assert_eq!(to_screen(&info(true, true, false), (2048, 1024), r, r), (449, 400));
+        assert_eq!(to_screen(&info(false, false, true), (0, 4095), r, r), (0, 0));
+        assert!(matches!(axis_sample(&info(true, false, false), true, 4095, 0, 4095), TouchSample::Y(799)));
     }
 }

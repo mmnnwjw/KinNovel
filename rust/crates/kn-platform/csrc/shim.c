@@ -58,6 +58,7 @@ typedef struct {
     uint32_t scanline_stride; // bytes per scanline (fInfo.line_length)
     uint32_t bpp;
     uint32_t device_id;
+    uint32_t screen_dpi;
     uint8_t  current_rota;
     uint8_t  is_mtk;
     uint8_t  is_sunxi;
@@ -67,6 +68,7 @@ typedef struct {
     uint8_t  touch_swap_axes;
     uint8_t  touch_mirror_x;
     uint8_t  touch_mirror_y;
+    uint8_t  has_color_panel;
     char     device_name[32];
     char     device_codename[32];
     char     device_platform[32];
@@ -83,6 +85,7 @@ void shim_get_state(int fbfd, ShimState* out) {
     out->scanline_stride          = g_state.scanline_stride;
     out->bpp                      = g_state.bpp;
     out->device_id                = (uint32_t) g_state.device_id;
+    out->screen_dpi               = g_state.screen_dpi;
     out->current_rota             = g_state.current_rota;
     out->is_mtk                   = g_state.is_mtk ? 1 : 0;
     out->is_sunxi                 = g_state.is_sunxi ? 1 : 0;
@@ -92,6 +95,7 @@ void shim_get_state(int fbfd, ShimState* out) {
     out->touch_swap_axes          = g_state.touch_swap_axes ? 1 : 0;
     out->touch_mirror_x           = g_state.touch_mirror_x ? 1 : 0;
     out->touch_mirror_y           = g_state.touch_mirror_y ? 1 : 0;
+    out->has_color_panel          = g_state.has_color_panel ? 1 : 0;
     memcpy(out->device_name, g_state.device_name, sizeof(out->device_name) - 1);
     memcpy(out->device_codename, g_state.device_codename, sizeof(out->device_codename) - 1);
     memcpy(out->device_platform, g_state.device_platform, sizeof(out->device_platform) - 1);

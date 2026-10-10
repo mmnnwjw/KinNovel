@@ -123,7 +123,11 @@ fn gesture(kind: GestureKind, start: (i32, i32), end: (i32, i32)) -> InputEvent 
 
 /// 主机预览: 驱动真实页面, 按参数依次执行操作, 输出最后一帧。
 fn preview(args: &[String]) {
-    let (w, h) = (1236, 1648);
+    // KN_PREVIEW_SIZE=600x800 之类可模拟其它机型的分辨率
+    let (w, h) = std::env::var("KN_PREVIEW_SIZE")
+        .ok()
+        .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+        .unwrap_or((1236, 1648));
     let out = &args[0];
     let paths = Paths::from_env();
     let config = Config::load(paths.config_file());
@@ -199,7 +203,22 @@ fn run_device() {
 
     let display = FbinkDisplay::open().expect("FBInk 初始化失败");
     let info = display.info().clone();
-    eprintln!("[device] {} ({}) {}x{} stride={} mtk={} reagl={}", info.device_name, info.device_codename, info.width, info.height, info.stride, info.is_mtk, info.supports_reagl);
+    eprintln!(
+        "[device] {} ({}, id {:#x}) {}x{} {} ppi, {} bpp, stride={} mtk={} reagl={} touch swap={} mirror={}/{}",
+        info.device_name,
+        info.device_codename,
+        info.device_id,
+        info.width,
+        info.height,
+        info.dpi,
+        info.bytes_per_pixel * 8,
+        info.stride,
+        info.is_mtk,
+        info.supports_reagl,
+        info.touch_swap_axes,
+        info.touch_mirror_x,
+        info.touch_mirror_y
+    );
     let paths = Paths::from_env();
     let config = Config::load(paths.config_file());
     let mut fonts = FontStore::new();

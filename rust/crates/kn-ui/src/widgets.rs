@@ -25,9 +25,11 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// 以 KPW5 (1236x1648, 300 ppi) 为基准按宽高缩放, 限制在 0.75..1.15 (与 Python load_fonts 一致)。
+    /// 以 KPW5 (1236x1648, 300 ppi) 为基准按宽高缩放, 上限 1.15 (Scribe 不再放大)。
+    /// 下限 0.45: 600x800 (167 ppi, 入门款/KT) 要 0.485、758x1024 (PW1/PW2) 要 0.61 才放得下,
+    /// 物理尺寸与 KPW5 接近 (宽度都是 ~3.6–4.1 英寸)。Python 版的 0.75 下限会让版面溢出屏幕。
     pub fn for_screen(width: u32, height: u32) -> Self {
-        let scale = (width as f32 / 1236.0).min(height as f32 / 1648.0).clamp(0.75, 1.15);
+        let scale = (width as f32 / 1236.0).min(height as f32 / 1648.0).clamp(0.45, 1.15);
         let px = |v: f32| (v * scale).round();
         Metrics {
             scale,

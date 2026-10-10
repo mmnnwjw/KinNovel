@@ -43,6 +43,10 @@ pub struct DeviceInfo {
     pub height: u32,
     /// 帧缓冲每行字节数 (KPW5 = 1248, 大于宽度)
     pub stride: usize,
+    /// 帧缓冲每像素字节数: 1 = 8 位灰度 (绝大多数 Kindle); 3 = RGB24 (ColorSoft 彩屏);
+    /// 4 = 32 位。上层始终画 L8, `present` 负责展开。
+    pub bytes_per_pixel: usize,
+    /// 屏幕 ppi (FBInk deviceQuirks.screenDPI: 167 / 212 / 300)
     pub dpi: u32,
     pub device_name: String,
     pub device_codename: String,
@@ -86,6 +90,7 @@ impl MemoryDisplay {
             width,
             height,
             stride: width as usize,
+            bytes_per_pixel: 1,
             dpi: 300,
             device_name: "MemoryDisplay".to_string(),
             device_codename: "host".to_string(),
@@ -187,6 +192,17 @@ impl FbinkDisplay {
             return Err(std::io::Error::other("fbink_get_fb_pointer failed"));
         }
 
+        // 只认识 8 位灰度与 24/32 位 RGB (ColorSoft); 其它 (4/16 位, 只有非触屏老机型) 不支持
+        let bytes_per_pixel = match state.bpp {
+            8 => 1,
+            24 => 3,
+            32 => 4,
+            other => {
+                unsafe { ffi::shim_fbink_close(fbfd) };
+                return Err(std::io::Error::other(format!("unsupported framebuffer depth: {other} bpp")));
+            }
+        };
+
         let is_mtk = state.is_mtk != 0;
         // ASSUMPTION (documented, see research-kindle-devices.md "4. FBInk API
         // 子集与 waveform 映射建议"): FBInk's `FBInkState` does not expose a
@@ -203,7 +219,8 @@ impl FbinkDisplay {
             width: state.view_width,
             height: state.view_height,
             stride: state.scanline_stride as usize,
-            dpi: 300,
+            bytes_per_pixel,
+            dpi: if state.screen_dpi > 0 { state.screen_dpi } else { 300 },
             device_name: state.device_name_str(),
             device_codename: state.device_codename_str(),
             platform: state.device_platform_str(),
@@ -292,26 +309,37 @@ impl Display for FbinkDisplay {
         }
 
         // 只拷贝 rect 内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
+        // 8 位直接 memcpy; RGB 帧缓冲 (ColorSoft) 把灰度展开成 R=G=B。
         let x0 = rect.x as usize;
         let w = rect.w as usize;
+        let bpp = self.info.bytes_per_pixel;
         let src_stride = frame.stride();
         let src_data = frame.data();
-        unsafe {
-            for y in rect.y..rect.bottom() {
-                let y = y as usize;
-                let src_off = y * src_stride + x0;
-                if src_off + w > src_data.len() {
-                    continue;
+        for y in rect.y..rect.bottom() {
+            let y = y as usize;
+            let src_off = y * src_stride + x0;
+            if src_off + w > src_data.len() {
+                continue;
+            }
+            let dst_off = y * self.fb_stride + x0 * bpp;
+            if dst_off + w * bpp > self.fb_size {
+                continue;
+            }
+            let src = &src_data[src_off..src_off + w];
+            // SAFETY: dst_off + w*bpp <= fb_size (检查见上), fb_ptr 映射在 Drop 前一直有效
+            let dst = unsafe { std::slice::from_raw_parts_mut(self.fb_ptr.add(dst_off), w * bpp) };
+            match bpp {
+                1 => dst.copy_from_slice(src),
+                3 => {
+                    for (d, &v) in dst.chunks_exact_mut(3).zip(src) {
+                        d.fill(v);
+                    }
                 }
-                let dst_off = y * self.fb_stride + x0;
-                if dst_off + w > self.fb_size {
-                    continue;
+                _ => {
+                    for (d, &v) in dst.chunks_exact_mut(4).zip(src) {
+                        d.copy_from_slice(&[v, v, v, 0xFF]);
+                    }
                 }
-                std::ptr::copy_nonoverlapping(
-                    src_data.as_ptr().add(src_off),
-                    self.fb_ptr.add(dst_off),
-                    w,
-                );
             }
         }
 
@@ -328,6 +356,9 @@ impl Display for FbinkDisplay {
         }
 
         let wfm = self.map_waveform(req.waveform);
+        // i.MX 机型的 REAGL 必须配 UPDATE_MODE_FULL (fbink.c: "REAGL should always be paired with FULL",
+        // 由调用方负责; KOReader 同样处理), REAGL 的 FULL 不闪。MTK 上 REAGL + PARTIAL 已实测正常, 保持不变。
+        let full = req.flash || (wfm == crate::ffi::WFM_REAGL && !self.info.is_mtk);
         let rc = unsafe {
             ffi::shim_refresh(
                 self.fbfd,
@@ -336,7 +367,7 @@ impl Display for FbinkDisplay {
                 rect.w,
                 rect.h,
                 wfm,
-                if req.flash { 1 } else { 0 },
+                if full { 1 } else { 0 },
                 is_animated,
             )
         };
