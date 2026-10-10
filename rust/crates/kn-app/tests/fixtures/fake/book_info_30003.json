@@ -1,0 +1,44 @@
+{
+  "Book": {
+    "Id": 30003,
+    "Title": "边城无尽冬",
+    "Author": "雪見",
+    "Cover": "https://cdn.example.test/covers/30003.jpg?size=680x960",
+    "Introduction": "<p>边城无尽冬的简介占位文字, 用于预览排版测试。</p>",
+    "LastUpdatedAt": "2026-10-05T12:00:00",
+    "LastUpdatedChapter": "第十章 占位",
+    "Views": 10000,
+    "Favorite": 100,
+    "Extra": {
+      "classification": {
+        "tags": [
+          "奇幻",
+          "冒险"
+        ],
+        "author": "雪見"
+      }
+    },
+    "Chapters": [
+      {
+        "Id": 3000301,
+        "SortNum": 1,
+        "Title": "第1章占位标题"
+      },
+      {
+        "Id": 3000302,
+        "SortNum": 2,
+        "Title": "第2章占位标题"
+      },
+      {
+        "Id": 3000303,
+        "SortNum": 3,
+        "Title": "第3章占位标题"
+      }
+    ]
+  },
+  "SeriesTitle": "",
+  "Series": [],
+  "ReadPosition": {
+    "ChapterId": 0
+  }
+}

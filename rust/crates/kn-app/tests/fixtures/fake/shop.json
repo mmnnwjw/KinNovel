@@ -1,0 +1,8 @@
+{
+  "Coin": 320,
+  "Items": [
+    {"Key": "theme_night", "Name": "夜间主题徽标", "Price": 50, "Owned": 1},
+    {"Key": "avatar_frame_gold", "Name": "金色头像框", "Price": 200, "Owned": 0},
+    {"Key": "bookmark_pack", "Name": "书签装饰包", "Price": 80, "Owned": 2}
+  ]
+}

@@ -3,7 +3,7 @@
     {
       "name": "KinNovel",
       "priority": 1,
-      "action": "bin/start.sh"
+      "action": "bin/kinnovel.sh"
     }
   ]
 }

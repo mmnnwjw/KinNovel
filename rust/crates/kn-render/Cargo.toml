@@ -1,0 +1,13 @@
+[package]
+name = "kn-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+skrifa.workspace = true
+zeno.workspace = true
+woff2-patched.workspace = true
+# 纯 Rust 解码 (JPEG 支持 DCT 缩放), 不需要 C 依赖
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.17"

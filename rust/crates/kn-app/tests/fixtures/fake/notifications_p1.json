@@ -1,0 +1,8 @@
+{
+  "Data": [
+    {"Id": 60001, "Title": "评论回复", "Body": "有人回复了你在《星海拾荒者》下的评论", "IsRead": false, "CreatedAt": "2026-10-05T10:00:00"},
+    {"Id": 60002, "Title": "签到提醒", "Body": "连续签到 7 天可获得额外金币奖励", "IsRead": true, "CreatedAt": "2026-10-01T09:00:00"}
+  ],
+  "Page": 1,
+  "TotalPages": 1
+}

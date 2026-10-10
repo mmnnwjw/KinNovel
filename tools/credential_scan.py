@@ -74,7 +74,8 @@ def repository_files(root):
             if path.is_file() and not any(part in SKIP_DIR_NAMES for part in path.parts)
         ]
     names = completed.stdout.decode("utf-8", "surrogateescape").split("\0")
-    return [root / name for name in names if name]
+    # 子模块 (rust/third_party/FBInk) 在 ls-files 里是目录, 跳过
+    return [root / name for name in names if name and (root / name).is_file()]
 
 
 def scan_repository(root):

@@ -1,0 +1,43 @@
+{
+  "Book": {
+    "Id": 30009,
+    "Title": "拐角咖啡馆",
+    "Author": "小满",
+    "Cover": "https://cdn.example.test/covers/30009.jpg?size=680x960",
+    "Introduction": "<p>拐角咖啡馆的简介占位文字, 用于预览排版测试。</p>",
+    "LastUpdatedAt": "2026-10-05T12:00:00",
+    "LastUpdatedChapter": "第十章 占位",
+    "Views": 10000,
+    "Favorite": 100,
+    "Extra": {
+      "classification": {
+        "tags": [
+          "日常"
+        ],
+        "author": "小满"
+      }
+    },
+    "Chapters": [
+      {
+        "Id": 3000901,
+        "SortNum": 1,
+        "Title": "第1章占位标题"
+      },
+      {
+        "Id": 3000902,
+        "SortNum": 2,
+        "Title": "第2章占位标题"
+      },
+      {
+        "Id": 3000903,
+        "SortNum": 3,
+        "Title": "第3章占位标题"
+      }
+    ]
+  },
+  "SeriesTitle": "",
+  "Series": [],
+  "ReadPosition": {
+    "ChapterId": 0
+  }
+}

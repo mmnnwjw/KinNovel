@@ -1,0 +1,16 @@
+{
+  "Book": {
+    "Id": 30002, "Title": "长安书肆夜话", "Author": "一砚秋",
+    "Cover": "https://cdn.example.test/covers/30002.jpg?size=680x960",
+    "Introduction": "<p>长安西市一间不起眼的旧书肆, 夜深时常有稀客登门, 带来的不止是书。</p>",
+    "LastUpdatedAt": "2026-10-09T21:30:00", "LastUpdatedChapter": "第八十八章 旧卷新墨",
+    "Views": 942011, "Favorite": 15230,
+    "Extra": {"classification": {"tags": ["古代言情", "志怪"], "author": "一砚秋"}},
+    "Chapters": [
+      {"Id": 920001, "SortNum": 1, "Title": "夜客"},
+      {"Id": 920002, "SortNum": 2, "Title": "残卷"},
+      {"Id": 920003, "SortNum": 3, "Title": "旧墨"}
+    ]
+  },
+  "SeriesTitle": "", "Series": [], "ReadPosition": {"ChapterId": 0}
+}

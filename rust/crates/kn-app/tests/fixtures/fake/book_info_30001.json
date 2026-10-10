@@ -1,0 +1,36 @@
+{
+  "Book": {
+    "Id": 30001,
+    "Title": "星海拾荒者",
+    "Author": "青霜画扇",
+    "Cover": "https://cdn.example.test/covers/30001.jpg?size=680x960",
+    "Introduction": "<p>废弃空间站的拾荒少女，在一次常规打捞中捡回了一段不该存在的记忆体。&nbsp;从那天起，她被卷入一场跨越三代文明的争夺之中——谁掌握了星海深处的旧日档案，谁就握住了下一次跃迁航路的钥匙。</p>",
+    "LastUpdatedAt": "2026-10-08T09:00:00",
+    "LastUpdatedChapter": "第二百一十三章 残骸之中",
+    "Views": 1829340,
+    "Favorite": 20311,
+    "Extra": {
+      "classification": {
+        "tags": ["科幻", "太空歌剧", "单女主", "群像"],
+        "author": "青霜画扇",
+        "series_name_cn": "星海拾荒者系列"
+      }
+    },
+    "Chapters": [
+      {"Id": 900001, "SortNum": 1, "Title": "废站之外"},
+      {"Id": 900002, "SortNum": 2, "Title": "记忆体"},
+      {"Id": 900003, "SortNum": 3, "Title": "旧航路"},
+      {"Id": 900004, "SortNum": 4, "Title": "三代之约"},
+      {"Id": 900005, "SortNum": 5, "Title": "残骸深处"},
+      {"Id": 900006, "SortNum": 6, "Title": "档案守卫"},
+      {"Id": 900007, "SortNum": 7, "Title": "跃迁航图"},
+      {"Id": 900008, "SortNum": 8, "Title": "暗面信标"}
+    ]
+  },
+  "SeriesTitle": "星海拾荒者系列",
+  "Series": [
+    {"Id": 30001, "Title": "星海拾荒者"},
+    {"Id": 30011, "Title": "星海拾荒者：前传"}
+  ],
+  "ReadPosition": {"ChapterId": 900003}
+}

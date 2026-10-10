@@ -1,0 +1,6 @@
+# 所有 ARMv7 Kindle (i.MX50/6 的 Cortex-A8/A9, MTK 的 A7/A53) 都有 NEON, 但目标三元组默认 -neon。
+# 打开后 LLVM 才会对 blend_mask / diff_bbox 等像素循环自动向量化 (KPW5 实测文字绘制 21 → 14 ms)。
+# 不用 `target-cpu=cortex-a8`: A8 的成本模型会放弃这些循环的向量化, 实测慢一倍。
+# 代价: rustc 对 arm32 的 `neon` 给一条 "unstable feature" 警告, 可忽略 (稳定版照常生效)。
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "target-feature=+neon"]

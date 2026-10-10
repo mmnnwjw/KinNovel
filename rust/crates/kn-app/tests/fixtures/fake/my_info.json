@@ -1,0 +1,10 @@
+{
+  "UserName": "轻读书虫",
+  "Email": "reader@example.test",
+  "Level": 12,
+  "Growth": {
+    "Coin": 320,
+    "SignStreak": 5,
+    "TodaySigned": false
+  }
+}

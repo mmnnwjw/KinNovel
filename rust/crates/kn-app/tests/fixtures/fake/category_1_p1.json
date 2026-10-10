@@ -1,0 +1,8 @@
+{
+  "Page": 1,
+  "TotalPages": 1,
+  "Data": [
+    {"Id": 30001, "Title": "星海拾荒者", "UserName": "青霜画扇", "Cover": "https://cdn.example.test/covers/30001.jpg?size=680x960", "LastUpdatedAt": "2026-10-08T09:00:00", "LastUpdatedChapter": "第二百一十三章 残骸之中", "Views": 1829340, "Favorite": 20311},
+    {"Id": 30005, "Title": "深蓝回声", "UserName": "海凛", "Cover": "https://cdn.example.test/covers/30005.jpg?size=680x960", "LastUpdatedAt": "2026-10-09T11:00:00", "LastUpdatedChapter": "第六十七章 潮汐之下", "Views": 723400, "Favorite": 11032}
+  ]
+}

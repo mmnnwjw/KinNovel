@@ -1,0 +1,44 @@
+{
+  "Book": {
+    "Id": 30004,
+    "Title": "机关图鉴",
+    "Author": "木鸢先生",
+    "Cover": "https://cdn.example.test/covers/30004.jpg?size=680x960",
+    "Introduction": "<p>机关图鉴的简介占位文字, 用于预览排版测试。</p>",
+    "LastUpdatedAt": "2026-10-05T12:00:00",
+    "LastUpdatedChapter": "第十章 占位",
+    "Views": 10000,
+    "Favorite": 100,
+    "Extra": {
+      "classification": {
+        "tags": [
+          "机关",
+          "脑洞"
+        ],
+        "author": "木鸢先生"
+      }
+    },
+    "Chapters": [
+      {
+        "Id": 3000401,
+        "SortNum": 1,
+        "Title": "第1章占位标题"
+      },
+      {
+        "Id": 3000402,
+        "SortNum": 2,
+        "Title": "第2章占位标题"
+      },
+      {
+        "Id": 3000403,
+        "SortNum": 3,
+        "Title": "第3章占位标题"
+      }
+    ]
+  },
+  "SeriesTitle": "",
+  "Series": [],
+  "ReadPosition": {
+    "ChapterId": 0
+  }
+}

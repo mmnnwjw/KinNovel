@@ -5,27 +5,45 @@ on:
   pull_request:
 
 jobs:
-  tests:
+  rust:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: bin/src
+    defaults:
+      run:
+        working-directory: rust
     steps:
-      - name: Checkout
+      - name: Checkout (with the FBInk submodule)
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install Rust (+ Kindle target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add armv7-unknown-linux-musleabihf
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          python -m pip install ziglang
+          cargo install cargo-zigbuild --locked
+
+      - name: Unit tests (pure-Rust crates)
+        run: cargo test -p kn-render -p kn-text -p kn-net
+
+      - name: Device binary (armv7 musl, static, FBInk)
+        run: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p kn-app
+
+      - name: Upload device binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinnovel-armv7
+          path: rust/target/armv7-unknown-linux-musleabihf/release/kinnovel
+
+  credentials:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pillow lxml
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
       - name: Scan for committed credentials
-        run: |
-          python tools/credential_scan.py
+        run: python tools/credential_scan.py

@@ -1,0 +1,8 @@
+{
+  "Data": [
+    {"Id": 30001, "Title": "星海拾荒者", "UserName": "青霜画扇", "Cover": "https://cdn.example.test/covers/30001.jpg?size=680x960", "LastUpdatedAt": "2026-10-08T09:00:00", "LastUpdatedChapter": "第二百一十三章 残骸之中", "Views": 1829340, "Favorite": 20311},
+    {"Id": 30011, "Title": "星海拾荒者：前传", "UserName": "青霜画扇", "Cover": "https://cdn.example.test/covers/30011.jpg?size=680x960", "LastUpdatedAt": "2026-07-01T09:00:00", "LastUpdatedChapter": "第四十八章 终章", "Views": 402110, "Favorite": 5312}
+  ],
+  "Page": 1,
+  "TotalPages": 1
+}

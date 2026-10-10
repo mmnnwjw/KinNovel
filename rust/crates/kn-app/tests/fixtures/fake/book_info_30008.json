@@ -1,0 +1,44 @@
+{
+  "Book": {
+    "Id": 30008,
+    "Title": "雾隐学堂",
+    "Author": "林知夏",
+    "Cover": "https://cdn.example.test/covers/30008.jpg?size=680x960",
+    "Introduction": "<p>雾隐学堂的简介占位文字, 用于预览排版测试。</p>",
+    "LastUpdatedAt": "2026-10-05T12:00:00",
+    "LastUpdatedChapter": "第十章 占位",
+    "Views": 10000,
+    "Favorite": 100,
+    "Extra": {
+      "classification": {
+        "tags": [
+          "校园",
+          "悬疑"
+        ],
+        "author": "林知夏"
+      }
+    },
+    "Chapters": [
+      {
+        "Id": 3000801,
+        "SortNum": 1,
+        "Title": "第1章占位标题"
+      },
+      {
+        "Id": 3000802,
+        "SortNum": 2,
+        "Title": "第2章占位标题"
+      },
+      {
+        "Id": 3000803,
+        "SortNum": 3,
+        "Title": "第3章占位标题"
+      }
+    ]
+  },
+  "SeriesTitle": "",
+  "Series": [],
+  "ReadPosition": {
+    "ChapterId": 0
+  }
+}

@@ -1,4 +1,7 @@
 __pycache__/
+# Rust 设备二进制 (由 rust/build.sh kindle 生成, 只进发布包)
+/bin/kinnovel
+*.pgm
 *.py[cod]
 .pytest_cache/
 build/

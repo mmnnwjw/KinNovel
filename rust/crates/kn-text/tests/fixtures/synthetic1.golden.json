@@ -1,0 +1,542 @@
+{
+ "params": {
+  "width": 1236,
+  "height": 1400,
+  "font_size": 48,
+  "line_spacing": 1.42,
+  "reader_margin": 34,
+  "first_line_indent": true
+ },
+ "blocks": [
+  {
+   "kind": "heading",
+   "text": "第一章　开端",
+   "level": 1,
+   "path": "./h1[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "这是一段普通的中文段落，包含标点。还有“引号”和《书名号》以及（括号）。",
+   "level": 0,
+   "path": "./p[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "有 id 的段落 带不换行空格&实体，以及零宽字符和软连字符。",
+   "level": 0,
+   "path": "//*[@id=\"anchor-1\"]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "嵌套段落一",
+   "level": 0,
+   "path": "./div[1]/p[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "嵌套段落二\n换行之后\n再换行",
+   "level": 0,
+   "path": "./div[1]/p[2]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "文本尾巴",
+   "level": 0,
+   "path": "./div[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "English words mixed with 中文 and numbers 12345, punctuation!? End.",
+   "level": 0,
+   "path": "./p[3]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "行尾禁则测试：“开引号在行尾的情况应当被带到下一行”，以及闭标点。。。。。。不能出现在行首！！！",
+   "level": 0,
+   "path": "./p[4]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "image",
+   "text": "",
+   "level": 0,
+   "path": "./img[1]",
+   "offset": 0,
+   "source_url": "https://www.lightnovel.app/images/a.jpg",
+   "width": 800,
+   "height": 1200
+  },
+  {
+   "kind": "image",
+   "text": "",
+   "level": 0,
+   "path": "./p[5]/img[1]",
+   "offset": 0,
+   "source_url": "https://example.com/b.png",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "图片后的文字",
+   "level": 0,
+   "path": "./p[5]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "heading",
+   "text": "小标题带 span",
+   "level": 3,
+   "path": "./h3[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "一粗体二斜体三链接四",
+   "level": 0,
+   "path": "./p[6]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "footnote",
+   "text": "脚注一：这是注释内容。",
+   "level": 0,
+   "path": "//*[@id=\"fn1\"]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "footnote",
+   "text": "脚注二的段落",
+   "level": 0,
+   "path": "./aside[2]/p[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "列表项一",
+   "level": 0,
+   "path": "./ul[1]/li[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "列表项二",
+   "level": 0,
+   "path": "./ul[1]/li[2]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "未闭合段落一",
+   "level": 0,
+   "path": "./p[9]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "未闭合段落二",
+   "level": 0,
+   "path": "./p[10]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "引用块",
+   "level": 0,
+   "path": "./blockquote[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "引用里的段落",
+   "level": 0,
+   "path": "./blockquote[1]/p[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "引用尾",
+   "level": 0,
+   "path": "./blockquote[1]",
+   "offset": 3,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  },
+  {
+   "kind": "text",
+   "text": "预格式 多空格\n第二行",
+   "level": 0,
+   "path": "./pre[1]",
+   "offset": 0,
+   "source_url": "",
+   "width": 0,
+   "height": 0
+  }
+ ],
+ "pages": [
+  [
+   {
+    "type": "text",
+    "x": 34,
+    "y": 34,
+    "path": "./h1[1]",
+    "offset": 0,
+    "text": "第一章　开端",
+    "size": 60
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 142,
+    "path": "./p[1]",
+    "offset": 0,
+    "text": "　　这是一段普通的中文段落，包含标点。还有“引号”",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 210,
+    "path": "./p[1]",
+    "offset": 23,
+    "text": "和《书名号》以及（括号）。",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 292,
+    "path": "//*[@id=\"anchor-1\"]",
+    "offset": 0,
+    "text": "　　有 id 的段落 带不换行空格&实体，以及零宽字符和",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 360,
+    "path": "//*[@id=\"anchor-1\"]",
+    "offset": 26,
+    "text": "软连字符。",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 442,
+    "path": "./div[1]/p[1]",
+    "offset": 0,
+    "text": "　　嵌套段落一",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 524,
+    "path": "./div[1]/p[2]",
+    "offset": 0,
+    "text": "　　嵌套段落二",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 592,
+    "path": "./div[1]/p[2]",
+    "offset": 6,
+    "text": "换行之后",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 660,
+    "path": "./div[1]/p[2]",
+    "offset": 11,
+    "text": "再换行",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 742,
+    "path": "./div[1]",
+    "offset": 0,
+    "text": "　　文本尾巴",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 824,
+    "path": "./p[3]",
+    "offset": 0,
+    "text": "　　English words mixed with 中文 and numbers 12345,",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 892,
+    "path": "./p[3]",
+    "offset": 46,
+    "text": " punctuation!? End.",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 974,
+    "path": "./p[4]",
+    "offset": 0,
+    "text": "　　行尾禁则测试：“开引号在行尾的情况应当被带到",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1042,
+    "path": "./p[4]",
+    "offset": 22,
+    "text": "下一行”，以及闭标点。。。。。。不能出现在行首",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1110,
+    "path": "./p[4]",
+    "offset": 45,
+    "text": "！！！",
+    "size": 48
+   }
+  ],
+  [
+   {
+    "type": "image",
+    "x": 34,
+    "y": 34,
+    "path": "./img[1]",
+    "offset": 0,
+    "url": "https://www.lightnovel.app/images/a.jpg",
+    "width": 1168,
+    "height": 825
+   }
+  ],
+  [
+   {
+    "type": "image",
+    "x": 34,
+    "y": 34,
+    "path": "./p[5]/img[1]",
+    "offset": 0,
+    "url": "https://example.com/b.png",
+    "width": 1168,
+    "height": 825
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 893,
+    "path": "./p[5]",
+    "offset": 0,
+    "text": "　　图片后的文字",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1009,
+    "path": "./h3[1]",
+    "offset": 0,
+    "text": "小标题带 span",
+    "size": 55
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1110,
+    "path": "./p[6]",
+    "offset": 0,
+    "text": "　　一粗体二斜体三链接四",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1192,
+    "path": "./ul[1]/li[1]",
+    "offset": 0,
+    "text": "　　列表项一",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 1274,
+    "path": "./ul[1]/li[2]",
+    "offset": 0,
+    "text": "　　列表项二",
+    "size": 48
+   }
+  ],
+  [
+   {
+    "type": "text",
+    "x": 34,
+    "y": 34,
+    "path": "./p[9]",
+    "offset": 0,
+    "text": "　　未闭合段落一",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 116,
+    "path": "./p[10]",
+    "offset": 0,
+    "text": "　　未闭合段落二",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 198,
+    "path": "./blockquote[1]",
+    "offset": 0,
+    "text": "　　引用块",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 280,
+    "path": "./blockquote[1]/p[1]",
+    "offset": 0,
+    "text": "　　引用里的段落",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 362,
+    "path": "./blockquote[1]",
+    "offset": 3,
+    "text": "　　引用尾",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 444,
+    "path": "./pre[1]",
+    "offset": 0,
+    "text": "　　预格式 多空格",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 512,
+    "path": "./pre[1]",
+    "offset": 8,
+    "text": "第二行",
+    "size": 48
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 628,
+    "path": "//*[@id=\"fn1\"]",
+    "offset": 0,
+    "text": "注释",
+    "size": 39
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 696,
+    "path": "//*[@id=\"fn1\"]",
+    "offset": 0,
+    "text": "脚注一：这是注释内容。",
+    "size": 39
+   },
+   {
+    "type": "text",
+    "x": 34,
+    "y": 774,
+    "path": "./aside[2]/p[1]",
+    "offset": 0,
+    "text": "脚注二的段落",
+    "size": 39
+   }
+  ]
+ ]
+}

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/kn-render", "crates/kn-platform", "crates/kn-ui", "crates/kn-app", "crates/kn-text", "crates/kn-net"]
+exclude = ["spike-hello", "spike-fbink", "spike-font", "spike-net"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/mmnnwjw/KinNovel"
+
+[workspace.dependencies]
+kn-render = { path = "crates/kn-render" }
+kn-platform = { path = "crates/kn-platform" }
+kn-ui = { path = "crates/kn-ui" }
+kn-text = { path = "crates/kn-text" }
+libc = "0.2"
+log = "0.4"
+skrifa = "0.31"
+zeno = "0.3"
+woff2-patched = "0.4"
+html5ever = "=0.39.0"
+markup5ever_rcdom = "0.39.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

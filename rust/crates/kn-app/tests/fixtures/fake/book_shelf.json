@@ -1,0 +1,10 @@
+{
+  "data": [
+    {"id": 30001, "type": "NOVEL", "index": 0, "parents": []},
+    {"id": 30002, "type": "NOVEL", "index": 1, "parents": []},
+    {"id": 30003, "type": "NOVEL", "index": 2, "parents": []},
+    {"id": "folder-a1b2", "type": "FOLDER", "index": 3, "parents": [], "title": "存档"},
+    {"id": 30099, "type": "COMIC", "index": 4, "parents": []},
+    {"id": 30004, "type": "NOVEL", "index": 5, "parents": []}
+  ]
+}

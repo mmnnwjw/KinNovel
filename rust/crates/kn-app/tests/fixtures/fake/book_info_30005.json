@@ -1,0 +1,27 @@
+{
+  "Book": {
+    "Id": 30005,
+    "Title": "深蓝回声",
+    "Author": "海凛",
+    "Cover": "https://cdn.example.test/covers/30005.jpg?size=680x960",
+    "Introduction": "<p>一座下沉的灯塔城, 一群靠回声定位彼此的潜居者。主角是城里唯一还记得阳光颜色的人。</p>",
+    "LastUpdatedAt": "2026-10-09T11:00:00",
+    "LastUpdatedChapter": "第六十七章 潮汐之下",
+    "Views": 723400,
+    "Favorite": 11032,
+    "Extra": {
+      "classification": {
+        "tags": ["悬疑", "末世"],
+        "author": "海凛"
+      }
+    },
+    "Chapters": [
+      {"Id": 910001, "SortNum": 1, "Title": "灯塔不亮了"},
+      {"Id": 910002, "SortNum": 2, "Title": "回声定位"},
+      {"Id": 910003, "SortNum": 3, "Title": "阳光的颜色"}
+    ]
+  },
+  "SeriesTitle": "",
+  "Series": [],
+  "ReadPosition": {"ChapterId": 0}
+}

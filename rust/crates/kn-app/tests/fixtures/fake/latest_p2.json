@@ -1,0 +1,9 @@
+{
+  "Page": 2,
+  "TotalPages": 3,
+  "Data": [
+    {"Id": 30003, "Title": "边城无尽冬", "UserName": "雪見", "Cover": "https://cdn.example.test/covers/30003.jpg?size=680x960", "LastUpdatedAt": "2026-10-07T18:12:00", "LastUpdatedChapter": "第四十五章 风雪不停", "Views": 611234, "Favorite": 9871},
+    {"Id": 30004, "Title": "机关图鉴", "UserName": "木鸢先生", "Cover": "https://cdn.example.test/covers/30004.jpg?size=680x960", "LastUpdatedAt": "2026-09-30T08:00:00", "LastUpdatedChapter": "第一百三十章 齿轮之心", "Views": 288430, "Favorite": 4021},
+    {"Id": 30006, "Title": "灯塔与渡船", "UserName": "秋刀", "Cover": "https://cdn.example.test/covers/30006.jpg?size=680x960", "LastUpdatedAt": "2026-10-05T07:45:00", "LastUpdatedChapter": "第二十九章 远航前夜", "Views": 150982, "Favorite": 2301}
+  ]
+}

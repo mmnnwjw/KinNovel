@@ -1,0 +1,12 @@
+[package]
+name = "kn-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kn-render.workspace = true
+libc.workspace = true
+
+[build-dependencies]
+cc = "1"

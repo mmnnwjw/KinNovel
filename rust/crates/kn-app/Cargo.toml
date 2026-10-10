@@ -1,0 +1,19 @@
+[package]
+name = "kn-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kinnovel"
+path = "src/main.rs"
+
+[dependencies]
+kn-render.workspace = true
+kn-platform.workspace = true
+kn-ui.workspace = true
+kn-text.workspace = true
+kn-net = { path = "../kn-net" }
+# preserve_order: 写回 config.json 时保持 Python 版的键顺序
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2.workspace = true

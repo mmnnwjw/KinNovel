@@ -1,130 +1,146 @@
 # Third-party notices
 
-KinNovel is distributed under the GNU General Public License version 3.
+KinNovel is distributed under the GNU General Public License version 3 (or later).
 The complete license text is included in `LICENSE`.
 
-## Reference projects
-
-### LightNovelShelf/Web
-
-- URL: https://github.com/LightNovelShelf/Web
-- Used for: API contracts, authentication flow, reader behavior, reading
-  position semantics, and chapter font behavior.
-- Implementation: KinNovel reimplements the Kindle client in Python. The
-  Quasar/Vue application source is not included.
-
-### kComics
-
-- URL: https://github.com/lxdklp/kComics
-- Used for: Kindle framebuffer and EPDC output, MTK/MXCFB refresh handling,
-  evdev touch parsing, launcher lifecycle, system process pause/resume, screen
-  snapshot, and Python packaging layout.
-- License: GPLv3.
+## Statically linked native code
 
 ### FBInk
 
 - URL: https://github.com/NiLuJe/FBInk
-- Used for: Kindle EPDC driver interface references, hardware platform quirks
-  (MTK, Rex, Zelda, and legacy MXCFB), ambient temperature constants, and
-  screen update alignment specifications.
-- License: AGPLv3 / GPLv3.
+- Version: commit `886f25f` (2026-08-06), built with `MINIMAL=1 INPUT=1` and linked
+  statically into `bin/kinnovel`.
+- Used for: e-ink display updates on every supported Kindle (waveforms, MTK/mxcfb
+  quirks, device identification) and input device discovery.
+- License: GPL-3.0-or-later. Source: the `rust/third_party/FBInk` submodule of this
+  repository, or upstream at the commit above.
 
-### KOReader
+## Rust crates
 
-- URL: https://github.com/koreader/koreader
-- Version: v2026.03.
-- Redistributed files:
-  - `bin/lib/freetype-woff2/libfreetype.so.6`
-    SHA-256 `cdc5afddf765d49069c5ab3ceb8c63ca815545ae772cbe741869c657115a5294`
-  - `bin/lib/freetype-woff2/libz.so.1`
-    SHA-256 `79a78432f05a2dff2db4e518a13827c7979aeed10b1fa7cdc9aa0e350e78416b`
-- Purpose: FreeType/Brotli support required to load LightNovelShelf WOFF2
-  chapter fonts in the bundled Kindle Pillow build.
-- License: GPLv3.
-- These files are used first at runtime. If they are missing, KinNovel falls
-  back to `/mnt/us/koreader/libs/libfreetype.so.6`.
-- Corresponding KOReader source is available from the URL above and at the
-  repository release matching version v2026.03.
+`bin/kinnovel` is a single static binary built from the crates under `rust/` and the
+crates below (the complete runtime dependency graph of the device build). All of them
+are under permissive licenses compatible with GPL-3.0; their license texts are in the
+crate sources published on crates.io.
 
-## Bundled native libraries (`bin/lib`)
+| Crate | Version | License |
+|---|---|---|
+| adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
+| alloc-no-stdlib | 2.0.4 | BSD-3-Clause |
+| alloc-stdlib | 0.2.4 | BSD-3-Clause |
+| base64 | 0.22.1 | MIT OR Apache-2.0 |
+| bitflags | 1.3.2 | MIT/Apache-2.0 |
+| bitvec | 1.1.1 | MIT |
+| block-buffer | 0.10.4 | MIT OR Apache-2.0 |
+| brotli | 7.0.0 | BSD-3-Clause AND MIT |
+| brotli-decompressor | 4.0.3 | BSD-3-Clause/MIT |
+| bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT |
+| bytemuck_derive | 1.12.1 | Zlib OR Apache-2.0 OR MIT |
+| byteorder | 1.5.0 | Unlicense OR MIT |
+| bytes | 1.12.1 | MIT |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 |
+| crc32fast | 1.5.2 | MIT OR Apache-2.0 |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 |
+| data-encoding | 2.11.1 | MIT |
+| digest | 0.10.7 | MIT OR Apache-2.0 |
+| equivalent | 1.0.2 | Apache-2.0 OR MIT |
+| fdeflate | 0.3.7 | MIT OR Apache-2.0 |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 |
+| font-types | 0.9.0 | MIT OR Apache-2.0 |
+| four-cc | 0.4.0 | MIT/Apache-2.0 |
+| funty | 2.0.0 | MIT |
+| generic-array | 0.14.7 | MIT |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 |
+| hashbrown | 0.17.1 | MIT OR Apache-2.0 |
+| html5ever | 0.39.0 | MIT OR Apache-2.0 |
+| http | 1.5.0 | MIT OR Apache-2.0 |
+| httparse | 1.10.1 | MIT OR Apache-2.0 |
+| indexmap | 2.14.2 | Apache-2.0 OR MIT |
+| itoa | 1.0.18 | MIT OR Apache-2.0 |
+| jpeg-decoder | 0.3.2 | MIT OR Apache-2.0 |
+| libc | 0.2.190 | MIT OR Apache-2.0 |
+| lock_api | 0.4.14 | MIT OR Apache-2.0 |
+| log | 0.4.34 | MIT OR Apache-2.0 |
+| markup5ever | 0.39.0 | MIT OR Apache-2.0 |
+| markup5ever_rcdom | 0.39.0+unofficial | MIT OR Apache-2.0 |
+| memchr | 2.8.3 | Unlicense OR MIT |
+| miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
+| miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
+| new_debug_unreachable | 1.0.6 | MIT |
+| once_cell | 1.21.4 | MIT OR Apache-2.0 |
+| parking_lot | 0.12.5 | MIT OR Apache-2.0 |
+| parking_lot_core | 0.9.12 | MIT OR Apache-2.0 |
+| paste | 1.0.15 | MIT OR Apache-2.0 |
+| phf | 0.13.1 | MIT |
+| phf_shared | 0.13.1 | MIT |
+| png | 0.17.16 | MIT OR Apache-2.0 |
+| ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 |
+| precomputed-hash | 0.1.1 | MIT |
+| proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
+| quote | 1.0.47 | MIT OR Apache-2.0 |
+| radium | 0.7.0 | MIT |
+| rand | 0.8.8 | MIT OR Apache-2.0 |
+| rand_chacha | 0.3.1 | MIT OR Apache-2.0 |
+| rand_core | 0.6.4 | MIT OR Apache-2.0 |
+| read-fonts | 0.29.3 | MIT OR Apache-2.0 |
+| ring | 0.17.14 | Apache-2.0 AND ISC |
+| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT |
+| rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 |
+| rustls-webpki | 0.103.15 | ISC |
+| safer-bytes | 0.2.0 | MIT |
+| scopeguard | 1.2.0 | MIT OR Apache-2.0 |
+| serde | 1.0.229 | MIT OR Apache-2.0 |
+| serde_core | 1.0.229 | MIT OR Apache-2.0 |
+| serde_derive | 1.0.229 | MIT OR Apache-2.0 |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 |
+| sha1 | 0.10.7 | MIT OR Apache-2.0 |
+| sha2 | 0.10.9 | MIT OR Apache-2.0 |
+| simd-adler32 | 0.3.10 | MIT |
+| siphasher | 1.0.4 | MIT OR Apache-2.0 |
+| skrifa | 0.31.3 | MIT OR Apache-2.0 |
+| smallvec | 1.16.3 | MIT OR Apache-2.0 |
+| string_cache | 0.9.0 | MIT OR Apache-2.0 |
+| subtle | 2.6.1 | BSD-3-Clause |
+| syn | 2.0.119 | MIT OR Apache-2.0 |
+| syn | 3.0.6 | MIT OR Apache-2.0 |
+| tap | 1.0.1 | MIT |
+| tendril | 0.5.1 | MIT OR Apache-2.0 |
+| thiserror | 1.0.69 | MIT OR Apache-2.0 |
+| thiserror-impl | 1.0.69 | MIT OR Apache-2.0 |
+| tungstenite | 0.24.0 | MIT OR Apache-2.0 |
+| typenum | 1.20.1 | MIT OR Apache-2.0 |
+| unicode-ident | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 |
+| untrusted | 0.9.0 | ISC |
+| utf-8 | 0.7.6 | MIT OR Apache-2.0 |
+| web_atoms | 0.2.6 | MIT OR Apache-2.0 |
+| webpki-roots | 0.26.11 | CDLA-Permissive-2.0 |
+| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 |
+| woff2-patched | 0.4.0 | Apache-2.0 |
+| wyz | 0.5.1 | MIT |
+| xml5ever | 0.39.0 | MIT OR Apache-2.0 |
+| zeno | 0.3.3 | Apache-2.0 OR MIT |
+| zerocopy | 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT |
+| zlib-rs | 0.6.8 | Zlib |
+| zmij | 1.0.23 | MIT |
 
-The shared objects under `bin/lib` are the armhf Kindle runtime. Except for
-`bin/lib/freetype-woff2`, they come from the Debian jessie-era armhf Kindle
-runtime used by `kComics`. `bin/lib/freetype-woff2` is the KOReader
-`v2026.03` runtime for WOFF2 chapter fonts. KinNovel does not patch these
-binaries; they are redistributed unmodified. Corresponding sources are
-available from the upstream projects below.
+`webpki-roots` embeds the Mozilla CA certificate list (CDLA-Permissive-2.0); it is used
+to verify the TLS certificates of the LightNovelShelf servers.
 
-| File | Component | Version | License | Source |
-|---|---|---|---|---|
-| `libcrypto.so.3` | OpenSSL | 3.6.1 | Apache-2.0 | https://github.com/openssl/openssl |
-| `libssl.so.3` | OpenSSL | 3.6.1 | Apache-2.0 | https://github.com/openssl/openssl |
-| `libxml2.so.2` | libxml2 | 2.9.14 | MIT | https://gitlab.gnome.org/GNOME/libxml2 |
-| `libxslt.so.1` | libxslt | 1.1.42 | MIT | https://gitlab.gnome.org/GNOME/libxslt |
-| `libexslt.so.0` | libxslt (EXSLT) | 1.1.42 | MIT | https://gitlab.gnome.org/GNOME/libxslt |
-| `libz.so.1` | zlib | 1.2.8 | zlib | https://zlib.net |
-| `libjpeg.so.62` | libjpeg-turbo (libjpeg 6.2 ABI) | ABI 6.2 | IJG / BSD-3-Clause | https://github.com/libjpeg-turbo/libjpeg-turbo |
-| `libtiff.so.5` | libtiff | 4.0.3 | libtiff (BSD-style) | https://gitlab.com/libtiff/libtiff |
-| `libwebp.so.7` | libwebp | 1.3.2 | BSD-3-Clause | https://chromium.googlesource.com/webm/libwebp |
-| `libwebpdemux.so.2` | libwebp demux | 1.3.2 | BSD-3-Clause | https://chromium.googlesource.com/webm/libwebp |
-| `libwebpmux.so.3` | libwebp mux | 1.3.2 | BSD-3-Clause | https://chromium.googlesource.com/webm/libwebp |
-| `libsharpyuv.so.0` | libwebp sharpyuv | 1.3.2 | BSD-3-Clause | https://chromium.googlesource.com/webm/libwebp |
-| `libjbig.so.0` | JBIG-KIT | 2.1 | GPLv2 | https://www.cl.cam.ac.uk/~mgk25/jbigkit/ |
-| `libopenjp2.so.7` | OpenJPEG | 2.5.0 | BSD-2-Clause | https://github.com/uclouvain/openjpeg |
-| `liblzma.so.5` | XZ Utils (liblzma) | 5.1.0alpha | Public Domain | https://tukaani.org/xz/ |
-| `libffi.so.6` | libffi | 3.x (soname 6) | MIT | https://github.com/libffi/libffi |
-| `libfreetype.so.6` | FreeType | 2.12.1 | FTL / GPLv2 | https://freetype.org |
-| `freetype-woff2/libfreetype.so.6` | FreeType (WOFF2 build) | KOReader v2026.03 | GPLv3 | https://github.com/koreader/koreader |
-| `freetype-woff2/libz.so.1` | zlib (WOFF2 build) | 1.3.2 | zlib | https://zlib.net |
+## Reference projects (no code copied)
 
-Version evidence: version strings embedded in the binaries (for example
-`OpenSSL 3.6.1`, `LIBTIFF, Version 4.0.3`, `freetype-2.12.1`,
-`/root/libxml2-2.9.14`, `/root/libxslt-1.1.42`, `JBIG-KIT 2.1`,
-`openjpeg` `2.5.0`, `webp-1.3.2`). `libffi` only exposes soname 6 and
-`libjpeg.so.62` only exposes the libjpeg 6.2 ABI symbol, so no exact upstream
-version can be recovered from the file itself.
+- **LightNovelShelf/Web** — https://github.com/LightNovelShelf/Web — API contracts,
+  authentication flow, reading-position semantics and chapter font behaviour.
+- **KOReader** — https://github.com/koreader/koreader (AGPL-3.0) — Kindle device facts
+  (framework suspend/resume, lipc power events, per-model input quirks). Only behaviour
+  and facts were used; no source was translated or copied.
+- **kComics** — https://github.com/lxdklp/kComics (GPL-3.0) — Kindle launcher lifecycle
+  and framebuffer handling used by the earlier Python line (0.x).
 
-SHA-256 (`bin/lib`, computed from this release tree):
+## Fonts
 
-| File | SHA-256 |
-|---|---|
-| `libcrypto.so.3` | `d8ee41ff528ab36b1037f5c27068c42c9908274f58e28e9b4b7b6a1f3242ff83` |
-| `libexslt.so.0` | `5481702fab241e40504ab0fe111a22b62e7cebf272adddde92814fa37ff54773` |
-| `libffi.so.6` | `39e40c959e000021b6bc35f05d408d75924d7c6fe95fd2a80a52aabc2012e86f` |
-| `libfreetype.so.6` | `c2553861000845cfd6aec2e5a0106b9c1a552024e796bedd7fe563621acf3778` |
-| `libjbig.so.0` | `199d989987b1af98385f70377ddcb372ed6f8c5d324177f66933d13e4ef04b95` |
-| `libjpeg.so.62` | `4e02d736a79d768ec3c9d9ac9f759e35e0d4d9c898817e07363b91a73e47e995` |
-| `liblzma.so.5` | `05c96e72458cb5060f24e412af2e74b8d30ff8f08d0cb483d671cacb49ea01f4` |
-| `libopenjp2.so.7` | `e78985bcf24eaa5148d47c5972a7090da691208fb60d0391e9887f2c9bd07449` |
-| `libsharpyuv.so.0` | `57856da168f0818d558035aa9bfdd6f2cb5f365b80f734f52026b7d4f75c1e33` |
-| `libssl.so.3` | `8f77fd780589c2bfcfb8a4d72079ab79098963cd23f8e73ac735b979d712b0c3` |
-| `libtiff.so.5` | `d1ef86b6a4b7bb0f07e38bffa352f59eedbf0ac668c962475fa1fc44f009f634` |
-| `libwebp.so.7` | `12340d83aaf60cfc74599b773a8e105a9b6e26fccf31dd6fb1cabd8c132fd17d` |
-| `libwebpdemux.so.2` | `365e869900b4bf57d04fc760eaaac906d897b64f54a652eb98c00524075e728b` |
-| `libwebpmux.so.3` | `90b03ee03138ff938067033bd701580f2d10816816d1355c923212200c920030` |
-| `libxml2.so.2` | `2b06bb6b0dac79439faa63fd2b83a71d4c4c71b8b906db2a88a13c2e3b3acfd2` |
-| `libxslt.so.1` | `12b2c81b211b35f35f54c1dcfd670c245635634be1f5cfe07b1ac0b2124f1a47` |
-| `libz.so.1` | `5b600414650ac305c93875512a49c6857ab6b7d0c2d831763b1cad12b7ec9158` |
-| `freetype-woff2/libfreetype.so.6` | `cdc5afddf765d49069c5ab3ceb8c63ca815545ae772cbe741869c657115a5294` |
-| `freetype-woff2/libz.so.1` | `79a78432f05a2dff2db4e518a13827c7979aeed10b1fa7cdc9aa0e350e78416b` |
-
-### OpenSSL NOTICE
-
-This product includes software developed by the OpenSSL Project for use in
-the OpenSSL Toolkit (https://www.openssl.org/). OpenSSL 3.x is distributed
-under the Apache License 2.0.
-
-## Bundled Python packages (`bin/vendor`)
-
-| Package | Version | License | Source | Notes |
-|---|---|---|---|---|
-| Pillow | 12.3.0 | MIT-CMU | https://github.com/python-pillow/Pillow | armhf CPython 3.14 build; includes the C extensions used for framebuffer rendering, image decoding and FreeType text |
-| lxml | 6.1.1 | BSD-3-Clause | https://github.com/lxml/lxml | armhf CPython 3.14 build; libxml2/libxslt linked from the bundled runtime above |
-| python-evdev | not embedded in the binary | BSD-3-Clause | https://github.com/gvalkov/python-evdev | armhf CPython 3.14 build; upstream source is the acquisition path |
-
-The vendored packages keep their upstream `LICENSE` files (`bin/vendor/lxml/`
-and `bin/vendor/evdev/`); Pillow's license text is the MIT-CMU license in the
-upstream project. KinNovel does not carry local patches to these packages.
+KinNovel does not ship fonts. It uses the Kindle's system font
+(`/usr/java/lib/fonts/STHeitiMedium.ttf`) for the interface and the per-chapter fonts
+served by LightNovelShelf for chapter text; both stay on the device.
 
 ## Content notice
 

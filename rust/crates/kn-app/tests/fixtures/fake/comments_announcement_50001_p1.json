@@ -1,0 +1,13 @@
+{
+  "Users": {
+    "1": {"UserName": "读者甲"},
+    "2": {"UserName": "读者乙"}
+  },
+  "Commentaries": {
+    "7001": {"UserId": 1, "Content": "期待已久，终于等到 1.0 了！", "CreatedAt": "2026-09-01T09:00:00", "Replies": [7002]},
+    "7002": {"UserId": 2, "Content": "同期待，e-ink 适配看起来很用心。", "CreatedAt": "2026-09-01T10:00:00"}
+  },
+  "Data": [{"Id": 7001}],
+  "Page": 1,
+  "TotalPages": 1
+}

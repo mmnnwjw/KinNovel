@@ -1,0 +1,10 @@
+[package]
+name = "kn-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kn-render.workspace = true
+kn-platform.workspace = true
+libc.workspace = true

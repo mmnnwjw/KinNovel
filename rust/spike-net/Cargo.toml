@@ -1,0 +1,25 @@
+[package]
+name = "spike-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# rustls with the "ring" crypto provider instead of the default aws-lc-rs:
+# aws-lc-rs needs cmake/bindgen-style C build machinery that is painful to
+# cross-compile with zig cc; ring is plain C + asm and zig cc handles it.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+# tungstenite's own TLS features are not used (see note above); we hand rustls
+# a TcpStream ourselves and give tungstenite that already-encrypted stream.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# pure-Rust miniz_oxide backend: no system zlib / C dependency to cross-compile.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
