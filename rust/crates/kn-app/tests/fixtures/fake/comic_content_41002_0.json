@@ -1,0 +1,22 @@
+{
+  "Chapter": {
+    "Id": 41002,
+    "BookId": 40001,
+    "BookName": "灯塔守望者 第1卷",
+    "Title": "第2话 旧航线",
+    "SortNum": 2,
+    "Total": 5,
+    "Skip": 0,
+    "Images": [
+      "fixture:comic/p08.png",
+      "fixture:comic/p01.png",
+      "fixture:comic/p02.png",
+      "fixture:comic/p03.png",
+      "fixture:comic/p04.png"
+    ]
+  },
+  "ReadPosition": {
+    "ChapterId": 41001,
+    "Position": "3"
+  }
+}

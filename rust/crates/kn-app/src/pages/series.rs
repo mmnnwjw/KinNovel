@@ -31,6 +31,8 @@ struct Loaded(i64, Result<(Vec<BookItem>, i64, i64), String>);
 
 pub struct SeriesPage {
     series_name: String,
+    /// 已知的全部书 (漫画详情带回的 `Series`): 本地分页, 不请求接口
+    fixed: Option<Vec<BookItem>>,
     current_book_id: i64,
     status: Status,
     pages: HashMap<i64, Vec<BookItem>>,
@@ -43,6 +45,7 @@ impl SeriesPage {
     pub fn new(series_name: impl Into<String>, current_book_id: i64) -> Self {
         SeriesPage {
             series_name: series_name.into(),
+            fixed: None,
             current_book_id,
             status: Status::Loading,
             pages: HashMap::new(),
@@ -52,11 +55,24 @@ impl SeriesPage {
         }
     }
 
+    pub fn with_books(series_name: impl Into<String>, current_book_id: i64, books: Vec<BookItem>) -> Self {
+        SeriesPage { fixed: Some(books), ..SeriesPage::new(series_name, current_book_id) }
+    }
+
     fn online(&self, cx: &Cx<KinNovel>) -> bool {
         cx.app.net().is_some() || api::fake_mode()
     }
 
     fn load(&mut self, cx: &mut Cx<KinNovel>, page: i64) {
+        if let Some(books) = &self.fixed {
+            let per = per_page(cx).max(1) as usize;
+            self.total_pages = books.len().div_ceil(per).max(1) as i64;
+            self.page = page.clamp(1, self.total_pages);
+            let start = (self.page as usize - 1) * per;
+            self.pages.insert(self.page, books.iter().skip(start).take(per).cloned().collect());
+            self.status = Status::Ready;
+            return;
+        }
         if !self.online(cx) {
             self.status = Status::Offline;
             return;
@@ -173,7 +189,7 @@ impl Page<KinNovel> for SeriesPage {
             let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
             let current = book.id == self.current_book_id;
             let meta = if current { "当前书籍" } else { "" };
-            widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.author, meta);
+            widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), meta);
             cx.hits.add(HitId(ROW_BASE + row as u32), r);
         }
         if self.total_pages > 1 {

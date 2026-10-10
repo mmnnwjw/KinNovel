@@ -1,6 +1,6 @@
 //! Port of the free helper functions at the top of `api.py`: normalizing
-//! list/envelope shapes the hub can return, and filtering out comics (the
-//! Kindle app only reads novels).
+//! list/envelope shapes the hub can return, and filtering out comics from
+//! novel-only lists (comics have their own endpoints and reader).
 
 use serde_json::{Map, Value};
 

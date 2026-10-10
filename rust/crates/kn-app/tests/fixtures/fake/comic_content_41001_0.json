@@ -1,0 +1,23 @@
+{
+  "Chapter": {
+    "Id": 41001,
+    "BookId": 40001,
+    "BookName": "灯塔守望者 第1卷",
+    "Title": "第1话 雾中的光",
+    "SortNum": 1,
+    "Total": 8,
+    "Skip": 0,
+    "Images": [
+      "fixture:comic/p01.png",
+      "fixture:comic/p02.png",
+      "fixture:comic/p03.png",
+      "fixture:comic/p04.png",
+      "fixture:comic/spread.png",
+      "fixture:comic/p05.png"
+    ]
+  },
+  "ReadPosition": {
+    "ChapterId": 41001,
+    "Position": "3"
+  }
+}

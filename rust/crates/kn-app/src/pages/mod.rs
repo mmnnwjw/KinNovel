@@ -5,6 +5,7 @@
 
 pub mod announce;
 pub mod book;
+pub mod comic;
 pub mod comments;
 pub mod discover;
 pub mod history;

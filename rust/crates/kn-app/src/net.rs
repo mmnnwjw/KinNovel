@@ -161,6 +161,9 @@ pub fn scaled_image_url(url: &str, height: u32) -> String {
 /// 插图/封面原始字节: 先查缓存 (与 Python 共用文件名), 缺失时按缩放后的 URL 下载并写缓存。
 /// 缓存里存的是 CDN 原始字节 (Python 版用 Pillow 读, 不依赖扩展名), 不重新编码。
 pub fn image_bytes(paths: &Paths, net: Option<&Client>, url: &str, height: u32) -> Result<Option<Vec<u8>>, String> {
+    if let Some(bytes) = crate::api::fixture_file(url) {
+        return Ok(Some(bytes));
+    }
     let file = paths.image_file(url, height);
     if let Ok(bytes) = std::fs::read(&file) {
         store::touch(&file);

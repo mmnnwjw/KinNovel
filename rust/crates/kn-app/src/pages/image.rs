@@ -49,6 +49,8 @@ struct Decoded {
 
 pub struct ImagePage {
     url: String,
+    /// 漫画页面 (缩放版在漫画缓存里, 见 `crate::comic`)
+    comic: bool,
     /// 阅读页请求插图时用的高度 (决定缓存里那份缩放版)
     height: u32,
     status: Status,
@@ -65,7 +67,12 @@ pub struct ImagePage {
 impl ImagePage {
     pub fn new(url: String, height: u32) -> Self {
         let original = if crate::net::has_original_variant(&url) { Original::NotRequested } else { Original::Same };
-        ImagePage { url, height, status: Status::Loading, original, src: None, fit: None, zoom: 0, center: (0.0, 0.0), toolbar: true }
+        ImagePage { url, comic: false, height, status: Status::Loading, original, src: None, fit: None, zoom: 0, center: (0.0, 0.0), toolbar: true }
+    }
+
+    /// 漫画页面的放大预览 (从漫画阅读页长按或 "放大" 进入)。
+    pub fn comic(url: String, height: u32) -> Self {
+        ImagePage { comic: true, ..ImagePage::new(url, height) }
     }
 
     fn fit_scale(&self, w: u32, h: u32) -> f32 {
@@ -205,10 +212,10 @@ impl Page<KinNovel> for ImagePage {
         }
         let paths = cx.app.paths.clone();
         let net = cx.app.net();
-        let (url, height) = (self.url.clone(), self.height);
+        let (url, height, comic) = (self.url.clone(), self.height, self.comic);
         cx.spawn(move || Decoded {
             original: false,
-            result: crate::net::image_bytes(&paths, net.as_ref(), &url, height)
+            result: if comic { crate::comic::page_bytes(&paths, net.as_ref(), &url, height) } else { crate::net::image_bytes(&paths, net.as_ref(), &url, height) }
                 .and_then(|bytes| bytes.map(|b| kn_render::decode_gray(&b, None).map_err(|e| e.to_string())).transpose()),
         });
     }
@@ -221,7 +228,7 @@ impl Page<KinNovel> for ImagePage {
                 self.src = Some(img);
                 self.status = Status::Ready;
             }
-            (false, Ok(None)) => self.status = Status::Failed("插图未缓存 (离线)".into()),
+            (false, Ok(None)) => self.status = Status::Failed("图片未缓存 (离线)".into()),
             (false, Err(e)) => self.status = Status::Failed(e),
             (true, Ok(Some(img))) => {
                 // 保持视野: 中心按新旧尺寸比例换算, 缩放档位相对适配全屏不变

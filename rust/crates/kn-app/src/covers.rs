@@ -59,7 +59,10 @@ impl CoverCache {
         let slot = match loaded.result {
             Ok(Some(bmp)) => Slot::Ready(bmp),
             Ok(None) => Slot::Missing,
-            Err(_) => Slot::Failed,
+            Err(e) => {
+                eprintln!("[cover] {}: {e}", loaded.key.0);
+                Slot::Failed
+            }
         };
         self.entries.insert(loaded.key, slot);
     }

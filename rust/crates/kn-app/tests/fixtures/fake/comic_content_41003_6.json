@@ -1,0 +1,15 @@
+{
+  "Chapter": {
+    "Id": 41003,
+    "BookId": 40001,
+    "BookName": "灯塔守望者 第1卷",
+    "Title": "第3话 回声",
+    "SortNum": 3,
+    "Total": 7,
+    "Skip": 6,
+    "Images": [
+      "fixture:comic/p03.png"
+    ]
+  },
+  "ReadPosition": null
+}

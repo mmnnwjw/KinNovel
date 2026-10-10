@@ -8,6 +8,7 @@ use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
+use super::comic::ComicReaderPage;
 use super::comments::CommentsPage;
 use super::reader::{Entry, ReaderPage};
 use super::series::SeriesPage;
@@ -52,6 +53,21 @@ fn resume_sort_num(cx: &Cx<KinNovel>, info: &BookInfo) -> Option<i64> {
         }
     }
     None
+}
+
+/// 漫画继续阅读的目标话 (章节 id): 本地进度, 再用服务器阅读位置。
+fn resume_comic_chapter(cx: &Cx<KinNovel>, info: &BookInfo) -> Option<i64> {
+    if let Some(p) = crate::comic::load_progress(&cx.app.paths, info.book.id) {
+        if info.chapters.iter().any(|c| c.id == p.chapter_id) {
+            return Some(p.chapter_id);
+        }
+    }
+    (info.read_position_chapter_id > 0 && info.chapters.iter().any(|c| c.id == info.read_position_chapter_id)).then_some(info.read_position_chapter_id)
+}
+
+/// "继续阅读/开始阅读" 是否有进度 (小说按章节序号, 漫画按章节 id)。
+fn has_resume(cx: &Cx<KinNovel>, info: &BookInfo) -> bool {
+    if info.is_comic { resume_comic_chapter(cx, info).is_some() } else { resume_sort_num(cx, info).is_some() }
 }
 
 pub struct BookDetailPage {
@@ -99,7 +115,13 @@ impl Page<KinNovel> for BookDetailPage {
         };
         if let Ok(l) = msg.downcast::<Loaded>() {
             self.status = match l.0 {
-                Ok(info) => Status::Ready(info),
+                Ok(info) => {
+                    // 漫画: 话列表写缓存, 阅读页换话、离线目录用
+                    if info.is_comic {
+                        crate::comic::ComicBook::from_info(&info).save(&cx.app.paths);
+                    }
+                    Status::Ready(info)
+                }
                 Err(e) => Status::Error(e),
             };
             cx.request_redraw(RefreshHint::Ui);
@@ -117,13 +139,14 @@ impl Page<KinNovel> for BookDetailPage {
         // cx 整体借用 (封面请求、继续阅读计算) 必须在创建 `ink` (借用 cx.fonts/cx.glyphs) 之前完成。
         let resume = if let Status::Ready(info) = &self.status {
             self.covers.request(cx, &info.book.cover, cover_w, cover_h);
-            resume_sort_num(cx, info)
+            has_resume(cx, info)
         } else {
-            None
+            false
         };
 
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let bar = widgets::header(&mut ink, frame, &theme, &m, "书籍详情", &super::status_text(), true, false);
+        let heading = if matches!(&self.status, Status::Ready(info) if info.is_comic) { "漫画详情" } else { "书籍详情" };
+        let bar = widgets::header(&mut ink, frame, &theme, &m, heading, &super::status_text(), true, false);
         cx.hits.add(HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
         let area = Rect::new(0, bar.bottom(), cx.width, cx.height - bar.h);
 
@@ -161,6 +184,7 @@ impl Page<KinNovel> for BookDetailPage {
         ink.text(frame, info_x, y, &title, m.title, theme.foreground);
         y += (m.title * 1.3) as i32;
         let author = if info.book.author.is_empty() { "未知作者".to_string() } else { info.book.author.clone() };
+        let author = if info.is_comic { format!("{author} · 漫画 · {} 话", info.chapters.len()) } else { author };
         let author = ink.fit(&author, m.small, info_w);
         ink.text(frame, info_x, y, &author, m.small, theme.muted);
         y += (m.small * 1.5) as i32;
@@ -199,7 +223,7 @@ impl Page<KinNovel> for BookDetailPage {
         let cols = 3;
         let col_w = (cx.width as i32 - 2 * side - gap * (cols - 1)) / cols;
         let has_chapters = !info.chapters.is_empty();
-        let read_label = if resume.is_some() { "继续阅读" } else { "开始阅读" };
+        let read_label = if resume { "继续阅读" } else { "开始阅读" };
         let read_rect = Rect::new(side, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, read_rect, read_label, if has_chapters { ButtonStyle::Primary } else { ButtonStyle::Disabled });
         cx.hits.add(HIT_READ, read_rect).enabled(has_chapters);
@@ -226,6 +250,12 @@ impl Page<KinNovel> for BookDetailPage {
             }
             HIT_READ => {
                 let Status::Ready(info) = &self.status else { return Transition::None };
+                if info.is_comic {
+                    return match resume_comic_chapter(cx, info).or_else(|| info.chapters.first().map(|c| c.id)) {
+                        Some(cid) => Transition::Push(Box::new(ComicReaderPage::new(self.book_id, cid, Entry::Resume))),
+                        None => Transition::None,
+                    };
+                }
                 let sort_num = resume_sort_num(cx, info).or_else(|| info.chapters.first().map(|c| c.sort_num));
                 match sort_num {
                     Some(sort_num) => Transition::Push(Box::new(ReaderPage::new(self.book_id, sort_num, Entry::Resume))),
@@ -234,6 +264,10 @@ impl Page<KinNovel> for BookDetailPage {
             }
             HIT_CATALOG => {
                 let Status::Ready(info) = &self.status else { return Transition::None };
+                if info.is_comic {
+                    let current = resume_comic_chapter(cx, info);
+                    return Transition::Push(Box::new(CatalogPage::comic(self.book_id, info.chapters.clone(), current)));
+                }
                 let current = resume_sort_num(cx, info);
                 Transition::Push(Box::new(CatalogPage::new(self.book_id, info.chapters.clone(), current)))
             }
@@ -242,6 +276,10 @@ impl Page<KinNovel> for BookDetailPage {
                 let Status::Ready(info) = &self.status else { return Transition::None };
                 if info.series_name.is_empty() {
                     return Transition::None;
+                }
+                // 漫画: 系列里的各卷随详情一起返回 (`Series`); 按系列名查书的接口只认小说
+                if info.is_comic {
+                    return Transition::Push(Box::new(SeriesPage::with_books(info.series_name.clone(), self.book_id, info.series_books.clone())));
                 }
                 Transition::Push(Box::new(SeriesPage::new(info.series_name.clone(), self.book_id)))
             }
@@ -296,7 +334,9 @@ const CAT_ROW_BASE: u32 = 1000;
 pub struct CatalogPage {
     book_id: i64,
     chapters: Vec<ChapterRef>,
+    /// 小说: 当前章节序号; 漫画: 当前话的章节 id
     current: Option<i64>,
+    comic: bool,
     page: usize,
     /// 首次渲染时跳到当前章节所在页
     jumped: bool,
@@ -304,7 +344,16 @@ pub struct CatalogPage {
 
 impl CatalogPage {
     pub fn new(book_id: i64, chapters: Vec<ChapterRef>, current: Option<i64>) -> Self {
-        CatalogPage { book_id, chapters, current, page: 0, jumped: false }
+        CatalogPage { book_id, chapters, current, comic: false, page: 0, jumped: false }
+    }
+
+    /// 漫画目录: 每行显示页数, 点击用漫画阅读页打开。`current` 是章节 id。
+    pub fn comic(book_id: i64, chapters: Vec<ChapterRef>, current: Option<i64>) -> Self {
+        CatalogPage { comic: true, ..CatalogPage::new(book_id, chapters, current) }
+    }
+
+    fn is_current(&self, ch: &ChapterRef) -> bool {
+        self.current == Some(if self.comic { ch.id } else { ch.sort_num })
     }
 }
 
@@ -331,16 +380,22 @@ impl Page<KinNovel> for CatalogPage {
         let pages = self.chapters.len().div_ceil(per_page).max(1);
         if !self.jumped {
             self.jumped = true;
-            if let Some(i) = self.current.and_then(|c| self.chapters.iter().position(|ch| ch.sort_num == c)) {
+            if let Some(i) = self.chapters.iter().position(|ch| self.is_current(ch)) {
                 self.page = i / per_page;
             }
         }
         self.page = self.page.min(pages - 1);
         for (row, (index, ch)) in self.chapters.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
             let r = Rect::new(0, bar.bottom() + row as i32 * row_h as i32, cx.width, row_h);
-            let title = if ch.title.is_empty() { format!("第 {} 章", ch.sort_num) } else { ch.title.clone() };
-            let meta = if self.current == Some(ch.sort_num) { "当前" } else { "" };
-            widgets::list_row(&mut ink, frame, &theme, &m, r, &title, "", meta);
+            let unit = if self.comic { "话" } else { "章" };
+            let title = if ch.title.is_empty() { format!("第 {} {unit}", ch.sort_num) } else { ch.title.clone() };
+            let meta = match (self.is_current(ch), self.comic && ch.page_count > 0) {
+                (true, true) => format!("当前 · {}P", ch.page_count),
+                (true, false) => "当前".to_string(),
+                (false, true) => format!("{}P", ch.page_count),
+                (false, false) => String::new(),
+            };
+            widgets::list_row(&mut ink, frame, &theme, &m, r, &title, "", &meta);
             cx.hits.add(HitId(CAT_ROW_BASE + index as u32), r);
         }
         if pages > 1 {
@@ -357,6 +412,7 @@ impl Page<KinNovel> for CatalogPage {
                 Some(CAT_HIT_PREV) => self.turn(cx, -1),
                 Some(CAT_HIT_NEXT) => self.turn(cx, 1),
                 Some(HitId(id)) if id >= CAT_ROW_BASE => match self.chapters.get((id - CAT_ROW_BASE) as usize) {
+                    Some(ch) if self.comic => Transition::Push(Box::new(ComicReaderPage::new(self.book_id, ch.id, Entry::Resume))),
                     Some(ch) => Transition::Push(Box::new(ReaderPage::new(self.book_id, ch.sort_num, Entry::Resume))),
                     None => Transition::None,
                 },

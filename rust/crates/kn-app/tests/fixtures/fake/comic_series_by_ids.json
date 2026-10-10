@@ -1,0 +1,13 @@
+{
+  "Page": 1,
+  "TotalPages": 1,
+  "Data": [
+    {
+      "Id": 40001,
+      "Title": "灯塔守望者",
+      "Cover": "fixture:comic/cover1.png",
+      "Count": 3,
+      "LastUpdatedAt": "2026-10-09T20:00:00"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
-//! 发现: 最新 / 排行 / 分类 (对照 Python `browse.py` / `rank.py`)。
+//! 发现: 最新 / 排行 / 分类 (对照 Python `browse.py` / `rank.py`) / 漫画 (对照网页版 `Manga/Discover.vue`)。
 //!
-//! 三个子页在同一个标签页内切换 (顶部分段控件), 不压栈。分类分两步: 先列分类, 点一个分类后
+//! 四个子页在同一个标签页内切换 (顶部分段控件), 不压栈。排行与漫画各有第二行分段 (榜单 / 排序)。分类分两步: 先列分类, 点一个分类后
 //! 在同一屏显示该分类的书 (有一个"返回分类"按钮清掉选中, 不是真正的页面栈)。
 
 use std::any::Any;
@@ -21,10 +21,13 @@ enum Sub {
     Latest,
     Rank,
     Category,
+    Comic,
 }
 
-const SUB_OPTIONS: [(Sub, &str); 3] = [(Sub::Latest, "最新"), (Sub::Rank, "排行"), (Sub::Category, "分类")];
+const SUB_OPTIONS: [(Sub, &str); 4] = [(Sub::Latest, "最新"), (Sub::Rank, "排行"), (Sub::Category, "分类"), (Sub::Comic, "漫画")];
 const RANK_OPTIONS: [(i64, &str); 3] = [(1, "日榜"), (7, "周榜"), (31, "月榜")];
+/// 漫画排序 (`GetComicList` 的 `Order`)
+const COMIC_ORDERS: [(&str, &str); 3] = [("latest", "最近更新"), ("new", "上架时间"), ("view", "总点击量")];
 
 enum Fetch<T> {
     Loading,
@@ -44,6 +47,7 @@ impl<T> Fetch<T> {
 
 const SEG_SUB_BASE: u32 = 10;
 const SEG_RANK_BASE: u32 = 20;
+const SEG_ORDER_BASE: u32 = 30;
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
@@ -54,6 +58,7 @@ struct LatestLoaded(i64, Result<ListPage, String>);
 struct RankLoaded(i64, Result<Vec<BookItem>, String>);
 struct CategoriesLoaded(Result<Vec<Category>, String>);
 struct CategoryListLoaded(i64, i64, Result<ListPage, String>);
+struct ComicLoaded(&'static str, i64, Result<ListPage, String>);
 
 pub struct DiscoverPage {
     sub: Sub,
@@ -66,6 +71,9 @@ pub struct DiscoverPage {
     selected: Option<Category>,
     category_list: Fetch<ListPage>,
     category_page: i64,
+    comic_order: &'static str,
+    comic: Fetch<ListPage>,
+    comic_page: i64,
     covers: CoverCache,
 }
 
@@ -82,6 +90,9 @@ impl Default for DiscoverPage {
             selected: None,
             category_list: Fetch::Loading,
             category_page: 1,
+            comic_order: "latest",
+            comic: Fetch::Loading,
+            comic_page: 1,
             covers: CoverCache::default(),
         }
     }
@@ -150,6 +161,19 @@ impl DiscoverPage {
         cx.spawn(move || CategoryListLoaded(id, page, api::load_book_list(net.as_ref(), page, size.max(1), Some(id), filters)));
     }
 
+    fn load_comic(&mut self, cx: &mut Cx<KinNovel>, page: i64) {
+        if !online(cx) {
+            self.comic = Fetch::Offline;
+            return;
+        }
+        self.comic = Fetch::Loading;
+        self.comic_page = page;
+        let net = cx.app.net();
+        let size = per_page(cx) as i64;
+        let order = self.comic_order;
+        cx.spawn(move || ComicLoaded(order, page, api::load_comic_list(net.as_ref(), page, size.max(1), order)));
+    }
+
     fn switch(&mut self, cx: &mut Cx<KinNovel>, sub: Sub) {
         if self.sub == sub {
             return;
@@ -171,6 +195,11 @@ impl DiscoverPage {
                     self.load_categories(cx);
                 }
             }
+            Sub::Comic => {
+                if !matches!(self.comic, Fetch::Ready(_)) {
+                    self.load_comic(cx, self.comic_page.max(1));
+                }
+            }
         }
         cx.request_redraw(RefreshHint::Ui);
     }
@@ -190,9 +219,7 @@ impl DiscoverPage {
             }
             let cover_rect = widgets::cover_slot(m, r);
             let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-            let meta = book.last_update.clone();
-            let subtitle = if book.author.is_empty() { book.last_chapter.clone() } else { book.author.clone() };
-            widgets::list_row_cover(ink, frame, theme, m, r, img, &book.title, &subtitle, &meta);
+            widgets::list_row_cover(ink, frame, theme, m, r, img, &book.title, &book.subtitle(), &book.last_update);
             hits.add(HitId(ROW_BASE + row as u32), r);
         }
     }
@@ -265,6 +292,19 @@ impl Page<KinNovel> for DiscoverPage {
             }
             Err(other) => other,
         };
+        let msg = match msg.downcast::<ComicLoaded>() {
+            Ok(l) => {
+                if l.0 == self.comic_order && l.1 == self.comic_page {
+                    self.comic = match l.2 {
+                        Ok(p) => Fetch::Ready(p),
+                        Err(e) => Fetch::Error(e),
+                    };
+                    cx.request_redraw(RefreshHint::Ui);
+                }
+                return;
+            }
+            Err(other) => other,
+        };
         if let Ok(l) = msg.downcast::<CategoryListLoaded>() {
             let matches_selection = self.selected.as_ref().is_some_and(|c| c.id == l.0) && l.1 == self.category_page;
             if matches_selection {
@@ -289,7 +329,7 @@ impl Page<KinNovel> for DiscoverPage {
         let header_bottom = m.header_h() as i32;
         let seg_rect = Rect::new(side, header_bottom + m.margin as i32 / 3, cx.width - 2 * m.margin, seg_h);
         let mut y = seg_rect.bottom() + m.margin as i32 / 3;
-        let rank_rect = (self.sub == Sub::Rank).then(|| {
+        let rank_rect = matches!(self.sub, Sub::Rank | Sub::Comic).then(|| {
             let r = Rect::new(side, y, cx.width - 2 * m.margin, seg_h);
             y = r.bottom() + m.margin as i32 / 3;
             r
@@ -324,6 +364,12 @@ impl Page<KinNovel> for DiscoverPage {
                     }
                 }
             }
+            Sub::Comic => {
+                if let Fetch::Ready(list) = &self.comic {
+                    let items = list.items.clone();
+                    self.request_covers(cx, &items);
+                }
+            }
         }
 
         let chain = cx.app.ui_fonts.clone();
@@ -333,13 +379,38 @@ impl Page<KinNovel> for DiscoverPage {
         let active = SUB_OPTIONS.iter().position(|(s, _)| *s == self.sub).unwrap_or(0);
         widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, seg_rect, &labels, active, SEG_SUB_BASE);
         if let Some(rank_rect) = rank_rect {
-            let rank_labels: Vec<&str> = RANK_OPTIONS.iter().map(|(_, l)| *l).collect();
-            let rank_active = RANK_OPTIONS.iter().position(|(d, _)| *d == self.rank_kind).unwrap_or(0);
-            widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, rank_rect, &rank_labels, rank_active, SEG_RANK_BASE);
+            if self.sub == Sub::Comic {
+                let labels: Vec<&str> = COMIC_ORDERS.iter().map(|(_, l)| *l).collect();
+                let active = COMIC_ORDERS.iter().position(|(o, _)| *o == self.comic_order).unwrap_or(0);
+                widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, rank_rect, &labels, active, SEG_ORDER_BASE);
+            } else {
+                let rank_labels: Vec<&str> = RANK_OPTIONS.iter().map(|(_, l)| *l).collect();
+                let rank_active = RANK_OPTIONS.iter().position(|(d, _)| *d == self.rank_kind).unwrap_or(0);
+                widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, rank_rect, &rank_labels, rank_active, SEG_RANK_BASE);
+            }
         }
 
         let width = cx.width;
         match self.sub {
+            Sub::Comic => match &self.comic {
+                Fetch::Loading => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "加载中…", None),
+                Fetch::Offline => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "离线，无法加载", Some(("重试", HIT_RETRY))),
+                Fetch::Error(e) => {
+                    let text = format!("加载失败\n{}", ink.fit(e, m.small, (cx.width - 2 * m.margin) as f32));
+                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, Some(("重试", HIT_RETRY)));
+                }
+                Fetch::Ready(list) => {
+                    let items = list.items.clone();
+                    let (page, total_pages) = (list.page, list.total_pages);
+                    if items.is_empty() {
+                        widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "暂无漫画", None);
+                    } else {
+                        self.draw_books(&mut ink, frame, &theme, &m, cx.hits, width, area, &items);
+                    }
+                    let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
+                    widgets::pager(&mut ink, frame, cx.hits, &theme, &m, pr, (page - 1).max(0) as usize, total_pages.max(1) as usize, HIT_PREV, HIT_NEXT);
+                }
+            },
             Sub::Latest => match &self.latest {
                 Fetch::Loading => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "加载中…", None),
                 Fetch::Offline => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "离线，无法加载", Some(("重试", HIT_RETRY))),
@@ -444,9 +515,18 @@ impl Page<KinNovel> for DiscoverPage {
         }
         {
             let HitId(id) = hit;
-            if (SEG_SUB_BASE..SEG_SUB_BASE + 3).contains(&id) {
+            if (SEG_SUB_BASE..SEG_SUB_BASE + SUB_OPTIONS.len() as u32).contains(&id) {
                 let (sub, _) = SUB_OPTIONS[(id - SEG_SUB_BASE) as usize];
                 self.switch(cx, sub);
+                return Transition::None;
+            }
+            if (SEG_ORDER_BASE..SEG_ORDER_BASE + COMIC_ORDERS.len() as u32).contains(&id) {
+                let (order, _) = COMIC_ORDERS[(id - SEG_ORDER_BASE) as usize];
+                if order != self.comic_order {
+                    self.comic_order = order;
+                    self.load_comic(cx, 1);
+                    cx.request_redraw(RefreshHint::Ui);
+                }
                 return Transition::None;
             }
             if (SEG_RANK_BASE..SEG_RANK_BASE + 3).contains(&id) {
@@ -470,6 +550,7 @@ impl Page<KinNovel> for DiscoverPage {
                             self.load_categories(cx);
                         }
                     }
+                    Sub::Comic => self.load_comic(cx, self.comic_page),
                 }
                 cx.request_redraw(RefreshHint::Ui);
                 Transition::None
@@ -497,6 +578,13 @@ impl Page<KinNovel> for DiscoverPage {
                         let page = (self.category_page + delta).max(1);
                         self.load_category(cx, page);
                     }
+                    Sub::Comic => {
+                        let total = self.comic.ready().map_or(i64::MAX, |l| l.total_pages);
+                        let page = (self.comic_page + delta).clamp(1, total.max(1));
+                        if page != self.comic_page {
+                            self.load_comic(cx, page);
+                        }
+                    }
                 }
                 cx.request_redraw(RefreshHint::Ui);
                 Transition::None
@@ -504,6 +592,10 @@ impl Page<KinNovel> for DiscoverPage {
             HitId(id) if id >= ROW_BASE => {
                 let index = (id - ROW_BASE) as usize;
                 match self.sub {
+                    Sub::Comic => match self.comic.ready().and_then(|l| l.items.get(index)) {
+                        Some(b) => Self::navigate_to(b.id),
+                        None => Transition::None,
+                    },
                     Sub::Latest => match self.latest.ready().and_then(|l| l.items.get(index)) {
                         Some(b) => Self::navigate_to(b.id),
                         None => Transition::None,

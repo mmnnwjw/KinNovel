@@ -73,6 +73,29 @@ impl Paths {
         self.cache_dir().join("covers").join(sha256_hex(&format!("{url}#original")) + ".jpg")
     }
 
+    /// 漫画缓存根目录 (见 `crate::comic`)。
+    pub fn comic_dir(&self) -> PathBuf {
+        self.cache_dir().join("comic")
+    }
+
+    pub fn comic_chapter_file(&self, chapter_id: i64) -> PathBuf {
+        self.comic_dir().join("chapters").join(format!("{chapter_id}.json"))
+    }
+
+    pub fn comic_book_file(&self, book_id: i64) -> PathBuf {
+        self.comic_dir().join("books").join(format!("{book_id}.json"))
+    }
+
+    /// 漫画页面图片 (键的规则与插图缓存相同, 但单独放一个目录、单独的配额)。
+    pub fn comic_image_file(&self, url: &str, height: u32) -> PathBuf {
+        let key = format!("{url}#h={}", kn_render::height_bucket(height));
+        self.comic_dir().join("pages").join(sha256_hex(&key) + ".img")
+    }
+
+    pub fn comic_progress_file(&self, book_id: i64) -> PathBuf {
+        self.cache_dir().join("progress").join(format!("comic-{book_id}.json"))
+    }
+
     pub fn progress_file(&self, book_id: i64, sort_num: i64, convert: &str) -> PathBuf {
         let suffix = if convert.is_empty() { String::new() } else { format!("-{convert}") };
         self.cache_dir().join("progress").join(format!("{book_id}-{sort_num}{suffix}.json"))
@@ -243,6 +266,9 @@ pub fn save_progress(file: &Path, p: &Progress) -> std::io::Result<()> {
 pub struct LastRead {
     pub book_id: i64,
     pub sort_num: i64,
+    /// 漫画 (用漫画阅读页打开, 按 `chapter_id` 定位话)
+    pub comic: bool,
+    pub chapter_id: i64,
     pub book_name: String,
     pub chapter_title: String,
     /// 0 起的页号与总页数 (总页数可能是排版到一半时的下限)
@@ -263,18 +289,20 @@ pub fn load_last_read(paths: &Paths) -> Option<LastRead> {
     Some(LastRead {
         book_id: as_i64(v.get("book_id")),
         sort_num: as_i64(v.get("sort_num")),
+        comic: v.get("comic").and_then(Value::as_bool).unwrap_or(false),
+        chapter_id: as_i64(v.get("chapter_id")),
         book_name: as_string(v.get("book_name")),
         chapter_title: as_string(v.get("chapter_title")),
         page: as_i64(v.get("page")).max(0) as usize,
         pages: as_i64(v.get("pages")).max(0) as usize,
         time: as_i64(v.get("time")),
     })
-    .filter(|r| r.book_id > 0 && r.sort_num > 0)
+    .filter(|r| r.book_id > 0 && if r.comic { r.chapter_id > 0 } else { r.sort_num > 0 })
 }
 
 pub fn save_last_read(paths: &Paths, r: &LastRead) -> std::io::Result<()> {
     let v = serde_json::json!({
-        "book_id": r.book_id, "sort_num": r.sort_num, "book_name": r.book_name,
+        "book_id": r.book_id, "sort_num": r.sort_num, "comic": r.comic, "chapter_id": r.chapter_id, "book_name": r.book_name,
         "chapter_title": r.chapter_title, "page": r.page, "pages": r.pages, "time": r.time,
     });
     atomic_write(&paths.last_read_file(), v.to_string().as_bytes())
@@ -345,11 +373,13 @@ pub fn prune_dir(dir: &Path, limit: u64) -> u64 {
     removed
 }
 
-/// 启动时按 `cache_limit_mb` 修剪缓存 (Python `PageContext.prune_cache`: 四个目录各占四分之一)。
+/// 启动时按 `cache_limit_mb` 修剪缓存 (Python `PageContext.prune_cache`: 四个目录各占四分之一);
+/// 漫画页面图片单独按 `comic_mb` 修剪 (清单与书目很小, 不清理)。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn prune_cache(paths: &Paths, limit_mb: i64) -> u64 {
+pub fn prune_cache(paths: &Paths, limit_mb: i64, comic_mb: i64) -> u64 {
     let per_dir = (limit_mb.max(16) as u64 * 1024 * 1024 / 4).max(1);
-    ["covers", "fonts", "images", "content"].iter().map(|name| prune_dir(&paths.cache_dir().join(name), per_dir)).sum()
+    let novel: u64 = ["covers", "fonts", "images", "content"].iter().map(|name| prune_dir(&paths.cache_dir().join(name), per_dir)).sum();
+    novel + prune_dir(&paths.comic_dir().join("pages"), comic_mb.max(16) as u64 * 1024 * 1024)
 }
 
 /// 缓存命中时刷新修改时间, 让修剪顺序成为真正的 LRU。

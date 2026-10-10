@@ -21,6 +21,15 @@ pub fn fake_mode() -> bool {
     fake_dir().is_some()
 }
 
+/// fixture 模式下的图片: `fixture:<相对路径>` 读 `<KN_FAKE_DIR>/<相对路径>` (封面、漫画页面)。
+pub fn fixture_file(url: &str) -> Option<Vec<u8>> {
+    let rel = url.strip_prefix("fixture:")?;
+    if rel.contains("..") {
+        return None;
+    }
+    std::fs::read(fake_dir()?.join(rel)).ok()
+}
+
 fn load_fake(name: &str) -> Result<Value, String> {
     let dir = fake_dir().ok_or_else(|| "fixture 模式未开启".to_string())?;
     let path = dir.join(format!("{name}.json"));
@@ -96,6 +105,10 @@ pub struct BookItem {
     pub last_chapter: String,
     pub views: i64,
     pub favorite: i64,
+    /// 漫画 (`Type: "Comic"`; 漫画列表接口的条目一律是漫画)
+    pub comic: bool,
+    /// 漫画列表条目的 `Count` (话数); 其它接口为 0
+    pub count: i64,
 }
 
 impl BookItem {
@@ -111,7 +124,23 @@ impl BookItem {
             last_chapter: str_of(v, "LastUpdatedChapter"),
             views: i64_of(v, "Views"),
             favorite: i64_of(v, "Favorite"),
+            comic: is_kind(v, "comic"),
+            count: i64_of(v, "Count"),
         }
+    }
+
+    /// 漫画列表条目 (`GetComicList` / `GetBookListByIds{Type: Comic}`):
+    /// `{Id, Title, Cover, Count, LastUpdatedAt}`, 按系列聚合, `Id` 是系列里的一本。
+    pub fn parse_comic(v: &Value) -> BookItem {
+        BookItem { comic: true, ..BookItem::parse(v) }
+    }
+
+    /// 列表行的副标题: 漫画显示话数, 小说显示作者 (没有作者时显示最新章节)。
+    pub fn subtitle(&self) -> String {
+        if self.comic {
+            return if self.count > 0 { format!("漫画 · {} 话", self.count) } else { "漫画".to_string() };
+        }
+        if self.author.is_empty() { self.last_chapter.clone() } else { self.author.clone() }
     }
 
     pub fn list_from(items: &[Value]) -> Vec<BookItem> {
@@ -128,6 +157,10 @@ pub struct ListPage {
 }
 
 fn parse_list_page(v: &Value, requested_page: i64) -> ListPage {
+    parse_list_page_with(v, requested_page, BookItem::parse)
+}
+
+fn parse_list_page_with(v: &Value, requested_page: i64, parse: fn(&Value) -> BookItem) -> ListPage {
     match v {
         Value::Object(_) => {
             let data = arr_of(v, "Data");
@@ -140,9 +173,9 @@ fn parse_list_page(v: &Value, requested_page: i64) -> ListPage {
                 let t = i64_of(v, "TotalPages");
                 if t > 0 { t } else { page }
             };
-            ListPage { items: data.into_iter().map(BookItem::parse).collect(), page: page.max(1), total_pages: total.max(1) }
+            ListPage { items: data.into_iter().map(parse).collect(), page: page.max(1), total_pages: total.max(1) }
         }
-        Value::Array(items) => ListPage { items: items.iter().map(BookItem::parse).collect(), page: requested_page.max(1), total_pages: requested_page.max(1) },
+        Value::Array(items) => ListPage { items: items.iter().map(parse).collect(), page: requested_page.max(1), total_pages: requested_page.max(1) },
         _ => ListPage { items: Vec::new(), page: requested_page.max(1), total_pages: requested_page.max(1) },
     }
 }
@@ -172,6 +205,8 @@ pub struct ChapterRef {
     pub id: i64,
     pub sort_num: i64,
     pub title: String,
+    /// 漫画: 本话图片数 (`PageCount`); 小说为 0
+    pub page_count: i64,
 }
 
 /// 书籍详情 (对照 `GetBookInfo` 的 `Book` + `Series`/`SeriesTitle` + `ReadPosition`)。
@@ -184,6 +219,10 @@ pub struct BookInfo {
     pub chapters: Vec<ChapterRef>,
     /// 服务器记录的阅读位置所在章节 id (0 = 无)
     pub read_position_chapter_id: i64,
+    /// 漫画 (`Book.Type == "Comic"`): 章节是 "话", 用漫画阅读页打开
+    pub is_comic: bool,
+    /// 同系列的书 (`Series`: `{Id, Title, Cover}`), 漫画详情用它列出其它卷
+    pub series_books: Vec<BookItem>,
 }
 
 impl BookInfo {
@@ -205,6 +244,8 @@ impl BookInfo {
             last_chapter: str_of(book_v, "LastUpdatedChapter"),
             views: i64_of(book_v, "Views"),
             favorite: i64_of(book_v, "Favorite"),
+            comic: is_kind(book_v, "comic"),
+            count: 0,
         };
         let tags = arr_of(classification, "tags").into_iter().filter_map(Value::as_str).map(str::to_string).collect();
         let mut series_name = str_of(v, "SeriesTitle");
@@ -219,9 +260,16 @@ impl BookInfo {
             .enumerate()
             .map(|(i, c)| {
                 let sort_num = i64_of(c, "SortNum");
-                ChapterRef { id: i64_of(c, "Id"), sort_num: if sort_num > 0 { sort_num } else { i as i64 + 1 }, title: str_of(c, "Title") }
+                ChapterRef {
+                    id: i64_of(c, "Id"),
+                    sort_num: if sort_num > 0 { sort_num } else { i as i64 + 1 },
+                    title: str_of(c, "Title"),
+                    page_count: i64_of(c, "PageCount"),
+                }
             })
             .collect();
+        let is_comic = book.comic;
+        let series_books = arr_of(v, "Series").into_iter().map(|s| BookItem { comic: is_comic, ..BookItem::parse(s) }).filter(|b| b.id > 0).collect();
         BookInfo {
             book,
             intro: strip_html(&str_of(book_v, "Introduction")),
@@ -229,6 +277,8 @@ impl BookInfo {
             series_name,
             chapters,
             read_position_chapter_id: i64_of(obj_of(v, "ReadPosition"), "ChapterId"),
+            is_comic,
+            series_books,
         }
     }
 }
@@ -293,7 +343,7 @@ fn index_key(item: &Value) -> i64 {
     i64_of(item, "index")
 }
 
-/// 书架原始条目 -> 按 index 排序、去掉文件夹与漫画、去重后的书籍 id 列表
+/// 书架原始条目 -> 按 index 排序、去掉文件夹、去重后的书籍 id 列表 (小说与漫画都保留)
 /// (不支持文件夹嵌套导航 —— 1.0 的书架只展示一层, 文件夹内的书一并列出)。
 fn shelf_book_ids(v: &Value) -> Vec<i64> {
     let items: Vec<&Value> = match v {
@@ -307,7 +357,7 @@ fn shelf_book_ids(v: &Value) -> Vec<i64> {
     let mut entries: Vec<(i64, i64)> = Vec::new(); // (index, id)
     let mut seen = std::collections::HashSet::new();
     for item in items {
-        if !item.is_object() || is_kind(item, "folder") || is_kind(item, "comic") {
+        if !item.is_object() || is_kind(item, "folder") {
             continue;
         }
         let id = i64_of(item, "id").max(i64_of(item, "Id"));
@@ -337,13 +387,19 @@ pub fn load_book_shelf(net: Option<&Client>) -> Result<Vec<BookItem>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let books = load_books_by_ids(net, &ids)?;
+    let books = load_books_by_ids_any(net, &ids)?;
     let by_id: std::collections::HashMap<i64, BookItem> = books.into_iter().map(|b| (b.id, b)).collect();
     Ok(ids.into_iter().filter_map(|id| by_id.get(&id).cloned()).collect())
 }
 
-/// 阅读历史的全部 id (最新在前, 对照 `GetReadHistory().Novel`)。
-pub fn load_history_ids(net: Option<&Client>) -> Result<Vec<i64>, String> {
+/// 阅读历史的全部 id (最新在前, 对照 `GetReadHistory()`): 小说是书 id, 漫画是分卷 (书) id。
+#[derive(Clone, Debug, Default)]
+pub struct HistoryIds {
+    pub novel: Vec<i64>,
+    pub comic: Vec<i64>,
+}
+
+pub fn load_history_ids(net: Option<&Client>) -> Result<HistoryIds, String> {
     let envelope = if fake_mode() {
         load_fake("read_history")?
     } else {
@@ -351,24 +407,49 @@ pub fn load_history_ids(net: Option<&Client>) -> Result<Vec<i64>, String> {
         crate::net::ensure_login(net)?;
         net.get_read_history().map_err(|e| e.to_string())?
     };
-    Ok(arr_of(&envelope, "Novel").into_iter().filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).collect())
+    let ids = |key: &str| arr_of(&envelope, key).into_iter().filter_map(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).collect();
+    Ok(HistoryIds { novel: ids("Novel"), comic: ids("Comic") })
 }
 
 /// 按 id 批量取元数据 (服务器单次最多 24 本, 由 `kn-net` 分块; fixture 模式下按
-/// `books_by_ids.json` 里出现的顺序过滤)。
+/// `books_by_ids.json` 里出现的顺序过滤)。只要小说。
 pub fn load_books_by_ids(net: Option<&Client>, ids: &[i64]) -> Result<Vec<BookItem>, String> {
+    load_by_ids(net, ids, Some("Novel"))
+}
+
+/// 同上, 小说与漫画都要 (书架)。
+pub fn load_books_by_ids_any(net: Option<&Client>, ids: &[i64]) -> Result<Vec<BookItem>, String> {
+    load_by_ids(net, ids, None)
+}
+
+fn load_by_ids(net: Option<&Client>, ids: &[i64], book_type: Option<&str>) -> Result<Vec<BookItem>, String> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     if fake_mode() {
         let all = load_fake("books_by_ids")?;
         let by_id: std::collections::HashMap<i64, BookItem> =
-            all.as_array().into_iter().flatten().map(BookItem::parse).map(|b| (b.id, b)).collect();
+            all.as_array().into_iter().flatten().map(BookItem::parse).filter(|b| book_type.is_none() || !b.comic).map(|b| (b.id, b)).collect();
         return Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect());
     }
     let net = net.ok_or("离线，无法加载")?;
-    let values = net.get_book_list_by_ids_chunked(ids, Some("Novel"), 24).map_err(|e| e.to_string())?;
+    let values = net.get_book_list_by_ids_chunked(ids, book_type, 24).map_err(|e| e.to_string())?;
     Ok(BookItem::list_from(&values))
+}
+
+/// 漫画阅读历史的一页: 分卷 id -> 按系列聚合的条目 (`GetBookListByIds{Type: Comic}`, 与网页版一致)。
+/// 同一系列跨页重复出现由调用方去重。
+pub fn load_comic_series_by_ids(net: Option<&Client>, ids: &[i64]) -> Result<Vec<BookItem>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let v = if fake_mode() {
+        load_fake("comic_series_by_ids")?
+    } else {
+        let net = net.ok_or("离线，无法加载")?;
+        net.get_book_list_by_ids(&ids[..ids.len().min(24)], Some("Comic")).map_err(|e| e.to_string())?
+    };
+    Ok(parse_list_page_with(&v, 1, BookItem::parse_comic).items)
 }
 
 /// 书目过滤 (设置页的 "忽略日文" / "忽略 AI", 对照 Python `browse.py` / `series.py`)。
@@ -424,6 +505,71 @@ pub fn load_categories(net: Option<&Client>) -> Result<Vec<Category>, String> {
         net.get_book_categories("Novel").map_err(|e| e.to_string())?
     };
     Ok(parse_categories(&v))
+}
+
+/// 漫画列表 (发现 · 漫画, 对照网页版 `GetComicList`)。`order`: latest | new | view。
+pub fn load_comic_list(net: Option<&Client>, page: i64, size: i64, order: &str) -> Result<ListPage, String> {
+    let v = if fake_mode() {
+        load_fake(&format!("comic_list_{order}_p{page}"))?
+    } else {
+        let net = net.ok_or("离线，无法加载")?;
+        net.get_comic_list(page, size, order).map_err(|e| e.to_string())?
+    };
+    Ok(parse_list_page_with(&v, page, BookItem::parse_comic))
+}
+
+/// `GetComicContent` 的一批 (网页版每批 6 页)。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComicBatch {
+    pub chapter_id: i64,
+    pub book_id: i64,
+    pub book_name: String,
+    pub title: String,
+    pub sort_num: i64,
+    /// 本话总页数 (与 skip/take 无关)
+    pub total: usize,
+    /// 本批第一张图在整话中的下标 (0 起)
+    pub skip: usize,
+    pub images: Vec<String>,
+    /// 服务器阅读位置 (章节 id, 1 起的页码); 只有 skip = 0 的请求才带
+    pub read_position: Option<(i64, usize)>,
+}
+
+impl ComicBatch {
+    pub fn parse(v: &Value) -> ComicBatch {
+        let ch = obj_of(v, "Chapter");
+        let images: Vec<String> = arr_of(ch, "Images").into_iter().map(|u| u.as_str().unwrap_or("").to_string()).collect();
+        let skip = i64_of(ch, "Skip").max(0) as usize;
+        let total = (i64_of(ch, "Total").max(0) as usize).max(skip + images.len());
+        let pos = obj_of(v, "ReadPosition");
+        let read_position = (i64_of(pos, "ChapterId") > 0).then(|| (i64_of(pos, "ChapterId"), i64_of(pos, "Position").max(1) as usize));
+        ComicBatch {
+            chapter_id: i64_of(ch, "Id"),
+            book_id: i64_of(ch, "BookId"),
+            book_name: str_of(ch, "BookName"),
+            title: str_of(ch, "Title"),
+            sort_num: i64_of(ch, "SortNum"),
+            total,
+            skip,
+            images,
+            read_position,
+        }
+    }
+}
+
+/// 漫画一话的一批图片地址 (阻塞, 后台线程用)。fixture: `comic_content_{cid}_{skip}.json`。
+pub fn load_comic_content(net: Option<&Client>, chapter_id: i64, skip: usize, take: usize, priority: i32) -> Result<ComicBatch, String> {
+    let v = if fake_mode() {
+        load_fake(&format!("comic_content_{chapter_id}_{skip}"))?
+    } else {
+        let net = net.ok_or("离线，无法加载")?;
+        net.get_comic_content(chapter_id, skip as i64, take as i64, priority).map_err(|e| e.to_string())?
+    };
+    let batch = ComicBatch::parse(&v);
+    if batch.chapter_id != 0 && batch.chapter_id != chapter_id {
+        return Err("漫画数据与请求的章节不符".into());
+    }
+    Ok(batch)
 }
 
 /// 书籍详情 (对照 `GetBookInfo`)。
@@ -830,14 +976,52 @@ mod tests {
     }
 
     #[test]
-    fn shelf_book_ids_skip_folders_comics_and_sort_by_index() {
+    fn shelf_book_ids_skip_folders_keep_comics_and_sort_by_index() {
         let v = json!({"data": [
             {"id": 3, "type": "NOVEL", "index": 2},
             {"id": "folder1", "type": "FOLDER", "index": 0},
             {"id": 5, "type": "COMIC", "index": 1},
             {"id": 9, "type": "NOVEL", "index": 0},
         ]});
-        assert_eq!(shelf_book_ids(&v), vec![9, 3]);
+        assert_eq!(shelf_book_ids(&v), vec![9, 5, 3]);
+    }
+
+    #[test]
+    fn comic_list_and_content_parse() {
+        let list = json!({"Data": [{"Id": 40001, "Title": "漫画甲", "Cover": "c", "Count": 12, "LastUpdatedAt": "2026-10-01T08:00:00"}], "TotalPages": 3});
+        let page = parse_list_page_with(&list, 1, BookItem::parse_comic);
+        assert_eq!(page.total_pages, 3);
+        let item = &page.items[0];
+        assert!(item.comic && item.count == 12 && item.last_update == "2026-10-01");
+        assert_eq!(item.subtitle(), "漫画 · 12 话");
+
+        let content = json!({
+            "Chapter": {"Id": 7, "BookId": 40001, "BookName": "漫画甲 1", "Title": "第1话", "SortNum": 1, "Total": 9, "Skip": 6, "Images": ["a", "b", "c"]},
+            "ReadPosition": {"ChapterId": 7, "Position": "4"}
+        });
+        let b = ComicBatch::parse(&content);
+        assert_eq!((b.chapter_id, b.book_id, b.total, b.skip, b.images.len()), (7, 40001, 9, 6, 3));
+        assert_eq!(b.read_position, Some((7, 4)));
+        // 没有阅读位置; Total 缺失时至少覆盖本批
+        let b = ComicBatch::parse(&json!({"Chapter": {"Id": 7, "Skip": 0, "Images": ["a", "b"]}, "ReadPosition": null}));
+        assert_eq!((b.total, b.read_position), (2, None));
+    }
+
+    #[test]
+    fn comic_book_info_parses_type_page_counts_and_series() {
+        let v = json!({
+            "SeriesTitle": "系列",
+            "Series": [{"Id": 40001, "Title": "卷一", "Cover": "c1"}, {"Id": 40002, "Title": "卷二", "Cover": "c2"}],
+            "Book": {"Id": 40001, "Type": "Comic", "Title": "卷一", "Chapters": [{"Id": 7, "SortNum": 1, "Title": "第1话", "PageCount": 9}]},
+            "ReadPosition": {"ChapterId": 7, "Position": "3"}
+        });
+        let info = BookInfo::parse(&v);
+        assert!(info.is_comic && info.book.comic);
+        assert_eq!(info.chapters[0].page_count, 9);
+        assert_eq!(info.series_books.len(), 2);
+        assert!(info.series_books.iter().all(|b| b.comic));
+        assert_eq!(info.read_position_chapter_id, 7);
+        assert!(!BookInfo::parse(&json!({"Book": {"Id": 1, "Type": "Novel"}})).is_comic);
     }
 
     #[test]

@@ -71,7 +71,8 @@ enum Leave {
 
 /// 最近一次上传成功的 (书, 章节, XPath): 位置没变就不再上传。
 /// 换章会新建阅读页实例, 所以放在模块级。
-static LAST_UPLOAD: Mutex<Option<(i64, i64, String)>> = Mutex::new(None);
+/// 漫画阅读页共用 (键里的 XPath 换成页码)。
+pub(super) static LAST_UPLOAD: Mutex<Option<(i64, i64, String)>> = Mutex::new(None);
 
 /// 后台加载结果。
 struct Loaded {
@@ -254,6 +255,8 @@ impl ReaderPage {
         let last = store::LastRead {
             book_id: self.book_id,
             sort_num: self.sort_num,
+            comic: false,
+            chapter_id: self.chapter.chapter_id,
             book_name: self.chapter.book_name.clone(),
             chapter_title: self.chapter.title.clone(),
             page: self.page,
@@ -778,7 +781,7 @@ impl ReaderPage {
                     .chapters
                     .iter()
                     .enumerate()
-                    .map(|(i, title)| crate::api::ChapterRef { id: 0, sort_num: i as i64 + 1, title: title.clone() })
+                    .map(|(i, title)| crate::api::ChapterRef { id: 0, sort_num: i as i64 + 1, title: title.clone(), page_count: 0 })
                     .collect();
                 self.next_leave = Leave::Child;
                 Transition::Push(Box::new(super::book::CatalogPage::new(self.book_id, chapters, Some(self.sort_num))))

@@ -5,6 +5,7 @@
 //!   用真实页面逻辑 (无显示/输入设备) 渲染最后一帧; `KN_APP_DIR` 指向一份设备缓存的拷贝。
 
 mod api;
+mod comic;
 mod covers;
 mod net;
 mod pages;
@@ -136,6 +137,12 @@ fn preview(args: &[String]) {
                 ui.push(Box::new(pages::reader::ReaderPage::new(book, sort, pages::reader::Entry::Resume)));
                 i += 3;
             }
+            "--comic" => {
+                let book: i64 = args[i + 1].parse().expect("book id");
+                let chapter: i64 = args[i + 2].parse().expect("chapter id");
+                ui.push(Box::new(pages::comic::ComicReaderPage::new(book, chapter, pages::reader::Entry::Resume)));
+                i += 3;
+            }
             "--tap" => {
                 let (x, y) = args[i + 1].split_once(',').expect("x,y");
                 let p = (x.parse().unwrap(), y.parse().unwrap());
@@ -157,6 +164,9 @@ fn preview(args: &[String]) {
         settle(&mut ui);
         eprintln!("[preview] {} -> {} ms", args[i - 1], started.elapsed().as_millis());
     }
+    // 页面在 render 里才请求封面/图片: 先渲染一次, 等这些后台任务完成后再出最终帧
+    ui.frame();
+    settle(&mut ui);
     let started = std::time::Instant::now();
     let (frame, _) = ui.frame();
     eprintln!("[preview] final render {} ms", started.elapsed().as_millis());
@@ -194,8 +204,9 @@ fn run_device() {
     let online = std::env::var_os("KN_OFFLINE").is_none();
     let prune_paths = paths.clone();
     let limit_mb = config.int("cache_limit_mb", 192);
+    let comic_mb = config.int("comic_cache_mb", 256);
     std::thread::spawn(move || {
-        let removed = store::prune_cache(&prune_paths, limit_mb);
+        let removed = store::prune_cache(&prune_paths, limit_mb, comic_mb);
         if removed > 0 {
             eprintln!("[cache] 清理 {} KB", removed / 1024);
         }

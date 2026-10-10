@@ -13,6 +13,7 @@ use kn_ui::widgets::{self, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
 use super::book::BookDetailPage;
+use super::comic::ComicReaderPage;
 use super::reader::{Entry, ReaderPage};
 use super::Tab;
 use crate::api::{self, BookItem};
@@ -90,7 +91,14 @@ fn draw_continue(frame: &mut Bitmap, ink: &mut Ink, hits: &mut kn_ui::Hits, them
     let name = ink.fit(&last.book_name, m.title, inner as f32);
     ink.text(frame, rect.x + pad, y, &name, m.title, theme.foreground);
     y += (m.title * 1.35) as i32;
-    let chapter = ink.fit(&format!("第 {} 章 · {}", last.sort_num, last.chapter_title), m.small, inner as f32);
+    // 漫画的话名通常自带 "第N话", 不再加前缀; 页码直接写出来 (漫画没有章内百分比的概念)
+    let chapter = if last.comic {
+        let title = if last.chapter_title.is_empty() { format!("第 {} 话", last.sort_num) } else { last.chapter_title.clone() };
+        format!("{title} · 第 {} / {} 页", last.page + 1, last.pages.max(1))
+    } else {
+        format!("第 {} 章 · {}", last.sort_num, last.chapter_title)
+    };
+    let chapter = ink.fit(&chapter, m.small, inner as f32);
     ink.text(frame, rect.x + pad, y, &chapter, m.small, theme.foreground);
     y += (m.small * 1.5) as i32;
     // 章内进度条
@@ -220,8 +228,7 @@ impl Page<KinNovel> for ShelfPage {
                         let r = Rect::new(0, y + row as i32 * row_h as i32, cx.width, row_h);
                         let cover_rect = widgets::cover_slot(&m, r);
                         let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-                        let subtitle = if book.author.is_empty() { book.last_chapter.clone() } else { book.author.clone() };
-                        widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &subtitle, &book.last_update);
+                        widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
                         cx.hits.add(HitId(ROW_BASE + index as u32), r);
                     }
                     if pages > 1 {
@@ -277,6 +284,7 @@ impl Page<KinNovel> for ShelfPage {
                 let cloud_mode = self.showing_cloud(cx);
                 match hit {
                     HIT_CONTINUE => match last {
+                        Some(l) if l.comic => Transition::Push(Box::new(ComicReaderPage::new(l.book_id, l.chapter_id, Entry::Resume))),
                         Some(l) => Transition::Push(Box::new(ReaderPage::new(l.book_id, l.sort_num, Entry::Resume))),
                         None => Transition::None,
                     },

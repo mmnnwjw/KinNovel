@@ -39,11 +39,15 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - The app opens on **书架** (shelf). There is no menu grid any more.
 - Four top-level tabs; switching tabs replaces the stack root (`Transition::Home`-like), never deepens it.
   - **书架** — "继续阅读" card (last book/chapter/page, one tap → reader at the saved position), then the user's shelf (cloud shelf when logged in, offline cache otherwise).
-  - **历史** — reading history (cloud + local), newest first.
-  - **发现** — segmented control: 最新 / 排行 / 分类; search is not offered (no keyboard).
+  - **历史** — reading history (cloud + local), newest first; segmented 小说 / 漫画 (comic history is aggregated by series, like the web client).
+  - **发现** — segmented control: 最新 / 排行 / 分类 / 漫画 (second row: 日榜/周榜/月榜 for 排行, 最近更新/上架时间/总点击量 for 漫画); search is not offered (no keyboard).
   - **我的** — account card (login state, sign-in), settings, notifications, announcements, about, exit.
 - Pushed pages (book detail, catalog, series, settings sub-pages, reader) show a back arrow in the header and **no tab bar**.
 - The reader is full-screen; its overlay menu has back + home (home = shelf).
+- Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:
+  one page fitted to the whole screen, no bars. Tap left/right 30 % = previous/next (mirrored when 翻页方向 = 从右往左),
+  middle = overlay menu (话名 · 页码, progress bar filling from the reading side, 上一话 / 目录 / 放大 / 下一话,
+  翻页方向 / 每页全刷 / 设置). Long press = zoom (the illustration preview page). Settings has a 漫画 group.
 
 ## Components (`kn_ui::widgets`)
 
@@ -65,6 +69,7 @@ All components draw immediately into the frame and register hits; they never kee
 | Interaction | Hint | Why |
 |---|---|---|
 | Page turn in reader | `Turn` (REAGL full screen) | text everywhere, ghosting handled by REAGL + budget |
+| Page turn in comic reader | `Flash` (default, `comic_page_flash`) or `Turn` | large grey areas ghost badly under partial refresh; a page whose image is still decoding shows a note (`Ui`) and flashes when the image arrives |
 | List page change / tab switch | `Ui` (GC16, diff rect) | mostly full screen, needs clean greys |
 | Press feedback | runtime (invert + A2) | instant |
 | Toast show/hide, overlay menu | `Ui` | small rect |

@@ -1,0 +1,63 @@
+{
+  "SeriesTitle": "灯塔守望者",
+  "Series": [
+    {
+      "Id": 40001,
+      "Title": "灯塔守望者 第1卷",
+      "Cover": "fixture:comic/cover1.png"
+    },
+    {
+      "Id": 40002,
+      "Title": "灯塔守望者 第2卷",
+      "Cover": "fixture:comic/cover2.png"
+    }
+  ],
+  "Book": {
+    "Id": 40001,
+    "Type": "Comic",
+    "Title": "灯塔守望者 第1卷",
+    "Author": "海鸥工作室",
+    "Cover": "fixture:comic/cover1.png",
+    "Introduction": "<p>（测试数据）偏远海岛上的灯塔守望者，每晚记录经过的船只。某天，一艘不在任何航海图上的船靠了岸。</p>",
+    "LastUpdatedAt": "2026-10-09T20:00:00",
+    "LastUpdatedChapter": "第3话 回声",
+    "Views": 52011,
+    "Favorite": 1830,
+    "Extra": {
+      "classification": {
+        "tags": [
+          "悬疑",
+          "治愈"
+        ],
+        "series_name_cn": "灯塔守望者"
+      }
+    },
+    "Chapters": [
+      {
+        "Id": 41001,
+        "SortNum": 1,
+        "Title": "第1话 雾中的光",
+        "PageCount": 8,
+        "CreatedAt": "2026-10-01T00:00:00"
+      },
+      {
+        "Id": 41002,
+        "SortNum": 2,
+        "Title": "第2话 旧航线",
+        "PageCount": 5,
+        "CreatedAt": "2026-10-01T00:00:00"
+      },
+      {
+        "Id": 41003,
+        "SortNum": 3,
+        "Title": "第3话 回声",
+        "PageCount": 7,
+        "CreatedAt": "2026-10-01T00:00:00"
+      }
+    ]
+  },
+  "ReadPosition": {
+    "ChapterId": 41001,
+    "Position": "3"
+  }
+}

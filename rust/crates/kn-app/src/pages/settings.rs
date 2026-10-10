@@ -35,6 +35,9 @@ const fn toggle(key: &'static str, label: &'static str, note: &'static str, defa
 }
 
 const CONVERT: &[(&str, &str)] = &[("", "关闭"), ("t2s", "繁转简"), ("s2t", "简转繁")];
+const COMIC_DIRECTION: &[(&str, &str)] = &[("ltr", "从左往右"), ("rtl", "从右往左")];
+/// 漫画分组的下标 (漫画阅读页的 "设置" 直接打开它)。
+const COMIC_GROUP: usize = 3;
 
 const GROUPS: &[(&str, &[Setting])] = &[
     (
@@ -65,6 +68,14 @@ const GROUPS: &[(&str, &[Setting])] = &[
             step("cache_limit_mb", "缓存上限 (MB)", "启动时清理", 64.0, 1024.0, 64.0, 0, 192.0),
         ],
     ),
+    (
+        "漫画",
+        &[
+            Setting { key: "comic_direction", label: "翻页方向", note: "日漫选从右往左", kind: Kind::Choice(COMIC_DIRECTION), default: 0.0 },
+            toggle("comic_page_flash", "每页全屏刷新", "", true),
+            step("comic_cache_mb", "漫画缓存 (MB)", "启动时清理", 64.0, 2048.0, 64.0, 0, 256.0),
+        ],
+    ),
 ];
 
 const HIT_BACK: HitId = HitId(1);
@@ -74,6 +85,12 @@ const SET_BASE: u32 = 100;
 #[derive(Default)]
 pub struct SettingsPage {
     group: usize,
+}
+
+impl SettingsPage {
+    pub fn comic() -> Self {
+        SettingsPage { group: COMIC_GROUP }
+    }
 }
 
 fn number(config: &crate::store::Config, s: &Setting) -> f64 {

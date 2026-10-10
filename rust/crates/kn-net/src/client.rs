@@ -593,13 +593,24 @@ impl Client {
         // Novels go through the default branch: the web client only sends
         // Type=Comic for a comic series. Sending Type=Novel makes the
         // server return an empty list.
-        if let Some(t) = book_type {
-            if !t.eq_ignore_ascii_case("novel") {
+        //   Some("Novel") -> default branch, comics dropped
+        //   None          -> default branch, everything kept (shelf: novels + comic volumes)
+        //   Some("Comic") -> Type=Comic, the server aggregates by series ({Data: [ComicListItem]})
+        match book_type {
+            Some(t) if t.eq_ignore_ascii_case("novel") => {
+                let result = self.invoke("GetBookListByIds", params, 0, Duration::ZERO)?;
+                Ok(helpers::novel_data(result, "Data"))
+            }
+            Some(t) => {
                 params["Type"] = json!(t);
+                let result = self.invoke("GetBookListByIds", params, 0, Duration::ZERO)?;
+                Ok(helpers::normalize_list(result, "Data"))
+            }
+            None => {
+                let result = self.invoke("GetBookListByIds", params, 0, Duration::ZERO)?;
+                Ok(helpers::normalize_list(result, "Data"))
             }
         }
-        let result = self.invoke("GetBookListByIds", params, 0, Duration::ZERO)?;
-        Ok(helpers::novel_data(result, "Data"))
     }
 
     pub fn get_book_list_by_ids_chunked(
@@ -667,10 +678,28 @@ impl Client {
     pub fn get_read_history(&self) -> Result<Value, NetError> {
         let mut result = self.invoke("GetReadHistory", json!({}), 0, Duration::ZERO)?;
         if let Value::Object(obj) = &mut result {
-            let novel = obj.get("Novel").cloned().unwrap_or(Value::Null);
-            obj.insert("Novel".to_string(), json!(int_items(&novel)));
+            for key in ["Novel", "Comic"] {
+                let ids = obj.get(key).cloned().unwrap_or(Value::Null);
+                obj.insert(key.to_string(), json!(int_items(&ids)));
+            }
         }
         Ok(result)
+    }
+
+    // ---- comics (web client `services/manga`) ----
+
+    /// Comic series list. `order`: `latest` | `new` | `view`.
+    /// Returns `{Data: [{Id, Title, Cover, Count, LastUpdatedAt}], TotalPages}`.
+    pub fn get_comic_list(&self, page: i64, size: i64, order: &str) -> Result<Value, NetError> {
+        let result = self.invoke("GetComicList", json!({"Page": page, "Size": size, "Order": order}), 0, Duration::ZERO)?;
+        Ok(helpers::normalize_list(result, "Data"))
+    }
+
+    /// One batch of page image URLs of a comic chapter:
+    /// `{Chapter: {Id, BookId, BookName, Title, SortNum, Total, Skip, Images}, ReadPosition?}`.
+    /// The server only returns `ReadPosition` (`Position` = 1-based page) when `skip == 0`.
+    pub fn get_comic_content(&self, chapter_id: i64, skip: i64, take: i64, priority: i32) -> Result<Value, NetError> {
+        self.invoke("GetComicContent", json!({"Cid": chapter_id, "Skip": skip, "Take": take}), priority, Duration::ZERO)
     }
 
     pub fn clear_read_history(&self) -> Result<Value, NetError> {
