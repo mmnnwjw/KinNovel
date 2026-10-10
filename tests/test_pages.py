@@ -1179,9 +1179,11 @@ class PageSmokeTests(unittest.TestCase):
         self.context.page_name = "browse"
         self.context.render()
         item_rects = [key for key in browse.STATE["rects"] if key[0] == "item"]
-        nav_rects = [key for key in browse.STATE["rects"] if key[0] in ("prev", "count", "next")]
+        # 页码指示器是纯文字, 不再是可点击按钮(修复"看起来像按钮却点不动"),
+        # 所以这里只断言 prev/next 两个热区。
+        nav_rects = [key for key in browse.STATE["rects"] if key[0] in ("prev", "next")]
         self.assertGreater(len(item_rects), 0)
-        self.assertEqual(len(nav_rects), 3)
+        self.assertEqual(len(nav_rects), 2)
 
     def test_rank_has_bottom_pager(self):
         rank.STATE.update({"items": [{"Id": 1, "Title": "A"}], "page": 1,
@@ -1189,7 +1191,8 @@ class PageSmokeTests(unittest.TestCase):
         self.context.page_name = "rank"
         self.context.render()
         self.assertIn(("prev", 0), rank.STATE["rects"])
-        self.assertIn(("count", 0), rank.STATE["rects"])
+        # 页码指示器现在是纯文字(修复"看起来像按钮却点不动"的问题),
+        # 不再注册可点击热区，所以这里不再断言 ("count", 0)。
         self.assertIn(("next", 0), rank.STATE["rects"])
         self.assertIsNotNone(self.context._header_state)
 
@@ -1617,7 +1620,9 @@ class PageSmokeTests(unittest.TestCase):
         canvas = Canvas(Image.new("L", (1072, 1448), 255),
                         self.context.fonts, Theme(False))
         history.render(self.context, canvas)
-        for key in (("prev", 0), ("count", 0), ("next", 0),
+        # 页码指示器是纯文字, 不再是可点击按钮(修复"看起来像按钮却点不动"),
+        # 所以这里不再断言 ("count", 0) 这个热区。
+        for key in (("prev", 0), ("next", 0),
                     ("retry", 0), ("clear", 0)):
             rx, ry, width, height = history.STATE["rects"][key]
             self.assertGreaterEqual(rx, 0)

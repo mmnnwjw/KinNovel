@@ -228,15 +228,36 @@ class PowerManager:
             return 0
         return consecutive_active
 
+    # 刚进入休眠时短间隔采样, 确认后退到更长的间隔, 减少 lipc-get-prop 子进程的 fork 次数。
+    _WATCHDOG_FAST_INTERVAL = 2.0
+    _WATCHDOG_FAST_WINDOW = 30.0
+    _WATCHDOG_SLOW_INTERVAL = 15.0
+
+    def _sleep_watchdog_poll_interval(self, sleep_elapsed):
+        """Return the poll interval for how long the device has been sleeping."""
+        if sleep_elapsed < self._WATCHDOG_FAST_WINDOW:
+            return self._WATCHDOG_FAST_INTERVAL
+        return self._WATCHDOG_SLOW_INTERVAL
+
     def _sleep_watchdog_loop(self):
         """Recover from a missed screen-saver transition without power-key injection."""
         consecutive_active = 0
+        sleep_started_at = None
         while not self._stopped:
-            time.sleep(2.0)
+            if self.is_sleeping:
+                if sleep_started_at is None:
+                    sleep_started_at = time.monotonic()
+                interval = self._sleep_watchdog_poll_interval(
+                    time.monotonic() - sleep_started_at)
+            else:
+                sleep_started_at = None
+                interval = self._WATCHDOG_FAST_INTERVAL
+            time.sleep(interval)
             if self._stopped:
                 break
             if not self.is_sleeping:
                 consecutive_active = 0
+                sleep_started_at = None
                 continue
             consecutive_active = self._sleep_watchdog_check(consecutive_active)
 
@@ -354,6 +375,14 @@ class PowerManager:
         except Exception:
             pass
 
+        # 休眠时断开 Hub 连接并停止保活, 避免 Wi-Fi 无线电空转耗电。
+        try:
+            api = getattr(self.app, "api", None)
+            if api is not None:
+                api.suspend()
+        except Exception as exc:
+            self.log(f"挂起 Hub 连接失败: {exc}")
+
         # 1. Ungrab touchscreen device so native lockscreen can receive input
         try:
             if self.app.screen and self.app.screen.input and self.app.screen.input.device:
@@ -388,6 +417,14 @@ class PowerManager:
             self.app.screen.input.reset_gesture_state()
         except Exception:
             pass
+
+        # 唤醒: 不需要立即重连, 下次真实 invoke 会惰性重新建立 Hub 连接。
+        try:
+            api = getattr(self.app, "api", None)
+            if api is not None:
+                api.resume()
+        except Exception as exc:
+            self.log(f"恢复 Hub 连接状态失败: {exc}")
 
         # 1. Small delay to let Kindle kernel / powerd restore backlight & power
         time.sleep(0.35)

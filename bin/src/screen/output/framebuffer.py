@@ -304,6 +304,7 @@ class EInkDisplay:
                 wait_for_submission_before=True, wait_for_completion=False,
                 ioctl_timeout=5.0, temp=None, is_reagl=False, night_mode=False, alignment=8):
         self.fb_path = fb_path
+        self.protocol = protocol
         self.fd = os.open(fb_path, os.O_RDWR)
         try:
             if protocol == "mtk":
@@ -616,8 +617,11 @@ class EInkDisplay:
             self.wait_update_submission(self._pending_marker)
         with EInkDisplay._show_lock:
             if self.supports_swipe_animation and self._swipe_animation:
-                is_flashing = False
-                waveform_mode = WAVEFORM_MTK.REAGL
+                if is_flashing:
+                    # 闪刷(定期去残影)优先于翻页动画, 否则闪刷永远不会发生。
+                    self._swipe_animation = False
+                else:
+                    waveform_mode = WAVEFORM_MTK.REAGL
             if region:
                 rx, ry, rw, rh = region
                 rx = max(0, min(rx, self.width))

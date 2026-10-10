@@ -295,11 +295,17 @@ class SignalRClient:
         self.last_error = ""
         self._record_buffer = bytearray()
         self._last_used = 0.0
+        # 只在真正的 invoke 上更新 (keepalive ping 不算), 用来判断连接是否
+        # 长时间没有被真实使用, 从而决定是否主动断开省电。
+        self._last_real_use = 0.0
         self._idle_reconnect = 20.0
         self._ssl_context_obj = None
         self._shutdown = False
         self._connect_timeout = min(float(timeout or 30), 10.0)
         self._keepalive_interval = 10.0
+        # 空闲超过这个时长就主动断开, 停止无意义的保活 ping 占用 Wi-Fi 无线电;
+        # 下次 invoke 会走 _ensure_connected_locked 惰性重连。
+        self._keepalive_idle_limit = 120.0
         self._keepalive_stop = threading.Event()
         self._keepalive_thread = None
         # interactive(0) 优先于 prefetch(1); 只允许一个请求真正进入 socket。
@@ -388,24 +394,40 @@ class SignalRClient:
         self._keepalive_thread.start()
 
     def _keepalive_loop(self):
+        # 空闲太久会在 _keepalive_ping 里主动关闭连接并返回 False;
+        # 这时线程退出, 下次 _connect_locked 成功后由 _start_keepalive 重新拉起。
         while not self._keepalive_stop.wait(self._keepalive_interval):
             if self._shutdown:
                 return
             try:
-                self._keepalive_ping()
+                alive = self._keepalive_ping()
             except Exception as exc:
                 self.last_error = "keepalive: %s" % exc
                 self.close()
+                return
+            if not alive:
+                return
 
     def _keepalive_ping(self):
-        """Send a protocol ping when the connection would otherwise idle out."""
+        """Send a protocol ping, or close the socket once it has idled too long."""
         with self._lock:
             if self._shutdown or self._socket is None:
                 return False
-            if (self._last_used
-                    and time.monotonic() - self._last_used
-                    < self._keepalive_interval * 0.8):
+            last_used = self._last_used
+            now = time.monotonic()
+            real_use = self._last_real_use
+            if real_use and now - real_use >= self._keepalive_idle_limit:
+                # 长时间没有真实 invoke (ping 本身不算), 关掉 socket 省电;
+                # 下次 invoke 再惰性重连。
+                self._close_locked()
                 return False
+            if last_used and now - last_used < self._keepalive_interval * 0.8:
+                return True
+            try:
+                # ping 发送不能无限期占住 self._lock, 给个独立的小超时。
+                self._socket.settimeout(5.0)
+            except (OSError, AttributeError):
+                pass
             self._socket.send_text('{"type":6}' + self.RECORD_SEPARATOR)
             self._last_used = time.monotonic()
             return True
@@ -487,6 +509,9 @@ class SignalRClient:
                             "SignalR 握手失败: %s" % message.get("error"))
                     if message == {}:
                         self._socket = socket_
+                        # 重置, 避免沿用上一次连接遗留的旧时间戳导致刚连上就被当成空闲关闭。
+                        self._last_used = time.monotonic()
+                        self._last_real_use = self._last_used
                         self._start_keepalive()
                         return
         except (OSError, TransportError) as exc:
@@ -578,6 +603,7 @@ class SignalRClient:
                 self._close_locked()
                 raise TransportError("Hub 调用发送失败: %s" % exc)
             self._last_used = time.monotonic()
+            self._last_real_use = self._last_used
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if self._shutdown:

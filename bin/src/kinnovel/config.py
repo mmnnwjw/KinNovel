@@ -21,6 +21,7 @@ DEFAULTS = {
     "line_spacing": 1.42,
     "reader_margin": 34,
     "page_flash": False,
+    "full_refresh_every": 6,
     "page_turn_animation": True,
     "reader_guide_dismissed": False,
     "night_mode": False,

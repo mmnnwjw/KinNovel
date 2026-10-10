@@ -17,6 +17,9 @@ MODULES = [
     ("shop", "商城"),
 ]
 
+# 这几个入口需要登录; 未登录时按钮渲染为不可用, 点击会跳去登录。
+_REQUIRES_LOGIN = {"shelf", "history", "notifications", "shop"}
+
 DEFAULT_ORDER = {
     "shelf": 0,
     "history": 1,
@@ -73,7 +76,8 @@ def render(ctx, canvas):
         x = margin + column * (button_width + gap)
         y = start_y + row * (button_height + row_gap)
         rect = (x, y, button_width, button_height)
-        canvas.button(rect, label, active=(target == "shelf") or bool(user) or target != "account")
+        active = bool(user) or target not in _REQUIRES_LOGIN
+        canvas.button(rect, label, active=active)
         STATE["rects"][target] = rect
 
 
@@ -85,7 +89,7 @@ def handle(data, ctx):
         if rx <= x < rx + width and ry <= y < ry + height:
             if target == "exit":
                 ctx.app.stop()
-            elif target in ("shelf", "history", "notifications", "shop") and not ctx.api.user:
+            elif target in _REQUIRES_LOGIN and not ctx.api.user:
                 ctx.toast("请先登录")
                 ctx.navigate("account")
             else:

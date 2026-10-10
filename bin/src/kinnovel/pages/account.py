@@ -1,5 +1,7 @@
 import time
 
+from .. import widgets
+
 STATE = {
     "mode": "login",
     "rects": {},
@@ -198,42 +200,31 @@ NOTIFICATION_STATE = {
     "generation": 0,
 }
 
+_notification_loader = widgets.ListLoader(NOTIFICATION_STATE)
+
 
 def enter_notifications(ctx):
-    # 每次进入都回到第一页，不保留上次的翻页位置
-    _load_notifications(ctx, 1)
+    # 从主页新进入时回到第一页；从通知详情(标记已读等)返回时保留页码。
+    _load_notifications(ctx, NOTIFICATION_STATE["page"] if ctx.returning else 1)
 
 
 def _load_notifications(ctx, page=None):
     if page is not None:
         NOTIFICATION_STATE["page"] = max(1, int(page))
-    NOTIFICATION_STATE["generation"] += 1
-    generation = NOTIFICATION_STATE["generation"]
-    NOTIFICATION_STATE["loading"] = True
-    NOTIFICATION_STATE["error"] = ""
 
-    def success(result):
-        if generation != NOTIFICATION_STATE["generation"]:
-            return
+    def done(result):
         NOTIFICATION_STATE["items"] = result.get("Data") or []
         NOTIFICATION_STATE["page"] = int(result.get("Page") or 1)
         NOTIFICATION_STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
-        NOTIFICATION_STATE["loading"] = False
-        NOTIFICATION_STATE["error"] = ""
 
-    _top, _row_height, per_page = _notification_layout(ctx)
-    ctx.run_async("notifications", lambda: ctx.api.get_notifications(
-        NOTIFICATION_STATE["page"], per_page), success,
-        lambda exc: _notification_error(generation, exc, ctx))
-
-
-def _notification_error(generation, exc, ctx):
-    if generation == NOTIFICATION_STATE["generation"]:
-        NOTIFICATION_STATE["loading"] = False
-        NOTIFICATION_STATE["error"] = str(exc)
+    def failed(_exc):
         # 清掉旧通知，避免错误态还显示上一页数据
         NOTIFICATION_STATE["items"] = []
         NOTIFICATION_STATE["total_pages"] = 1
+
+    _top, _row_height, per_page = _notification_layout(ctx)
+    _notification_loader.start(ctx, "notifications", lambda: ctx.api.get_notifications(
+        NOTIFICATION_STATE["page"], per_page), done, failed)
 
 
 def _notification_layout(ctx):
@@ -241,8 +232,9 @@ def _notification_layout(ctx):
     top = max(72, int(ctx.height * 0.085))
     action_height = 66
     list_top = top + action_height
-    row_height = max(76, int(ctx.height * 0.063))
-    per_page = max(1, (ctx.height - list_top - 90) // row_height)
+    row_height = widgets.list_row_height(ctx)
+    bottom = widgets.pager_height(ctx) + 24
+    per_page = max(1, (ctx.height - list_top - bottom) // row_height)
     return top, row_height, per_page
 
 
@@ -254,14 +246,10 @@ def render_notifications(ctx, canvas):
     pages = NOTIFICATION_STATE["total_pages"]
     NOTIFICATION_STATE["rects"] = {}
     if NOTIFICATION_STATE["error"]:
-        canvas.centered_text("加载失败", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2 - 30)
-        canvas.centered_text(str(NOTIFICATION_STATE["error"])[:40], ctx.fonts["tiny"],
-                             canvas.width // 2, canvas.height // 2 + 30,
-                             fill=canvas.theme.muted)
-        rect = (margin, canvas.height - 72, canvas.width - 2 * margin, 54)
-        canvas.button(rect, "重试", font=ctx.fonts["small"])
-        NOTIFICATION_STATE["rects"][("retry", 0)] = rect
+        rect = (margin, canvas.height - widgets.pager_height(ctx) - 16,
+               canvas.width - 2 * margin, widgets.pager_height(ctx))
+        widgets.error_state(canvas, ctx, NOTIFICATION_STATE["error"],
+                            NOTIFICATION_STATE["rects"], rect)
         return
     # “全部已读”必须是可见按钮，不能复用状态栏的隐藏热区
     action_rect = (canvas.width - margin - 240, top + 6, 240, 54)
@@ -279,48 +267,31 @@ def render_notifications(ctx, canvas):
         item = items[index]
         if not isinstance(item, dict):
             continue
-        canvas.draw.rounded_rectangle(
-            [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
-            radius=8, outline=canvas.theme.mid,
-            fill=canvas.theme.light if not item.get("IsRead") else canvas.theme.background,
-            width=1)
-        canvas.text((rect[0] + 12, y + 8),
-                    canvas.fit_text(item.get("Title") or "通知",
-                                    ctx.fonts["small"], rect[2] - 24),
-                    font=ctx.fonts["small"])
-        canvas.text((rect[0] + 12, y + 40),
-                    canvas.fit_text(item.get("Body") or "",
-                                    ctx.fonts["tiny"], rect[2] - 24),
-                    font=ctx.fonts["tiny"], fill=canvas.theme.muted)
+        widgets.row_card(canvas, ctx, rect, item.get("Title") or "通知",
+                         item.get("Body") or "", highlight=not item.get("IsRead"),
+                         wrap_title=True)
     if pages > 1:
-        bottom = canvas.height - 68
-        width = int(canvas.width * 0.24)
-        for action, x, label in (
-            ("prev", margin, "上一页"),
-            ("count", (canvas.width - width) // 2,
-             "%s/%s" % (NOTIFICATION_STATE["page"], pages)),
-            ("next", canvas.width - margin - width, "下一页"),
-        ):
-            rect = (x, bottom, width, 50)
-            canvas.button(rect, label, font=ctx.fonts["tiny"])
-            NOTIFICATION_STATE["rects"][(action, 0)] = rect
+        bottom_y = canvas.height - widgets.pager_height(ctx) - 16
+        pager_rect = (margin, bottom_y, canvas.width - 2 * margin, widgets.pager_height(ctx))
+        widgets.pager_bar(canvas, ctx, pager_rect, NOTIFICATION_STATE["page"] > 1,
+                          NOTIFICATION_STATE["page"] < pages,
+                          "%s/%s" % (NOTIFICATION_STATE["page"], pages),
+                          NOTIFICATION_STATE["rects"])
     if NOTIFICATION_STATE["loading"]:
-        canvas.centered_text("加载中…", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2)
+        widgets.loading_state(canvas, ctx)
 
 
 def handle_notifications(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    retry = NOTIFICATION_STATE["rects"].get(("retry", 0))
-    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+    key = widgets.hit_test(NOTIFICATION_STATE["rects"], x, y)
+    if key is None:
+        return
+    if key == ("retry", 0):
         _load_notifications(ctx, NOTIFICATION_STATE["page"])
         return
-    readall = NOTIFICATION_STATE["rects"].get(("readall", 0))
-    if (readall
-            and readall[0] <= x < readall[0] + readall[2]
-            and readall[1] <= y < readall[1] + readall[3]):
+    if key == ("readall", 0):
         ids = [int(item.get("Id")) for item in NOTIFICATION_STATE["items"]
                if not item.get("IsRead")]
         if ids:
@@ -329,29 +300,19 @@ def handle_notifications(data, ctx):
                           lambda _: (_mark_notifications_local(), ctx.show()),
                           lambda _: None)
         return
-    for action in ("prev", "next", "count"):
-        rect = NOTIFICATION_STATE["rects"].get((action, 0))
-        if rect and rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]:
-            if action == "prev" and NOTIFICATION_STATE["page"] > 1:
-                _load_notifications(ctx, NOTIFICATION_STATE["page"] - 1)
-            elif action == "next" and NOTIFICATION_STATE["page"] < NOTIFICATION_STATE["total_pages"]:
-                _load_notifications(ctx, NOTIFICATION_STATE["page"] + 1)
-            elif action == "count":
-                _load_notifications(ctx, NOTIFICATION_STATE["page"])
-            return
-    for key, rect in NOTIFICATION_STATE["rects"].items():
-        if key[0] != "item":
-            continue
-        rx, ry, width, height = rect
-        if rx <= x < rx + width and ry <= y < ry + height:
-            if key[1] < len(NOTIFICATION_STATE["items"]):
-                item = NOTIFICATION_STATE["items"][key[1]]
-                if not item.get("IsRead"):
-                    ctx.run_async("notifications",
-                                  lambda: ctx.api.mark_notifications([int(item.get("Id"))]),
-                                  lambda _: ctx.show(), lambda _: None)
-                    item["IsRead"] = True
-            return
+    if key[0] in ("prev", "next"):
+        if key[0] == "prev" and NOTIFICATION_STATE["page"] > 1:
+            _load_notifications(ctx, NOTIFICATION_STATE["page"] - 1)
+        elif key[0] == "next" and NOTIFICATION_STATE["page"] < NOTIFICATION_STATE["total_pages"]:
+            _load_notifications(ctx, NOTIFICATION_STATE["page"] + 1)
+        return
+    if key[0] == "item" and key[1] < len(NOTIFICATION_STATE["items"]):
+        item = NOTIFICATION_STATE["items"][key[1]]
+        if not item.get("IsRead"):
+            ctx.run_async("notifications",
+                          lambda: ctx.api.mark_notifications([int(item.get("Id"))]),
+                          lambda _: ctx.show(), lambda _: None)
+            item["IsRead"] = True
 
 
 def _mark_notifications_local():
@@ -385,31 +346,31 @@ def enter_shop(ctx):
     ctx.run_async("shop", operation, success, error)
 
 
+def _shop_layout(ctx):
+    top = max(72, int(ctx.height * 0.085))
+    row_height = max(84, int(ctx.height * 0.070))
+    bottom = widgets.pager_height(ctx) + 24
+    per_page = max(1, (ctx.height - top - bottom) // row_height)
+    return top, row_height, per_page
+
+
 def render_shop(ctx, canvas):
-    top = canvas.header("商城 · 金币 %s" % SHOP_STATE["shop"].get("Coin", 0),
-                        left="返回", right="主页")
+    top, row_height, per_page = _shop_layout(ctx)
+    canvas.header("商城 · 金币 %s" % SHOP_STATE["shop"].get("Coin", 0),
+                 left="返回", right="主页")
     margin = int(canvas.width * 0.035)
-    row_height = max(84, int(canvas.height * 0.070))
-    per_page = max(1, (canvas.height - top - 92) // row_height)
     items = SHOP_STATE["items"]
     pages = max(1, (len(items) + per_page - 1) // per_page)
     SHOP_STATE["page"] = min(SHOP_STATE["page"], pages - 1)
     start = SHOP_STATE["page"] * per_page
     SHOP_STATE["rects"] = {}
-    nav_y = canvas.height - 68
+    nav_y = canvas.height - widgets.pager_height(ctx) - 16
+    pager_rect = (margin, nav_y, canvas.width - 2 * margin, widgets.pager_height(ctx))
     if SHOP_STATE["error"]:
-        canvas.centered_text("加载失败", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2 - 30)
-        canvas.centered_text(str(SHOP_STATE["error"])[:40], ctx.fonts["tiny"],
-                             canvas.width // 2, canvas.height // 2 + 30,
-                             fill=canvas.theme.muted)
-        rect = (margin, nav_y, canvas.width - 2 * margin, 50)
-        canvas.button(rect, "重试", font=ctx.fonts["small"])
-        SHOP_STATE["rects"][("retry", 0)] = rect
+        widgets.error_state(canvas, ctx, SHOP_STATE["error"], SHOP_STATE["rects"], pager_rect)
         return
     if SHOP_STATE["loading"]:
-        canvas.centered_text("加载中…", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2)
+        widgets.loading_state(canvas, ctx)
         return
     for row in range(per_page):
         index = start + row
@@ -421,60 +382,38 @@ def render_shop(ctx, canvas):
         y = top + 12 + row * row_height
         rect = (margin, y, canvas.width - 2 * margin, row_height - 8)
         SHOP_STATE["rects"][("item", index)] = rect
-        canvas.draw.rounded_rectangle(
-            [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
-            radius=8, outline=canvas.theme.mid, width=1)
-        canvas.text((rect[0] + 12, y + 10), item.get("Name") or item.get("Key"),
-                    font=ctx.fonts["small"])
-        canvas.text((rect[0] + 12, y + 44),
-                    "%s 金币 · 持有 %s" % (item.get("Price", 0), item.get("Owned", 0)),
-                    font=ctx.fonts["tiny"], fill=canvas.theme.muted)
-    width = int(canvas.width * 0.25)
-    for key, rect, label in (
-        ("prev", (margin, nav_y, width, 50), "上一页"),
-        ("count", ((canvas.width - width) // 2, nav_y, width, 50),
-         "%s/%s" % (SHOP_STATE["page"] + 1, pages)),
-        ("next", (canvas.width - margin - width, nav_y, width, 50), "下一页"),
-    ):
-        enabled = key == "count" or (
-            key == "prev" and SHOP_STATE["page"] > 0) or (
-            key == "next" and SHOP_STATE["page"] < pages - 1)
-        canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
-        SHOP_STATE["rects"][(key, 0)] = rect
+        widgets.row_card(canvas, ctx, rect, item.get("Name") or item.get("Key") or "",
+                         "%s 金币 · 持有 %s" % (item.get("Price", 0), item.get("Owned", 0)))
+    widgets.pager_bar(canvas, ctx, pager_rect, SHOP_STATE["page"] > 0,
+                      SHOP_STATE["page"] < pages - 1,
+                      "%s/%s" % (SHOP_STATE["page"] + 1, pages), SHOP_STATE["rects"])
     if not items:
-        canvas.centered_text("暂无商品", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2,
-                             fill=canvas.theme.muted)
+        widgets.empty_state(canvas, ctx, "暂无商品")
 
 
 def handle_shop(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    retry = SHOP_STATE["rects"].get(("retry", 0))
-    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+    key = widgets.hit_test(SHOP_STATE["rects"], x, y)
+    if key is None:
+        return
+    if key == ("retry", 0):
         enter_shop(ctx)
         return
-    for key, rect in SHOP_STATE["rects"].items():
-        rx, ry, width, height = rect
-        if not (rx <= x < rx + width and ry <= y < ry + height):
-            continue
-        if key[0] == "item":
-            item = SHOP_STATE["items"][key[1]]
-            ctx.confirm("购买 %s？" % item.get("Name"),
-                        lambda item=item: _buy(ctx, item))
-        elif key[0] == "prev" and SHOP_STATE["page"] > 0:
-            SHOP_STATE["page"] -= 1
+    if key[0] == "item":
+        item = SHOP_STATE["items"][key[1]]
+        ctx.confirm("购买 %s？" % item.get("Name"),
+                    lambda item=item: _buy(ctx, item))
+    elif key[0] == "prev" and SHOP_STATE["page"] > 0:
+        SHOP_STATE["page"] -= 1
+        ctx.show()
+    elif key[0] == "next":
+        _top, _row_height, per_page = _shop_layout(ctx)
+        pages = max(1, (len(SHOP_STATE["items"]) + per_page - 1) // per_page)
+        if SHOP_STATE["page"] < pages - 1:
+            SHOP_STATE["page"] += 1
             ctx.show()
-        elif key[0] == "next":
-            row_height = max(84, int(ctx.height * 0.070))
-            top = max(72, int(ctx.height * 0.085))
-            per_page = max(1, (ctx.height - top - 92) // row_height)
-            pages = max(1, (len(SHOP_STATE["items"]) + per_page - 1) // per_page)
-            if SHOP_STATE["page"] < pages - 1:
-                SHOP_STATE["page"] += 1
-                ctx.show()
-        return
 
 
 def _buy(ctx, item):

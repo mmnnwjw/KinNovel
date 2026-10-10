@@ -197,7 +197,15 @@ class ScreenInput:
                 pass
 
     # 事件循环
-    def listen(self, on_gesture=None, on_down=None, on_idle=None):
+    def listen(self, on_gesture=None, on_down=None, on_idle=None,
+               wake_fd=None, on_wake=None, timeout_fn=None, on_background=None):
+        """阻塞读取触摸事件。
+
+        - ``wake_fd``: 其它线程写入即唤醒 select(UI 回调投递), 读端由 ``on_wake`` 排空;
+        - ``timeout_fn()``: 返回本轮 select 超时秒数, 缺省 50ms 轮询;
+        - ``on_idle``: 每轮都调用(排空 UI 队列/合并重绘);
+        - ``on_background``: 没有待处理触摸时执行一个空闲任务, 返回是否还有剩余。
+        """
         self.parser = MultiTouchParser(
             config=GestureConfig(),
             on_down=on_down,
@@ -207,10 +215,20 @@ class ScreenInput:
         import select
         try:
             assert self.device is not None
-            # 用 50ms 超时轮询，既能及时处理触摸，也能在主线程排空 UI 回调队列
+            sources = [self.device]
+            if wake_fd is not None:
+                sources.append(wake_fd)
             while True:
-                ready, _, _ = select.select([self.device], [], [], 0.05)
-                if ready:
+                timeout = 0.05
+                if timeout_fn is not None:
+                    try:
+                        timeout = max(0.0, float(timeout_fn()))
+                    except Exception:
+                        timeout = 0.05
+                ready, _, _ = select.select(sources, [], [], timeout)
+                if wake_fd is not None and wake_fd in ready and on_wake is not None:
+                    on_wake()
+                if self.device in ready:
                     for ev in self.device.read():
                         try:
                             self.parser.handle_event(ev)
@@ -224,5 +242,18 @@ class ScreenInput:
                     except Exception:
                         import traceback
                         traceback.print_exc()
+                if on_background is not None and not self._touch_active():
+                    # 触摸进行中或事件已到达时让路, 空闲任务只在真正空闲时跑。
+                    pending, _, _ = select.select([self.device], [], [], 0)
+                    if not pending:
+                        try:
+                            on_background()
+                        except Exception:
+                            import traceback
+                            traceback.print_exc()
         except KeyboardInterrupt:
             print("正在退出")
+
+    def _touch_active(self):
+        parser = getattr(self, "parser", None)
+        return bool(parser is not None and parser.primary_slot is not None)

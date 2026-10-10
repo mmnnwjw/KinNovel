@@ -272,3 +272,24 @@ python -m compileall -q bin            -> OK
 python -m unittest discover -s tests  -> Ran 162 tests, OK (skipped=2)
 python -m compileall -q bin            -> OK
 ```
+
+## Sixth review round (2026-10, 刷新管线与功耗)
+
+本轮在 KPW5（MT8110 / 1236x1648 / mtk）实机测量。
+
+| Severity | Finding | Resolution |
+|---|---|---|
+| Perf | 每次界面变化都整页渲染并整屏 GC16 刷新；每分钟时钟也整屏刷新。 | `PageContext.show()` 与上一帧做差分，只提交变化矩形；画面无变化直接跳过；翻页（`kind="turn"`）跳过差分直接整屏。 |
+| Perf | 无残影管理：`page_flash` 只有"每页闪"或"从不闪"。 | 残影预算：局部刷新按面积累计，达到 `full_refresh_every` 屏后下一次大面积刷新闪刷；MTK 翻页用 REAGL 并按 1/4 计入。闪刷优先于原生翻页动画（此前动画会把闪刷降级为局部刷新）。 |
+| Perf | 翻页时现场光栅化正文，设备上约 200ms。 | 空闲任务队列：输入循环无触摸时在 UI 线程预渲染后/前一页；翻页实测 198ms → 41ms。 |
+| Battery | 输入循环 50ms 轮询；图片重试线程 1s 轮询；阅读器休眠守护线程 0.5s 轮询；Hub 保活永久 10s ping；休眠中每 2s fork `lipc-get-prop`。 | 唤醒管道 + 睡到下一分钟的 select 超时；重试线程改为条件变量阻塞；删除冗余休眠守护线程（`_suspend_locked` 已调用 `handle_suspend`）；Hub 空闲 120s 断开、休眠即断开；看门狗 30s 后退到 15s。空闲 CPU 实测 35 → 9 ticks/30s。 |
+| P1 | 控件层可见时滑动翻页触发两次整屏刷新。 | 合并为一次。 |
+| P2 | 顶栏返回箭头朝右。 | 箭尖改到左端。 |
+| P2 | 首页未登录时书架/历史等需登录入口仍显示为可用。 | 统一 `_REQUIRES_LOGIN` 集合。 |
+| P2 | 列表页翻页条中间页码画成按钮却不可点；触控目标 50-64px（约 4-5mm）。 | 新增 `widgets.py`（命中测试、加载状态机、翻页条、空/错态、行卡片），页码改为纯文本，行高 ≥96px、翻页按钮 ≥88px（browse/shelf 暂保留原尺寸）；行内文字垂直居中、长标题可两行。 |
+| P2 | 公告/通知从详情返回时回到第 1 页。 | 返回时保留页码。 |
+| P2 | `get_access_token` 无锁读取 token 与时间戳。 | 与刷新共用锁读取快照。 |
+
+Rejected: `_wrap_line_parts` 向量化改写在 cProfile 下快约 1.5 倍，但设备墙钟时间无变化（分页 450ms 不变），已回退。
+
+Open: 章节首次排版约 1.5s（其中字体加载 ~0.47s、分页 ~0.87s），建议改为渐进分页——先排出目标页附近即显示，其余在空闲任务中继续。

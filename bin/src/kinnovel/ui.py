@@ -13,7 +13,7 @@ import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 
 from .config import CACHE_DIR, Config
 from .reader import _INVISIBLE_RE, split_font_runs, text_width
@@ -256,9 +256,10 @@ class Canvas:
         cx = max(34, header_height // 2)
         cy = header_height // 2
         size = max(14, min(24, header_height // 4))
+        # 箭头朝左: 箭尖在左端
         self.draw.line([cx + size, cy, cx - size, cy], fill=color, width=5)
-        self.draw.line([cx + size, cy, cx, cy - size], fill=color, width=5)
-        self.draw.line([cx + size, cy, cx, cy + size], fill=color, width=5)
+        self.draw.line([cx - size, cy, cx, cy - size], fill=color, width=5)
+        self.draw.line([cx - size, cy, cx, cy + size], fill=color, width=5)
 
     def _draw_home_icon(self, header_height):
         color = self.theme.foreground
@@ -552,7 +553,8 @@ class ImageCache:
         while True:
             with self._retry_cv:
                 while not self._closed and not self._retry_heap:
-                    self._retry_cv.wait(1.0)
+                    # 入堆和 close 都会 notify, 空闲时无需轮询唤醒
+                    self._retry_cv.wait()
                 if self._closed:
                     return
                 due = self._retry_heap[0][0]
@@ -865,6 +867,13 @@ class PageContext:
         self._async_slots = threading.BoundedSemaphore(6)
         self._last_minute = time.strftime("%Y%m%d%H%M")
         self._ui_thread = None
+        # 屏幕上当前帧; 下次刷新只提交与它不同的矩形。None 表示必须整屏。
+        self._last_frame = None
+        # 自上次闪刷以来局部刷新累计的"屏数", 达到阈值后下一次大面积刷新改为闪刷去残影。
+        self._ghost_budget = 0.0
+        # 空闲任务: 输入循环没有触摸/回调时逐个在 UI 线程执行(如预渲染下一页)。
+        self._idle_tasks = OrderedDict()
+        self._wake_pipe = None
         _track_context(self)
 
     @property
@@ -987,8 +996,17 @@ class PageContext:
             )
         return image
 
+    def invalidate_frame(self):
+        """屏幕内容被外部改写(系统锁屏/快照恢复)后, 下次刷新走整屏。"""
+        self._last_frame = None
+
     def show(self, is_flashing=None, force=False, region=None,
-             waveform=None, dither=False):
+             waveform=None, dither=False, kind="ui"):
+        """渲染当前页并提交 EPDC 刷新。
+
+        ``kind="turn"`` 表示阅读翻页: 走 REAGL 类波形, 并计入残影预算。
+        未显式给出 region 时, 只刷新与上一帧不同的矩形; 完全相同则跳过刷新。
+        """
         # 页面自己渲染过一次后，就不再重复消费合并刷新标记
         self._refresh_requested = False
         if not force:
@@ -1007,7 +1025,8 @@ class PageContext:
         if (not force and self._ui_loop_running
                 and ui_thread is not None
                 and current_thread is not ui_thread):
-            self.post(self.show, is_flashing, force, region, waveform, dither)
+            self.post(self.show, is_flashing, force, region, waveform,
+                      dither, kind)
             return
         with self._show_lock:
             try:
@@ -1018,18 +1037,111 @@ class PageContext:
                     import traceback
                     logger(traceback.format_exc())
                 image = self._fallback_image()
-        flashing = bool(self.config.get("page_flash")) if is_flashing is None else bool(is_flashing)
-        extra = {}
-        if region:
-            extra["region"] = region
-        if waveform is not None:
-            extra["waveform_mode"] = waveform
-        if dither:
-            extra["dither"] = True
+            explicit_region = bool(region)
+            plan = self._refresh_plan(image, is_flashing, region, kind)
+            if plan is None:
+                return
+            flashing, region = plan
+            extra = {}
+            if region:
+                extra["region"] = region
+            if waveform is None:
+                waveform = self._waveform_for(kind, flashing)
+            if waveform is not None:
+                extra["waveform_mode"] = waveform
+            if dither:
+                extra["dither"] = True
+            try:
+                self.screen.output.show(image, is_flashing=flashing, **extra)
+            except OSError:
+                self._last_frame = None
+                return
+            # 差分得到的矩形外画面本就相同; 只有调用方指定的矩形需要拼回旧帧。
+            self._last_frame = self._screen_frame(
+                image, region if explicit_region else None)
+
+    def _screen_frame(self, image, region):
+        """返回刷新后屏幕上的真实画面: 指定矩形刷新只改了 region 内的像素。"""
+        previous = self._last_frame
+        if not region or previous is None or previous.size != image.size:
+            return image
+        x, y, w, h = [int(value) for value in region]
+        frame = previous.copy()
+        frame.paste(image.crop((x, y, x + w, y + h)), (x, y))
+        return frame
+
+    # 局部刷新累计达到这么多"整屏面积"后, 下一次大面积刷新改为闪刷清残影。
+    _GHOST_FLASH_SCREENS = 6.0
+    # 变化面积超过整屏这个比例才算"大面积", 只有大面积刷新才会被升级为闪刷。
+    _LARGE_UPDATE_RATIO = 0.5
+    # 局部刷新矩形外扩像素, 防止抗锯齿边缘残留。
+    _REGION_PAD = 4
+
+    def _refresh_plan(self, image, is_flashing, region, kind):
+        """决定本次 (是否闪刷, 刷新矩形); 返回 None 表示画面没变化无需刷新。"""
+        width, height = image.size
+        screen_area = float(max(1, width * height))
+        previous = self._last_frame
+        if is_flashing:
+            self._ghost_budget = 0.0
+            return True, None
+        # 翻页几乎整屏都变, 设备上差分要 ~33ms 却省不下刷新面积, 直接整屏。
+        if (region is None and kind != "turn" and previous is not None
+                and previous.size == image.size):
+            try:
+                bbox = ImageChops.difference(previous, image).getbbox()
+            except Exception:
+                bbox = (0, 0, width, height)
+            if bbox is None:
+                return None
+            pad = self._REGION_PAD
+            left = max(0, bbox[0] - pad)
+            top = max(0, bbox[1] - pad)
+            right = min(width, bbox[2] + pad)
+            bottom = min(height, bbox[3] + pad)
+            region = (left, top, right - left, bottom - top)
+        if region is None and previous is None:
+            # 首帧或屏幕被外部改写过: 整屏刷新, 不改变闪刷策略。
+            changed = 1.0
+        elif region is None:
+            changed = 1.0
+        else:
+            changed = (region[2] * region[3]) / screen_area
+            if changed >= 0.95:
+                region = None
+        large = changed >= self._LARGE_UPDATE_RATIO
+        flash = False
+        if large:
+            if kind == "turn" and self.config.get("page_flash"):
+                flash = True
+            elif self._ghost_budget >= self._flash_threshold():
+                flash = True
+        if flash:
+            self._ghost_budget = 0.0
+            return True, None
+        weight = changed
+        if kind == "turn" and self._waveform_for(kind, False) is not None:
+            # REAGL 翻页自带残影抑制, 按 1/4 计入, 约 24 页才闪刷一次。
+            weight *= 0.25
+        self._ghost_budget += weight
+        return False, region
+
+    def _flash_threshold(self):
         try:
-            self.screen.output.show(image, is_flashing=flashing, **extra)
-        except OSError:
-            pass
+            value = float(self.config.get("full_refresh_every") or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        return value if value > 0 else self._GHOST_FLASH_SCREENS
+
+    def _waveform_for(self, kind, flashing):
+        """阅读翻页在 MTK 上用 REAGL(原生阅读器同款, 残影少且不闪); 其余用默认 GC16。"""
+        output = getattr(self.screen, "output", None)
+        if flashing or kind != "turn":
+            return None
+        if getattr(output, "protocol", None) == "mtk":
+            reagl = getattr(output, "reagl_waveform", None)
+            return reagl
+        return None
 
     def _fallback_image(self):
         """渲染失败时给出可恢复的错误页,而不是让异常冒泡终止应用。"""
@@ -1050,6 +1162,7 @@ class PageContext:
         """Run ``callback`` on the input thread, or inline when no loop runs."""
         if self._ui_loop_running:
             self._ui_queue.put(lambda: callback(*args, **kwargs))
+            self._wake()
         else:
             callback(*args, **kwargs)
 
@@ -1057,8 +1170,73 @@ class PageContext:
         """Coalesce redraw requests so a burst of image arrivals shows once."""
         if self._ui_loop_running:
             self._refresh_requested = True
+            self._wake()
         else:
             self.show()
+
+    # ---- 输入循环唤醒 / 空闲任务 ------------------------------------------
+    def wake_fd(self):
+        """供输入循环 select 的读端; 其它线程 post 时写一个字节唤醒它。"""
+        if self._wake_pipe is None:
+            try:
+                read_fd, write_fd = os.pipe()
+                os.set_blocking(read_fd, False)
+                os.set_blocking(write_fd, False)
+                self._wake_pipe = (read_fd, write_fd)
+            except (OSError, AttributeError):
+                return None
+        return self._wake_pipe[0]
+
+    def _wake(self):
+        pipe = self._wake_pipe
+        if pipe is None:
+            return
+        try:
+            os.write(pipe[1], b"\x00")
+        except (BlockingIOError, OSError):
+            # 管道已满说明唤醒已在途, 丢弃即可。
+            pass
+
+    def consume_wake(self):
+        pipe = self._wake_pipe
+        if pipe is None:
+            return
+        try:
+            while os.read(pipe[0], 512):
+                pass
+        except (BlockingIOError, OSError):
+            pass
+
+    def idle(self, key, callback):
+        """登记一个空闲任务; 同 key 覆盖旧任务。任务在 UI 线程、无输入时执行。"""
+        self._idle_tasks.pop(key, None)
+        self._idle_tasks[key] = callback
+        self._wake()
+
+    def cancel_idle(self, key):
+        self._idle_tasks.pop(key, None)
+
+    def run_idle_task(self):
+        """执行一个空闲任务; 返回是否还有剩余任务。"""
+        if not self._idle_tasks:
+            return False
+        _key, callback = self._idle_tasks.popitem(last=False)
+        try:
+            callback()
+        except Exception:
+            logger = getattr(self.app, "log", None)
+            if callable(logger):
+                import traceback
+                logger(traceback.format_exc())
+        return bool(self._idle_tasks)
+
+    def next_timeout(self):
+        """输入循环 select 的超时: 有待办立即返回, 否则睡到下一分钟时钟刷新。"""
+        if (self._idle_tasks or self._refresh_requested
+                or not self._ui_queue.empty()):
+            return 0.0
+        now = time.time()
+        return max(0.05, 60.0 - (now % 60.0) + 0.05)
 
     def drain_ui_queue(self, limit=64):
         if self._ui_thread is None:

@@ -1,3 +1,4 @@
+from .. import widgets
 from ..api import dict_items
 
 
@@ -144,7 +145,11 @@ def _load(ctx, reset_page=True):
 
 
 def _load_page(ctx):
-    """翻页时只补当前页缺失的书籍元数据, 已缓存的页面直接复用。"""
+    """翻页时只补当前页缺失的书籍元数据, 已缓存的页面直接复用。
+
+    命中缓存时不递增 generation: 否则正在进行的整表 _load 结果会被丢弃,
+    loading 永远停在"同步中…"。
+    """
     _top, _row_height, per_page = _layout(ctx)
     items = STATE.get("visible") or []
     page = max(0, int(STATE.get("page") or 0))
@@ -206,14 +211,8 @@ def render(ctx, canvas):
     _top, row_height, per_page = _layout(ctx)
     STATE["rects"] = {}
     if STATE["error"]:
-        canvas.centered_text("加载失败", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2 - 30)
-        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
-                             canvas.width // 2, canvas.height // 2 + 30,
-                             fill=canvas.theme.muted)
         rect = (margin, canvas.height - 72, canvas.width - 2 * margin, 54)
-        canvas.button(rect, "重试", font=ctx.fonts["small"])
-        STATE["rects"][("retry", 0)] = rect
+        widgets.error_state(canvas, ctx, STATE["error"], STATE["rects"], rect)
         return
     items = STATE.get("visible") or []
     pages = max(1, (len(items) + per_page - 1) // per_page)
@@ -229,8 +228,6 @@ def render(ctx, canvas):
         item = items[index]
         if not isinstance(item, dict):
             continue
-        canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
-                                      radius=8, outline=canvas.theme.mid, width=1)
         if is_folder(item):
             title = "文件夹  " + str(item.get("title") or "未命名")
             subtitle = "长按删除"
@@ -238,12 +235,7 @@ def render(ctx, canvas):
             book = STATE["books"].get(shelf_book_id(item)) or {}
             title = book.get("Title") or ("书籍 #%s" % item.get("id"))
             subtitle = book.get("UserName") or ""
-        canvas.text((rect[0] + 14, y + 8),
-                    canvas.fit_text(title, ctx.fonts["small"], rect[2] - 28),
-                    font=ctx.fonts["small"])
-        canvas.text((rect[0] + 14, y + 40),
-                    canvas.fit_text(subtitle, ctx.fonts["tiny"], rect[2] - 28),
-                    font=ctx.fonts["tiny"], fill=canvas.theme.muted)
+        widgets.row_card(canvas, ctx, rect, title, subtitle)
     bottom_y = canvas.height - 72
     gap = 8
     width = (canvas.width - 2 * margin - gap * 3) // 4
@@ -258,40 +250,33 @@ def render(ctx, canvas):
         canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
         STATE["rects"][(action, 0)] = rect
     if STATE["loading"]:
-        canvas.centered_text("同步中…", ctx.fonts["body"], canvas.width // 2, canvas.height // 2)
+        widgets.loading_state(canvas, ctx, "同步中…")
     elif STATE["loaded"] and not items:
-        canvas.centered_text("书架为空", ctx.fonts["body"], canvas.width // 2,
-                             canvas.height // 2, fill=canvas.theme.muted)
+        widgets.empty_state(canvas, ctx, "书架为空")
 
 
 def handle(data, ctx):
     x = int(data.get("x-pixel") or 0)
     y = int(data.get("y-pixel") or 0)
-    if data.get("gesture") == "tap":
-        retry = STATE["rects"].get(("retry", 0))
-        if retry:
-            rx, ry, width, height = retry
-            if rx <= x < rx + width and ry <= y < ry + height:
-                _load(ctx, reset_page=bool(STATE.get("retry_reset_page")))
-                return
-    if data.get("gesture") == "long":
-        for key, rect in STATE["rects"].items():
-            if key[0] == "item":
-                rx, ry, width, height = rect
-                if rx <= x < rx + width and ry <= y < ry + height:
-                    items = STATE.get("visible") or []
-                    if key[1] < len(items):
-                        _long_press(ctx, items[key[1]])
-                    return
-    if data.get("gesture") != "tap":
+    gesture = data.get("gesture")
+    if gesture == "tap":
+        key = widgets.hit_test(STATE["rects"], x, y)
+        if key == ("retry", 0):
+            _load(ctx, reset_page=bool(STATE.get("retry_reset_page")))
+            return
+    if gesture == "long":
+        key = widgets.hit_test(STATE["rects"], x, y)
+        if key and key[0] == "item":
+            items = STATE.get("visible") or []
+            if key[1] < len(items):
+                _long_press(ctx, items[key[1]])
         return
-    for key in (("up", 0), ("sync", 0), ("prev_folder", 0), ("down", 0)):
-        rect = STATE["rects"].get(key)
-        if not rect:
-            continue
-        rx, ry, width, height = rect
-        if not (rx <= x < rx + width and ry <= y < ry + height):
-            continue
+    if gesture != "tap":
+        return
+    key = widgets.hit_test(STATE["rects"], x, y)
+    if key is None:
+        return
+    if key[0] in ("up", "sync", "prev_folder", "down"):
         if key[0] == "sync":
             _load(ctx)
         elif key[0] == "prev_folder" and STATE["path"]:
@@ -308,21 +293,15 @@ def handle(data, ctx):
                 STATE["page"] += 1
                 _load_page(ctx)
         return
-    for key, rect in STATE["rects"].items():
-        rx, ry, width, height = rect
-        if not (rx <= x < rx + width and ry <= y < ry + height):
-            continue
-        action = key[0]
-        if action == "item":
-            items = STATE.get("visible") or []
-            if key[1] < len(items):
-                item = items[key[1]]
-                if is_folder(item):
-                    STATE["path"].append(item.get("id"))
-                    _load(ctx)
-                else:
-                    ctx.navigate("book", book_id=item.get("id"))
-        return
+    if key[0] == "item":
+        items = STATE.get("visible") or []
+        if key[1] < len(items):
+            item = items[key[1]]
+            if is_folder(item):
+                STATE["path"].append(item.get("id"))
+                _load(ctx)
+            else:
+                ctx.navigate("book", book_id=item.get("id"))
 
 
 def _long_press(ctx, item):

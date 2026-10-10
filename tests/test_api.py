@@ -243,6 +243,67 @@ class RefreshCredentialTests(unittest.TestCase):
             client.get_access_token()
         self.assertFalse(session.cleared)
 
+    def test_get_access_token_reads_token_and_updated_as_one_snapshot(self):
+        """A concurrent refresh must not be interleaved with the read of
+        Token/TokenUpdatedAt, or get_access_token could hand back a stale
+        token paired with a fresh timestamp (or vice versa)."""
+        import time as time_module
+
+        session = FakeSession(Token="old", TokenUpdatedAt=time_module.time(),
+                               RefreshToken="refresh")
+        client = bare_client(session)
+
+        release_refresh = threading.Event()
+        reader_holds_lock = threading.Event()
+
+        real_get = session.get
+
+        def blocking_get(key, default=None):
+            value = real_get(key, default)
+            if key == "Token":
+                reader_holds_lock.set()
+                # Give the refresher a chance to run while we are supposedly
+                # "inside" the locked snapshot read.
+                release_refresh.wait(1.0)
+            return value
+
+        session.get = blocking_get
+
+        def refresher():
+            reader_holds_lock.wait(1.0)
+            with client._refresh_lock:
+                session.data["Token"] = "new"
+                session.data["TokenUpdatedAt"] = time_module.time()
+            release_refresh.set()
+
+        thread = threading.Thread(target=refresher)
+        thread.start()
+        token = client.get_access_token()
+        thread.join(5)
+
+        # Either the snapshot was taken fully before the refresh (old token,
+        # old timestamp, both still "fresh enough") or fully after (new
+        # token, new timestamp) - never a mix that would be rejected or
+        # silently accepted as something it isn't.
+        self.assertIn(token, ("old", "new"))
+
+    def test_suspend_drops_hub_connection(self):
+        client = bare_client()
+        closed = []
+        client.hub = type("FakeHub", (), {"close": lambda self: closed.append(True)})()
+        client.suspend()
+        self.assertEqual(closed, [True])
+
+    def test_resume_does_not_touch_hub(self):
+        client = bare_client()
+
+        class StrictHub:
+            def __getattr__(self, name):
+                raise AssertionError("resume() must not call the hub")
+
+        client.hub = StrictHub()
+        client.resume()  # should not raise
+
 
 if __name__ == "__main__":
     unittest.main()

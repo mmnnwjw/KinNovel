@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageOps
 from .. import progress
 from ..config import CACHE_DIR
 from ..reader import ReaderDocument, ensure_font
-from ..ui import Canvas, height_bucket
+from ..ui import Canvas, Theme, height_bucket
 from ..utils import atomic_write, read_json, stable_cache_name, touch
 
 
@@ -317,12 +317,12 @@ STATE = {
     "layout_generation": 0,
 }
 
-_CONTENT_CACHE_LIMIT = 3
+# 当前页 + 预渲染的前后页 + 一页余量
+_CONTENT_CACHE_LIMIT = 4
 _PROGRESS_SAVE_INTERVAL = 5.0
 _READER_CONTEXT = None
 _READER_ACTIVE = False
 _EXIT_HOOK_INSTALLED = False
-_SUSPEND_WATCHER = None
 
 
 def _remember_context(ctx):
@@ -337,8 +337,12 @@ def _is_current_reader():
 
 
 def ensure_exit_hook():
-    """注册进程退出钩子;重复调用无副作用。"""
-    global _EXIT_HOOK_INSTALLED, _SUSPEND_WATCHER
+    """注册进程退出钩子;重复调用无副作用。
+
+    休眠落盘由 PowerManager._suspend_locked 直接调用 handle_suspend 完成,
+    不再需要 0.5s 轮询的守护线程。
+    """
+    global _EXIT_HOOK_INSTALLED
     if _EXIT_HOOK_INSTALLED:
         return
     _EXIT_HOOK_INSTALLED = True
@@ -347,30 +351,6 @@ def ensure_exit_hook():
         atexit.register(handle_exit)
     except Exception:
         pass
-    # 休眠瞬间可能来不及走 UI tick,用轻量守护线程兜底落盘。
-    import threading
-    _SUSPEND_WATCHER = threading.Thread(
-        target=_suspend_watch_loop, daemon=True,
-        name="kinnovel-reader-suspend",
-    )
-    _SUSPEND_WATCHER.start()
-
-
-def _suspend_watch_loop():
-    was_sleeping = False
-    while True:
-        time.sleep(0.5)
-        ctx = _READER_CONTEXT
-        if ctx is None:
-            continue
-        power = getattr(getattr(ctx, "app", None), "power", None)
-        sleeping = bool(getattr(power, "is_sleeping", False))
-        if sleeping and not was_sleeping and _is_current_reader():
-            try:
-                flush_progress(ctx, upload=True)
-            except Exception:
-                pass
-        was_sleeping = sleeping
 
 
 def _write_progress(ctx, book_id, sort_num, page, path, offset):
@@ -765,7 +745,7 @@ def _turn(ctx, delta, upload=False):
         STATE["last_turn_at"] = time.monotonic()
         _save_progress(ctx)
         _prefetch_images(ctx, doc)
-        ctx.show()
+        ctx.show(kind="turn")
         return
     _change_chapter(ctx, delta, at_last=(delta < 0))
 
@@ -850,6 +830,59 @@ def _page_content_image(ctx, canvas, page, page_index, content_height):
     return image
 
 
+def _schedule_prerender(ctx, page_index):
+    """空闲时预渲染后一页、再前一页的正文位图, 翻页时直接命中缓存。
+
+    设备上光栅化一页中文约 400ms, 放到读者阅读的空闲时间里做;
+    每个空闲任务只画一页, 期间有触摸会先处理触摸。
+    """
+    idle = getattr(ctx, "idle", None)
+    doc = STATE.get("doc")
+    if not callable(idle) or doc is None:
+        return
+    version = STATE.get("document_version")
+
+    def render_one(order):
+        if (getattr(ctx, "page_name", None) != "reader"
+                or STATE.get("doc") is not doc
+                or STATE.get("document_version") != version
+                or STATE.get("fullscreen_image")):
+            return
+        current = max(0, min(int(STATE.get("page") or 0), doc.page_count - 1))
+        if current != page_index:
+            return
+        _, content_height = _layout_metrics(ctx)
+        theme = Theme(ctx.config.get("night_mode"))
+        target = _PrerenderCanvas(int(ctx.width), theme)
+        for index in order:
+            if not 0 <= index < doc.page_count:
+                continue
+            key = _content_cache_key(ctx, index, max(1, int(content_height)))
+            if key in STATE["content_cache"]:
+                continue
+            _page_content_image(ctx, target, doc.pages[index], index,
+                                content_height)
+            # 一次只画一页, 剩下的留给下一个空闲任务
+            idle("reader-prerender", lambda: render_one(order))
+            return
+        # 预渲染不应把当前页挤出缓存
+        cache = STATE["content_cache"]
+        key = _content_cache_key(ctx, current, max(1, int(content_height)))
+        if key in cache:
+            cache.move_to_end(key)
+
+    idle("reader-prerender",
+         lambda: render_one((page_index + 1, page_index - 1)))
+
+
+class _PrerenderCanvas:
+    """_page_content_image 只用到 width/theme。"""
+
+    def __init__(self, width, theme):
+        self.width = width
+        self.theme = theme
+
+
 def render(ctx, canvas):
     if STATE["fullscreen_image"]:
         url = STATE["fullscreen_image"]
@@ -912,6 +945,7 @@ def render(ctx, canvas):
     canvas.image.paste(
         _page_content_image(ctx, canvas, page, page_index, content_height),
         (0, top))
+    _schedule_prerender(ctx, page_index)
     if chrome_visible:
         # 控件层画在正文之上：正文分页几何不随控件显隐变化
         _render_chrome(ctx, canvas, title, doc)
@@ -971,9 +1005,8 @@ def handle(data, ctx):
         ctx.show()
         return
     if gesture in ("left", "right"):
-        # 左右滑动翻页; 控件层可见时顺带收起, 回到正文。
-        if STATE.get("chrome_visible"):
-            _set_chrome_visible(ctx, False)
+        # 左右滑动翻页; 控件层可见时顺带收起, 与翻页合并为一次刷新。
+        STATE["chrome_visible"] = False
         _turn(ctx, 1 if gesture == "left" else -1)
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)

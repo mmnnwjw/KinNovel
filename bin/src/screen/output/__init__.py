@@ -32,6 +32,14 @@ class ScreenOutput:
             and getattr(self.display, "supports_swipe_animation", False)
         )
 
+    @property
+    def protocol(self):
+        return getattr(self.display, "protocol", None)
+
+    @property
+    def reagl_waveform(self):
+        return getattr(self.display, "reagl_waveform", None)
+
     def set_swipe_animations(self, enabled):
         if self.display is not None:
             self.display.set_swipe_animations(enabled)

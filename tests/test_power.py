@@ -83,6 +83,49 @@ class TestPowerManagement(unittest.TestCase):
             mgr.handle_resume()
             app.context.show.assert_not_called()
 
+    def test_suspend_calls_api_suspend_and_resume_calls_api_resume(self):
+        app = MagicMock()
+        app.screen.input.device = MagicMock()
+        app.context = MagicMock()
+
+        mgr = PowerManager(app, pause_file=self.pause_file)
+
+        with patch("os.kill"), patch("time.sleep"):
+            mgr.handle_suspend()
+            app.api.suspend.assert_called_once()
+            app.api.resume.assert_not_called()
+
+            mgr.handle_resume()
+            app.api.resume.assert_called_once()
+
+    def test_suspend_tolerates_app_without_api(self):
+        """Fake apps used elsewhere in tests may not have an `api` attribute;
+        suspend/resume must not raise in that case."""
+        class BareApp:
+            pass
+
+        app = BareApp()
+        app.screen = MagicMock()
+        app.context = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+
+        with patch("os.kill"), patch("time.sleep"):
+            mgr.handle_suspend()  # should not raise
+            mgr.handle_resume()  # should not raise
+
+    def test_suspend_logs_but_does_not_raise_when_api_suspend_fails(self):
+        app = MagicMock()
+        app.screen.input.device = MagicMock()
+        app.context = MagicMock()
+        app.api.suspend.side_effect = RuntimeError("boom")
+        log_messages = []
+        app.log = lambda msg: log_messages.append(msg)
+
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        with patch("os.kill"), patch("time.sleep"):
+            mgr.handle_suspend()  # should not raise
+        self.assertTrue(any("boom" in msg for msg in log_messages))
+
     def test_power_key_press_when_active(self):
         app = MagicMock()
         mgr = PowerManager(app, pause_file=self.pause_file)
@@ -151,6 +194,53 @@ class TestPowerManagement(unittest.TestCase):
         self.assertEqual(streak, 0)
         mock_resume.assert_called_once()
         mock_run.assert_not_called()
+
+    def test_sleep_watchdog_poll_interval_backs_off_after_fast_window(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+
+        self.assertEqual(
+            mgr._sleep_watchdog_poll_interval(0.0), mgr._WATCHDOG_FAST_INTERVAL)
+        self.assertEqual(
+            mgr._sleep_watchdog_poll_interval(mgr._WATCHDOG_FAST_WINDOW - 0.01),
+            mgr._WATCHDOG_FAST_INTERVAL)
+        self.assertEqual(
+            mgr._sleep_watchdog_poll_interval(mgr._WATCHDOG_FAST_WINDOW),
+            mgr._WATCHDOG_SLOW_INTERVAL)
+        self.assertEqual(
+            mgr._sleep_watchdog_poll_interval(mgr._WATCHDOG_FAST_WINDOW + 100),
+            mgr._WATCHDOG_SLOW_INTERVAL)
+
+    def test_sleep_watchdog_loop_uses_backed_off_interval_while_sleeping(self):
+        app = MagicMock()
+        mgr = PowerManager(app, pause_file=self.pause_file)
+        mgr.is_sleeping = True
+
+        sleep_calls = []
+        iterations = {"count": 0}
+
+        def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            iterations["count"] += 1
+            if iterations["count"] >= 3:
+                mgr._stopped = True
+
+        fake_monotonic_values = iter([0.0, 0.0, 40.0, 40.0, 40.0, 40.0])
+
+        def fake_monotonic():
+            return next(fake_monotonic_values, 40.0)
+
+        with patch("time.sleep", side_effect=fake_sleep), \
+             patch("time.monotonic", side_effect=fake_monotonic), \
+             patch.object(mgr, "_read_powerd_state", return_value="screenSaver"):
+            mgr._sleep_watchdog_loop()
+
+        # First poll happens right after sleep starts (fast interval), a
+        # later poll (after the fast window elapses) backs off to the slow
+        # interval - this is what keeps lipc-get-prop from forking every 2s
+        # for as long as the device stays asleep.
+        self.assertIn(mgr._WATCHDOG_FAST_INTERVAL, sleep_calls)
+        self.assertIn(mgr._WATCHDOG_SLOW_INTERVAL, sleep_calls)
 
     def test_stop_cleans_up_if_sleeping(self):
         app = MagicMock()

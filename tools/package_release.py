@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 EXCLUDE_NAMES = {
     ".git",
+    ".claude",
     ".gitignore",
     ".pytest_cache",
     "__pycache__",

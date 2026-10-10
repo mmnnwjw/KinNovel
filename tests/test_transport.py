@@ -244,6 +244,92 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(client._keepalive_ping())
         self.assertTrue(sent and sent[0].startswith('{"type":6}'))
 
+    def test_keepalive_ping_bounds_send_timeout(self):
+        calls = []
+
+        class Socket:
+            @staticmethod
+            def settimeout(seconds):
+                calls.append(seconds)
+
+            @staticmethod
+            def send_text(text):
+                calls.append(text)
+
+        client = SignalRClient("https://example.test")
+        client._socket = Socket()
+        client._last_used = 0.0
+        self.assertTrue(client._keepalive_ping())
+        # settimeout must be called before send_text, with a small bound,
+        # so a stuck send cannot hold self._lock for the whole hub timeout.
+        self.assertEqual(calls[0], 5.0)
+
+    def test_keepalive_ping_closes_after_idle_limit(self):
+        closed = []
+
+        class Socket:
+            @staticmethod
+            def send_text(_text):
+                raise AssertionError("should not ping once idle-closed")
+
+        client = SignalRClient("https://example.test")
+        client._socket = Socket()
+        client.close = lambda: closed.append(True) or SignalRClient.close(client)
+        now = time.monotonic()
+        client._last_real_use = now - client._keepalive_idle_limit - 1.0
+        client._last_used = now - 1.0
+        self.assertFalse(client._keepalive_ping())
+        self.assertIsNone(client._socket)
+
+    def test_keepalive_loop_exits_once_idle_closed(self):
+        client = SignalRClient("https://example.test")
+
+        class Socket:
+            @staticmethod
+            def send_text(_text):
+                return None
+
+        client._socket = Socket()
+        client._keepalive_interval = 0.01
+        client._keepalive_idle_limit = 0.02
+        client._last_real_use = time.monotonic()
+        client._last_used = client._last_real_use
+        client._start_keepalive()
+        thread = client._keepalive_thread
+        self.assertTrue(thread.join(5) is None)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(client._socket)
+
+    def test_connect_resets_last_used_to_avoid_stale_idle_close(self):
+        client = SignalRClient("https://example.test")
+        client._last_used = time.monotonic() - 10_000.0
+        client._last_real_use = client._last_used
+
+        class Socket:
+            def __init__(self):
+                self.sent = []
+
+            def send_text(self, text):
+                self.sent.append(text)
+
+            def settimeout(self, _seconds):
+                return None
+
+            def receive(self):
+                return 1, b"{}\x1e"
+
+            def close(self):
+                return None
+
+        fake_socket = Socket()
+        with mock.patch("kinnovel.transport.WebSocketConnection") as factory:
+            factory.return_value.connect.return_value = fake_socket
+            client._negotiate = lambda token=None, timeout=None: {"connectionToken": "tok"}
+            client._start_keepalive = lambda: None
+            client._connect_locked()
+        self.assertGreater(client._last_used, time.monotonic() - 5.0)
+        self.assertGreater(client._last_real_use, time.monotonic() - 5.0)
+
     def test_shutdown_interrupts_and_disables_reconnect(self):
         class Socket:
             def __init__(self):
@@ -383,6 +469,7 @@ class TransportTests(unittest.TestCase):
 
         client = ApiClient.__new__(ApiClient)
         client.session = Session()
+        client._refresh_lock = threading.Lock()
 
         def invalid():
             raise ApiError("invalid refresh", 404)

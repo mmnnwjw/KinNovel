@@ -196,6 +196,10 @@ class KinNovelApp:
             self.screen.input.listen(
                 on_gesture=on_gesture,
                 on_idle=self.context.drain_ui_queue,
+                wake_fd=self.context.wake_fd(),
+                on_wake=self.context.consume_wake,
+                timeout_fn=self.context.next_timeout,
+                on_background=self.context.run_idle_task,
             )
         except KeyboardInterrupt:
             pass

@@ -21,7 +21,7 @@ Qt 或桌面环境。
 
 当前版本仅支持小说：书架、阅读历史、排行榜与最近/分类都会过滤漫画。
 
-当前版本：[`0.7.10`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.7.10)
+当前版本：[`0.8.0`](https://github.com/mmnnwjw/KinNovel/releases/tag/v0.8.0)
 
 ## 界面预览
 
@@ -98,7 +98,7 @@ Qt 或桌面环境。
 `THIRD-PARTY-NOTICES.md` 和设备端卸载脚本 `uninstall.sh`；不包含测试、
 研究脚本和开发文档。
 
-1. 下载 Release 中的 [`KinNovel-v0.7.10.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.7.10/KinNovel-v0.7.10.zip)。
+1. 下载 Release 中的 [`KinNovel-v0.8.0.zip`](https://github.com/mmnnwjw/KinNovel/releases/download/v0.8.0/KinNovel-v0.8.0.zip)。
 2. 解压得到 `KinNovel` 文件夹。
 3. 复制到 Kindle 的 `extensions` 目录：
 
@@ -175,6 +175,7 @@ Git，也不要分享带有真实凭据的 `config.json`。
   "line_spacing": 1.42,
   "reader_margin": 34,
   "page_flash": false,
+  "full_refresh_every": 6,
   "page_turn_animation": true,
   "reader_guide_dismissed": false,
   "night_mode": false,
@@ -211,7 +212,8 @@ Git，也不要分享带有真实凭据的 `config.json`。
 |---|---|---|
 | `screen_protocol` | EPDC 刷新协议；`auto` 自动探测（按 `mtk`、`rex`、`zelda`、`mxcfb` 顺序）；支持手动指定 | `auto` |
 | `framebuffer` | Kindle framebuffer 路径 | `/dev/fb0` |
-| `page_flash` | 翻页时是否强制全屏刷新 | `false` |
+| `page_flash` | 翻页时是否每页都闪刷(全屏 GC16) | `false` |
+| `full_refresh_every` | 局部刷新累计约多少屏后，下一次大面积刷新改为闪刷以清除残影；MTK 机型的 REAGL 翻页按 1/4 屏计入（约 24 页闪一次） | `6` |
 | `page_turn_animation` | KPW5 及更新 MTK 平台使用原生 EPDC 翻页动画 | `true` |
 | `reader_guide_dismissed` | 是否不再显示阅读页首次操作指引 | `false` |
 | `night_mode` | 是否使用黑白反转的夜间模式 | `false` |

@@ -173,6 +173,14 @@ class ApiClient:
     def shutdown(self):
         self.hub.shutdown()
 
+    def suspend(self):
+        """设备休眠时调用: 断开 Hub 连接并停止保活, 省电。"""
+        self.hub.close()
+
+    def resume(self):
+        """设备唤醒时调用: 不需要立即重连, 下次 invoke 会惰性重连。"""
+        pass
+
     def _http(self, path, payload=None, method="POST", token=None, timeout=30):
         url = path if str(path).startswith("http") else self.server + path
         headers = {
@@ -282,8 +290,11 @@ class ApiClient:
             return token
 
     def get_access_token(self):
-        token = self.session.get("Token")
-        updated = float(self.session.get("TokenUpdatedAt") or 0)
+        # 与 refresh_access_token 共用同一把锁快照读取, 避免并发刷新时
+        # Token 和 TokenUpdatedAt 读到一半被刷新线程改掉, 返回错配的过期 token。
+        with self._refresh_lock:
+            token = self.session.get("Token")
+            updated = float(self.session.get("TokenUpdatedAt") or 0)
         if token and time.time() - updated < 25:
             return token
         if not self.has_refresh_token():

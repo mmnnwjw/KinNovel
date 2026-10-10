@@ -1,5 +1,7 @@
 import re
 
+from .. import widgets
+
 
 STATE = {
     "items": [],
@@ -15,47 +17,36 @@ STATE = {
     "generation": 0,
 }
 
+_loader = widgets.ListLoader(STATE)
+
 
 def enter(ctx):
-    # 每次进入都回到第一页，不保留上次的翻页位置
-    _load(ctx, 1)
+    # 从主页新进入时回到第一页；从公告详情返回时保留页码(与其它列表页一致)。
+    _load(ctx, STATE["page"] if ctx.returning else 1)
 
 
 def _load(ctx, page=1):
-    STATE["generation"] += 1
-    generation = STATE["generation"]
     STATE["page"] = int(page)
-    STATE["loading"] = True
-    STATE["error"] = ""
 
-    def success(result):
-        if generation != STATE["generation"]:
-            return
+    def done(result):
         STATE["items"] = result.get("Data") or []
         STATE["total_pages"] = max(1, int(result.get("TotalPages") or 1))
-        STATE["loading"] = False
-        STATE["loaded"] = True
-        STATE["error"] = ""
 
-    def error(exc):
-        if generation != STATE["generation"]:
-            return
-        STATE["loading"] = False
-        STATE["loaded"] = True
-        STATE["error"] = str(exc)
+    def failed(_exc):
         STATE["items"] = []
         STATE["total_pages"] = 1
 
     _top, _row_height, per_page = _layout(ctx)
-    ctx.run_async("announcements", lambda: ctx.api.get_announcement_list(
-        STATE["page"], per_page), success, error)
+    _loader.start(ctx, "announcements", lambda: ctx.api.get_announcement_list(
+        STATE["page"], per_page), done, failed)
 
 
 def _layout(ctx):
     # 服务器分页大小必须等于实际可渲染行数，否则每页尾部条目永远翻不到
     top = max(72, int(ctx.height * 0.085))
-    row_height = max(74, int(ctx.height * 0.061))
-    per_page = max(1, (ctx.height - top - 150) // row_height)
+    row_height = widgets.list_row_height(ctx)
+    bottom = widgets.pager_height(ctx) + 24
+    per_page = max(1, (ctx.height - top - bottom) // row_height)
     return top, row_height, per_page
 
 
@@ -74,73 +65,43 @@ def render(ctx, canvas):
         item = STATE["items"][index]
         if not isinstance(item, dict):
             continue
-        canvas.draw.rounded_rectangle([rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]],
-                                      radius=8, outline=canvas.theme.mid, width=1)
         created = str(item.get("CreatedAt") or "")[:10]
-        canvas.text((rect[0] + 12, y + 8),
-                    canvas.fit_text("[%s] %s" % (created, item.get("Title") or ""),
-                                    ctx.fonts["small"], rect[2] - 24),
-                    font=ctx.fonts["small"])
-    nav_y = canvas.height - 72
-    width = int(canvas.width * 0.25)
+        widgets.row_card(canvas, ctx, rect,
+                         "[%s] %s" % (created, item.get("Title") or ""),
+                         wrap_title=True)
+    nav_y = canvas.height - widgets.pager_height(ctx) - 16
+    pager_rect = (margin, nav_y, canvas.width - 2 * margin, widgets.pager_height(ctx))
     if STATE["error"]:
-        canvas.centered_text("加载失败", ctx.fonts["body"],
-                             canvas.width // 2, canvas.height // 2 - 30)
-        canvas.centered_text(str(STATE["error"])[:40], ctx.fonts["tiny"],
-                             canvas.width // 2, canvas.height // 2 + 30,
-                             fill=canvas.theme.muted)
-        rect = (margin, nav_y, canvas.width - 2 * margin, 54)
-        canvas.button(rect, "重试", font=ctx.fonts["small"])
-        STATE["rects"][("retry", 0)] = rect
+        widgets.error_state(canvas, ctx, STATE["error"], STATE["rects"], pager_rect)
     else:
-        for key, rect, label in (
-            ("prev", (margin, nav_y, width, 54), "上一页"),
-            ("count", ((canvas.width - width) // 2, nav_y, width, 54),
-             "%s/%s" % (STATE["page"], STATE["total_pages"])),
-            ("next", (canvas.width - margin - width, nav_y, width, 54), "下一页"),
-        ):
-            enabled = key == "count" or (
-                key == "prev" and STATE["page"] > 1) or (
-                key == "next" and STATE["page"] < STATE["total_pages"])
-            canvas.button(rect, label, active=enabled, font=ctx.fonts["tiny"])
-            STATE["rects"][(key, 0)] = rect
+        widgets.pager_bar(canvas, ctx, pager_rect, STATE["page"] > 1,
+                          STATE["page"] < STATE["total_pages"],
+                          "%s/%s" % (STATE["page"], STATE["total_pages"]),
+                          STATE["rects"])
         if STATE["loading"]:
-            canvas.centered_text("加载中…", ctx.fonts["body"],
-                                 canvas.width // 2, canvas.height // 2)
+            widgets.loading_state(canvas, ctx)
         elif STATE["loaded"] and not STATE["items"]:
-            canvas.centered_text("暂无公告", ctx.fonts["body"], canvas.width // 2,
-                                 canvas.height // 2, fill=canvas.theme.muted)
+            widgets.empty_state(canvas, ctx, "暂无公告")
 
 
 def handle(data, ctx):
     if data.get("gesture") != "tap":
         return
     x, y = int(data.get("x-pixel") or 0), int(data.get("y-pixel") or 0)
-    retry = STATE["rects"].get(("retry", 0))
-    if retry and retry[0] <= x < retry[0] + retry[2] and retry[1] <= y < retry[1] + retry[3]:
+    key = widgets.hit_test(STATE["rects"], x, y)
+    if key is None:
+        return
+    if key == ("retry", 0):
         _load(ctx, STATE["page"])
         return
-    for key in (("prev", 0), ("count", 0), ("next", 0)):
-        rect = STATE["rects"].get(key)
-        if not rect:
-            continue
-        rx, ry, width, height = rect
-        if rx <= x < rx + width and ry <= y < ry + height:
-            if key[0] == "prev" and STATE["page"] > 1:
-                _load(ctx, STATE["page"] - 1)
-            elif key[0] == "next" and STATE["page"] < STATE["total_pages"]:
-                _load(ctx, STATE["page"] + 1)
-            else:
-                _load(ctx, STATE["page"])
-            return
-    for key, rect in STATE["rects"].items():
-        if key[0] != "item":
-            continue
-        rx, ry, width, height = rect
-        if rx <= x < rx + width and ry <= y < ry + height:
-            if key[1] < len(STATE["items"]):
-                ctx.navigate("announcement", announcement_id=STATE["items"][key[1]].get("Id"))
-            return
+    if key[0] in ("prev", "next"):
+        if key[0] == "prev" and STATE["page"] > 1:
+            _load(ctx, STATE["page"] - 1)
+        elif key[0] == "next" and STATE["page"] < STATE["total_pages"]:
+            _load(ctx, STATE["page"] + 1)
+        return
+    if key[0] == "item" and key[1] < len(STATE["items"]):
+        ctx.navigate("announcement", announcement_id=STATE["items"][key[1]].get("Id"))
 
 
 def enter_detail(ctx):
