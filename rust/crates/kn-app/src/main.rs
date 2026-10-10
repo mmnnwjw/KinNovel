@@ -256,16 +256,16 @@ fn run_device() {
     let app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.login_in_background();
     let mut input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
-    // KN_TEST_GSENSOR=1: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D 实机测试倒拿)
-    if info.has_gsensor() || std::env::var_os("KN_TEST_GSENSOR").is_some() {
+    // 测试钩子 KN_TEST_GSENSOR: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D)。
+    // 值为 "flip" 时假装框架没转过屏幕, 于是画面软件旋转 180° —— 在 KPW5 上倒着拿就能端到端验证。
+    let test_gsensor = std::env::var("KN_TEST_GSENSOR").ok();
+    if info.has_gsensor() || test_gsensor.is_some() {
         // KOReader (Oasis / Scribe init): 启动时读 `com.lab126.winmgr accelerometer` (U/D/L/R) 定朝向。
-        // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来; 读不到就跟帧缓冲的旋转走。
-        let upside_down = match std::env::var("KN_ORIENTATION").as_deref() {
-            Ok("D") => true,
-            Ok("U") => false,
-            _ => info.fb_rota == 2,
-        };
-        eprintln!("[device] gsensor: upside_down={upside_down} (fb rota {})", info.fb_rota);
+        // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来。横屏 (L/R) 只在系统阅读器里出现, 按正向处理。
+        let upside_down = std::env::var("KN_ORIENTATION").as_deref() == Ok("D");
+        let fb_upside_down = upside_down && test_gsensor.as_deref() != Some("flip");
+        eprintln!("[device] gsensor: upside_down={upside_down} fb_upside_down={fb_upside_down} (fb rota {})", info.fb_rota);
+        display.assume_fb_upside_down(fb_upside_down);
         display.set_upside_down(upside_down);
         input.set_upside_down(upside_down);
     }

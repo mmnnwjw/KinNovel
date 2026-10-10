@@ -61,7 +61,7 @@ pub struct DeviceInfo {
     pub touch_swap_axes: bool,
     pub touch_mirror_x: bool,
     pub touch_mirror_y: bool,
-    /// 帧缓冲当前的硬件旋转 (vInfo.rotate: 0 正, 1 顺时针, 2 倒置, 3 逆时针)
+    /// 帧缓冲当前的硬件旋转 (vInfo.rotate)。只用于日志: 各机型的 "正" 不同 (KPW5 竖屏是 3)
     pub fb_rota: u8,
     /// 机型能力 (KOReader 机型表); 未知机型 None
     pub caps: Option<ModelCaps>,
@@ -184,7 +184,9 @@ pub struct FbinkDisplay {
     fb_size: usize,
     fb_stride: usize,
     next_marker: u32,
-    /// 用户是否倒拿; 与帧缓冲硬件旋转不一致时软件旋转 180°
+    /// 帧缓冲内容此刻是按哪个朝向摆的 (启动时框架已按重力感应转好, 见 `assume_fb_upside_down`)
+    fb_upside_down: bool,
+    /// 用户此刻的朝向; 与 fb_upside_down 不同时软件旋转 180°
     upside_down: bool,
     sw_rotate: bool,
     /// 软件旋转时的行缓冲
@@ -268,8 +270,8 @@ impl FbinkDisplay {
             fb_size,
             fb_stride: state.scanline_stride as usize,
             next_marker: 1,
-            // 默认: 用户的朝向与帧缓冲一致 (框架按重力感应旋转过帧缓冲), 不需要软件旋转
-            upside_down: state.current_rota == 2,
+            fb_upside_down: false,
+            upside_down: false,
             sw_rotate: false,
             row: Vec::new(),
         })
@@ -299,6 +301,17 @@ impl FbinkDisplay {
                 }
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl FbinkDisplay {
+    /// 启动时帧缓冲已经按哪个朝向摆好。KOReader (Oasis / Scribe init) 的做法: 从倒拿状态启动时,
+    /// 框架已把屏幕转成倒置, 直接当作 "本来就是倒置" (native_rotation_mode), 只翻转触摸; 之后转回正向时
+    /// 才需要旋转画面。帧缓冲的 rotate 值不能用来判断 (各机型的 "正" 不同, KPW5 竖屏是 3)。
+    pub fn assume_fb_upside_down(&mut self, upside_down: bool) {
+        self.fb_upside_down = upside_down;
+        self.set_upside_down(self.upside_down);
     }
 }
 
@@ -455,16 +468,13 @@ impl Display for FbinkDisplay {
             self.info.height = state.view_height;
             self.info.stride = state.scanline_stride as usize;
             self.info.fb_rota = state.current_rota;
-            self.set_upside_down(self.upside_down);
         }
         Ok(())
     }
 
     fn set_upside_down(&mut self, upside_down: bool) {
         self.upside_down = upside_down;
-        // 竖屏两种朝向: 帧缓冲倒置 (rota 2) 与用户倒拿不一致时由我们旋转。横屏 rota 不处理
-        // (KOReader: 主页/KUAL 只有竖屏, 横屏只在系统阅读器里出现)。
-        self.sw_rotate = (self.info.fb_rota == 2) != upside_down;
+        self.sw_rotate = self.fb_upside_down != upside_down;
     }
 }
 
