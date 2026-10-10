@@ -39,9 +39,17 @@ pub enum Entry {
     Last,
 }
 
-const MIN_FONT: i64 = 28;
-const MAX_FONT: i64 = 80;
-const FONT_STEP: i64 = 4;
+/// 正文字号 (像素) 的 (最小, 最大, 默认, 步长): 300 ppi 下 28 / 80 / 48 / 4, 其它 ppi 按比例换算。
+/// 已保存的字号原样使用 (只钳到范围内), 与 Python 版配置兼容。
+pub fn font_range(app: &KinNovel) -> (i64, i64, i64, i64) {
+    (app.dpi_px(28.0), app.dpi_px(80.0), app.dpi_px(48.0), app.dpi_px(4.0).max(1))
+}
+
+/// 页边距默认值 (300 ppi 下 34 px)。
+pub fn default_margin(app: &KinNovel) -> i64 {
+    app.dpi_px(34.0)
+}
+
 /// 进度落盘节流 (与 Python 版一致), 离开/休眠时强制落盘。
 const SAVE_INTERVAL_SECS: u64 = 5;
 /// 缓存的正文位图页数 (每页 ~2 MB)。
@@ -175,12 +183,13 @@ impl ReaderPage {
     fn layout_params(cx: &Cx<KinNovel>) -> LayoutParams {
         let (_, content_h) = Self::geometry(cx.width, cx.height);
         let c = &cx.app.config;
+        let (min_font, max_font, default_font, _) = font_range(cx.app);
         LayoutParams {
             width: cx.width as i64,
             height: content_h as i64,
-            font_size: c.int("font_size", 48).clamp(MIN_FONT, MAX_FONT) as u32,
+            font_size: c.int("font_size", default_font).clamp(min_font, max_font) as u32,
             line_spacing: c.float("line_spacing", 1.42),
-            margin: c.int("reader_margin", 34),
+            margin: c.int("reader_margin", default_margin(cx.app)),
             first_line_indent: c.bool("first_line_indent", true),
             // 整页插图 (封面、彩页) 占满一页; 放不下当前页剩余空间时另起一页
             image_max_ratio: 1.0,
@@ -569,9 +578,10 @@ impl ReaderPage {
         Transition::Replace(Box::new(ReaderPage::new(self.book_id, target, entry)))
     }
 
-    fn change_font_size(&mut self, cx: &mut Cx<KinNovel>, delta: i64) {
-        let current = cx.app.config.int("font_size", 48).clamp(MIN_FONT, MAX_FONT);
-        let size = (current + delta).clamp(MIN_FONT, MAX_FONT);
+    fn change_font_size(&mut self, cx: &mut Cx<KinNovel>, steps: i64) {
+        let (min_font, max_font, default_font, step) = font_range(cx.app);
+        let current = cx.app.config.int("font_size", default_font).clamp(min_font, max_font);
+        let size = (current + steps * step).clamp(min_font, max_font);
         if size == current {
             return;
         }
@@ -734,17 +744,18 @@ impl ReaderPage {
         y += btn_h + gap;
 
         // 字号 − 当前 + / 日夜
-        let size = cx.app.config.int("font_size", 48);
+        let (min_font, max_font, default_font, _) = font_range(cx.app);
+        let size = cx.app.config.int("font_size", default_font).clamp(min_font, max_font);
         let cols = 4;
         let col_w = (inner_w - gap * (cols - 1)) / cols;
         let cell = |i: i32| Rect::new(side + i * (col_w + gap), y, col_w as u32, btn_h as u32);
         let down = cell(0);
-        widgets::button(&mut ink, frame, &theme, &m, down, "A－", if size > MIN_FONT { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_FONT_DOWN, down).enabled(size > MIN_FONT);
+        widgets::button(&mut ink, frame, &theme, &m, down, "A－", if size > min_font { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
+        cx.hits.add(HIT_FONT_DOWN, down).enabled(size > min_font);
         ink.text_centered(frame, cell(1), &format!("字号 {size}"), m.small, theme.foreground);
         let up = cell(2);
-        widgets::button(&mut ink, frame, &theme, &m, up, "A＋", if size < MAX_FONT { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_FONT_UP, up).enabled(size < MAX_FONT);
+        widgets::button(&mut ink, frame, &theme, &m, up, "A＋", if size < max_font { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
+        cx.hits.add(HIT_FONT_UP, up).enabled(size < max_font);
         let night = cell(3);
         widgets::button(&mut ink, frame, &theme, &m, night, if theme.night { "日间" } else { "夜间" }, ButtonStyle::Secondary);
         cx.hits.add(HIT_NIGHT, night);
@@ -763,7 +774,10 @@ impl ReaderPage {
     fn set_chrome(&mut self, cx: &mut Cx<KinNovel>, visible: bool) {
         if self.chrome != visible {
             self.chrome = visible;
-            if !visible {
+            if visible {
+                // 系统可能改过亮度 (自动亮度、系统快捷设置), 打开菜单时重读
+                cx.app.light.refresh();
+            } else {
                 self.note.clear();
             }
             cx.request_redraw(RefreshHint::Ui);
@@ -792,11 +806,11 @@ impl ReaderPage {
                 Transition::Push(Box::new(super::settings::SettingsPage::default()))
             }
             HIT_FONT_DOWN => {
-                self.change_font_size(cx, -FONT_STEP);
+                self.change_font_size(cx, -1);
                 Transition::None
             }
             HIT_FONT_UP => {
-                self.change_font_size(cx, FONT_STEP);
+                self.change_font_size(cx, 1);
                 Transition::None
             }
             HIT_NIGHT => {

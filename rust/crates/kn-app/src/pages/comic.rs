@@ -530,7 +530,10 @@ impl ComicReaderPage {
     fn set_chrome(&mut self, cx: &mut Cx<KinNovel>, visible: bool) {
         if self.chrome != visible {
             self.chrome = visible;
-            if !visible {
+            if visible {
+                // 系统可能改过亮度 (自动亮度、系统快捷设置), 打开菜单时重读
+                cx.app.light.refresh();
+            } else {
                 self.note.clear();
             }
             cx.request_redraw(RefreshHint::Ui);

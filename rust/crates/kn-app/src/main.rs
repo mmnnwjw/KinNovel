@@ -48,6 +48,8 @@ pub struct KinNovel {
     pub chapter_font: Option<(PathBuf, FontId)>,
     /// 前光亮度/色温 (阅读菜单的快捷面板)
     pub light: kn_platform::Frontlight,
+    /// 屏幕 ppi; 正文字号、页边距的默认值与范围按 300 ppi 设计, 按它换算 (KOReader 的字号同样按 dpi 换算)
+    pub dpi: u32,
     /// 网络客户端; 离线模式 (主机预览, KN_OFFLINE=1) 下不使用
     net_client: kn_net::Client,
     online: bool,
@@ -64,13 +66,19 @@ impl App for KinNovel {
 }
 
 impl KinNovel {
-    fn new(paths: Paths, config: Config, ui_fonts: Vec<FontId>, width: u32, height: u32, online: bool) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(paths: Paths, config: Config, ui_fonts: Vec<FontId>, width: u32, height: u32, dpi: u32, light: kn_platform::Frontlight, online: bool) -> Self {
         let night = config.bool("night_mode", false);
         let net_client = net::client(&paths, &config);
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
         net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light: kn_platform::Frontlight::detect(), net_client, online }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online }
+    }
+
+    /// 按 300 ppi 设计的像素值换算到本机。
+    pub fn dpi_px(&self, v: f64) -> i64 {
+        (v * self.dpi as f64 / 300.0).round() as i64
     }
 
     /// 在线时返回网络客户端 (廉价克隆, 可带进后台任务)。
@@ -135,7 +143,13 @@ fn preview(args: &[String]) {
     let ui_fonts = load_ui_fonts(&mut fonts, &config);
     // 预览默认离线 (不访问服务器); KN_ONLINE=1 时联网
     let online = std::env::var_os("KN_ONLINE").is_some();
-    let app = KinNovel::new(paths, config, ui_fonts, w, h, online);
+    // 按分辨率对应到 Kindle 的 ppi: 600x800 = 167, 758x1024 = 212, 其余 300
+    let dpi = match w {
+        0..=600 => 167,
+        601..=758 => 212,
+        _ => 300,
+    };
+    let app = KinNovel::new(paths, config, ui_fonts, w, h, dpi, kn_platform::Frontlight::detect(None), online);
     let mut ui = kn_ui::Headless::new(app, fonts, w, h).expect("headless");
     let settle = |ui: &mut kn_ui::Headless<KinNovel>| ui.settle(Duration::from_secs(20));
     settle(&mut ui);
@@ -201,7 +215,7 @@ fn run_device() {
     use kn_platform::{Display, FbinkDisplay, GestureConfig, InputReader, PowerMonitor};
     use kn_ui::{RefreshPolicy, RefreshScheduler};
 
-    let display = FbinkDisplay::open().expect("FBInk 初始化失败");
+    let mut display = FbinkDisplay::open().expect("FBInk 初始化失败");
     let info = display.info().clone();
     eprintln!(
         "[device] {} ({}, id {:#x}) {}x{} {} ppi, {} bpp, stride={} mtk={} reagl={} touch swap={} mirror={}/{}",
@@ -238,9 +252,23 @@ fn run_device() {
             eprintln!("[cache] 清理 {} KB", removed / 1024);
         }
     });
-    let app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, online);
+    let light = kn_platform::Frontlight::detect(info.caps);
+    let app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.login_in_background();
-    let input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
+    let mut input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
+    // KN_TEST_GSENSOR=1: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D 实机测试倒拿)
+    if info.has_gsensor() || std::env::var_os("KN_TEST_GSENSOR").is_some() {
+        // KOReader (Oasis / Scribe init): 启动时读 `com.lab126.winmgr accelerometer` (U/D/L/R) 定朝向。
+        // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来; 读不到就跟帧缓冲的旋转走。
+        let upside_down = match std::env::var("KN_ORIENTATION").as_deref() {
+            Ok("D") => true,
+            Ok("U") => false,
+            _ => info.fb_rota == 2,
+        };
+        eprintln!("[device] gsensor: upside_down={upside_down} (fb rota {})", info.fb_rota);
+        display.set_upside_down(upside_down);
+        input.set_upside_down(upside_down);
+    }
     let power = PowerMonitor::start();
     let scheduler = RefreshScheduler::new(info.width, info.height, policy);
     if let Err(e) = kn_ui::run(app, Box::new(display), fonts, input, power, scheduler) {

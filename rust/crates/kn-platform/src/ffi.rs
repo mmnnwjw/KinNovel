@@ -105,6 +105,7 @@ unsafe extern "C" {
     pub fn shim_wait_for_any_complete(fbfd: c_int) -> c_int;
     pub fn shim_input_scan(
         match_types: u32,
+        exclude_types: u32,
         out: *mut ShimInputDevice,
         max_out: usize,
         scan_only: c_int,
@@ -113,6 +114,8 @@ unsafe extern "C" {
 
 // INPUT_DEVICE_TYPE_E bits we use (fbink.h ~1700-1722).
 pub const INPUT_TOUCHSCREEN: u32 = 1 << 3;
+pub const INPUT_TABLET: u32 = 1 << 5;
+pub const INPUT_ROTATION_EVENT: u32 = 1 << 23;
 pub const INPUT_KEY: u32 = 1 << 6;
 pub const INPUT_POWER_BUTTON: u32 = 1 << 16;
 pub const INPUT_PAGINATION_BUTTONS: u32 = 1 << 18;

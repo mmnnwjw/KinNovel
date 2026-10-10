@@ -167,11 +167,11 @@ typedef struct {
 // but the fd numbers themselves remain valid after that).
 // Returns the number of devices found (may be > max_out; only the first
 // max_out are copied into out).
-size_t shim_input_scan(uint32_t match_types, ShimInputDevice* out, size_t max_out, int scan_only) {
+size_t shim_input_scan(uint32_t match_types, uint32_t exclude_types, ShimInputDevice* out, size_t max_out, int scan_only) {
     size_t dev_count = 0;
-    INPUT_SETTINGS_TYPE_T settings = scan_only ? (INPUT_SETTINGS_TYPE_T) SCAN_ONLY : 0;
+    INPUT_SETTINGS_TYPE_T settings = (INPUT_SETTINGS_TYPE_T) (NO_RECAP | (scan_only ? SCAN_ONLY : 0));
     FBInkInputDevice* devs = fbink_input_scan(
-        (INPUT_DEVICE_TYPE_T) match_types, 0, settings, &dev_count);
+        (INPUT_DEVICE_TYPE_T) match_types, (INPUT_DEVICE_TYPE_T) exclude_types, settings, &dev_count);
     if (!devs) {
         return 0;
     }

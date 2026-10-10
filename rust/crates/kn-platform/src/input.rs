@@ -5,6 +5,9 @@
 //! - 读取: 非阻塞 `read()` 原始 `input_event`; 注意 armv7 上 `timeval` 是两个 32 位 long (16 字节/事件)。
 //! - 坐标: 用 EVIOCGABS 取范围, 映射到屏幕像素后按 DeviceInfo 的 swap/mirror 变换, 再交给 GestureRecognizer。
 //! - 独占: `grab()` / `ungrab()` (EVIOCGRAB), 休眠时释放给系统锁屏。
+//! - 机型差异照搬 KOReader (`frontend/device/kindle/device.lua`, `device/input.lua`):
+//!   翻页键方向 (Oasis 与 Voyage 相反)、倒拿时翻页键互换、Oasis/Scribe 重力感应事件、
+//!   Voyage 压感键旁的触摸冷区、PW6/ColorSoft 的 "敲边框" (KEY_F7 = 下一页)。
 
 // `DeviceInfo`/`GestureConfig` are used by the `open()` signature on every
 // platform, but each cfg'd impl below (linux_impl vs. the non-linux stub)
@@ -29,6 +32,8 @@ pub enum KeyCode {
 pub enum InputEvent {
     Gesture(Gesture),
     Key { code: KeyCode, pressed: bool },
+    /// 重力感应: 设备转到竖屏正向 (false) / 倒置 (true)。横屏事件不上报 (界面只有竖屏)。
+    Rotation { upside_down: bool },
 }
 
 // Standard Linux evdev constants (linux/input-event-codes.h), stable across
@@ -47,8 +52,13 @@ mod evcodes {
 
     pub const BTN_TOUCH: u16 = 0x14a;
 
+    pub const ABS_PRESSURE: u16 = 0x18;
+
     pub const KEY_POWER: u16 = 116;
-    pub const KEY_HOME: u16 = 172;
+    /// Kindle Touch 的 Home 键 (KOReader event_map: 102 = "Home")
+    pub const KEY_HOME: u16 = 102;
+    /// PW6 / ColorSoft "敲两下边框" (KOReader: 65 → "RPgFwd")
+    pub const KEY_FRAME_TAP: u16 = 65;
     // Pagination keys (Voyage/Oasis WhisperTouch), see research-kindle-devices.md.
     pub const KEY_PAGEUP: u16 = 104;
     pub const KEY_PAGEDOWN: u16 = 109;
@@ -61,6 +71,7 @@ fn map_key_code(code: u16, reversed: bool) -> KeyCode {
     match code {
         KEY_POWER => KeyCode::Power,
         KEY_HOME => KeyCode::Home,
+        KEY_FRAME_TAP => KeyCode::PageForward,
         KEY_PAGEUP => {
             if reversed {
                 KeyCode::PageForward
@@ -77,6 +88,24 @@ fn map_key_code(code: u16, reversed: bool) -> KeyCode {
         }
         other => KeyCode::Other(other),
     }
+}
+
+/// Oasis / Scribe 重力感应 (EV_ABS:ABS_PRESSURE 的自定义取值, KOReader `OasisGyroTranslation`):
+/// 竖屏正向 → Some(false), 竖屏倒置 → Some(true), 横屏 / 其它 → None。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn orientation_from_gyro(value: i32) -> Option<bool> {
+    match value {
+        15 | 17 | 19 => Some(false),
+        16 | 18 | 20 => Some(true),
+        _ => None,
+    }
+}
+
+/// Voyage 两侧 PagePress 压感键附近的触摸冷区 (KOReader `KindleVoyage.cold_spots`, 屏幕坐标, 与旋转无关)。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn in_voyage_cold_spot(x: i32, y: i32) -> bool {
+    const SPOTS: [(i32, i32, i32); 4] = [(1080 + 50, 485, 80), (1080 + 70, 910, 120), (-50, 485, 80), (-70, 910, 120)];
+    SPOTS.iter().any(|&(sx, sy, r)| (sx - x) * (sx - x) + (sy - y) * (sy - y) < r * r)
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -119,7 +148,7 @@ fn to_screen(info: &DeviceInfo, raw: (i32, i32), xr: (i32, i32), yr: (i32, i32))
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::evcodes::*;
-    use super::{axis_sample, map_key_code, to_screen, InputEvent};
+    use super::{axis_sample, in_voyage_cold_spot, map_key_code, orientation_from_gyro, to_screen, InputEvent, KeyCode};
     use crate::display::DeviceInfo;
     use crate::ffi;
     use crate::gesture::{GestureConfig, GestureRecognizer, TouchSample};
@@ -208,6 +237,8 @@ mod linux_impl {
             single_axis: bool, // device only reports ABS_X/ABS_Y + BTN_TOUCH (reserved for future per-axis fallback refinement)
         },
         Key,
+        /// 重力感应 (只读 ABS_PRESSURE)
+        Rotation,
     }
 
     struct Device {
@@ -218,8 +249,12 @@ mod linux_impl {
 
     pub struct InputReader {
         devices: Vec<Device>,
+        /// 坐标变换用的设备信息 (倒拿时在 FBInk 的 mirror 上再叠加两轴镜像)
         info: DeviceInfo,
+        base_info: DeviceInfo,
         key_reversed: bool,
+        upside_down: bool,
+        voyage: bool,
     }
 
     impl InputReader {
@@ -234,7 +269,7 @@ mod linux_impl {
 
             let mut raw = [ffi::ShimInputDevice::default(); 32];
             let n =
-                unsafe { ffi::shim_input_scan(match_mask, raw.as_mut_ptr(), raw.len(), 0) };
+                unsafe { ffi::shim_input_scan(match_mask, 0, raw.as_mut_ptr(), raw.len(), 0) };
 
             let mut devices = Vec::new();
             let is_touch_type = ffi::INPUT_TOUCHSCREEN | ffi::INPUT_SCALED_TABLET;
@@ -266,14 +301,44 @@ mod linux_impl {
                 Self::fallback_scan(info, config, &mut devices);
             }
 
+            // 重力感应: 报 ABS_PRESSURE 但不是触摸屏/手写笔的设备 (与 KOReader 相同的扫描条件)
+            if info.has_gsensor() {
+                let mut rot = [ffi::ShimInputDevice::default(); 8];
+                let n = unsafe {
+                    ffi::shim_input_scan(ffi::INPUT_ROTATION_EVENT, ffi::INPUT_TABLET | ffi::INPUT_TOUCHSCREEN, rot.as_mut_ptr(), rot.len(), 0)
+                };
+                for d in rot.iter().take(n.min(rot.len())) {
+                    if d.matched != 0 && d.fd >= 0 {
+                        devices.push(Device { fd: d.fd, kind: Kind::Rotation, grabbed: false });
+                    }
+                }
+            }
+
+            // KOReader: Oasis 系列 104 = 下一页, 109 = 上一页; Voyage 及其它相反
             let key_reversed = info.device_codename.to_lowercase().contains("oasis")
                 || info.device_name.to_lowercase().contains("oasis");
 
             Ok(InputReader {
                 devices,
                 info: info.clone(),
+                base_info: info.clone(),
                 key_reversed,
+                upside_down: false,
+                voyage: info.caps.is_some_and(|c| c.voyage),
             })
+        }
+
+        /// 用户倒拿 (竖屏 180°): 触摸两轴镜像, 翻页键互换 (KOReader `rotation_map` 的 UPSIDE_DOWN)。
+        pub fn set_upside_down(&mut self, upside_down: bool) {
+            self.upside_down = upside_down;
+            self.info = self.base_info.clone();
+            self.info.touch_mirror_x ^= upside_down;
+            self.info.touch_mirror_y ^= upside_down;
+            for dev in self.devices.iter_mut() {
+                if let Kind::Touch { recognizer, .. } = &mut dev.kind {
+                    recognizer.reset();
+                }
+            }
         }
 
         fn build_touch_device(fd: RawFd, info: &DeviceInfo, config: GestureConfig) -> Device {
@@ -432,6 +497,7 @@ mod linux_impl {
         }
 
         pub fn read(&mut self, out: &mut Vec<InputEvent>) -> std::io::Result<()> {
+            let start = out.len();
             for dev in self.devices.iter_mut() {
                 loop {
                     let mut ev = RawInputEvent::default();
@@ -484,13 +550,35 @@ mod linux_impl {
                         }
                         Kind::Key => {
                             if ev.type_ == EV_KEY {
-                                let code = map_key_code(ev.code, self.key_reversed);
+                                let code = match map_key_code(ev.code, self.key_reversed) {
+                                    KeyCode::PageForward if self.upside_down => KeyCode::PageBack,
+                                    KeyCode::PageBack if self.upside_down => KeyCode::PageForward,
+                                    c => c,
+                                };
                                 out.push(InputEvent::Key {
                                     code,
                                     pressed: ev.value != 0,
                                 });
                             }
                         }
+                        Kind::Rotation => {
+                            if ev.type_ == EV_ABS && ev.code == ABS_PRESSURE {
+                                if let Some(upside_down) = orientation_from_gyro(ev.value) {
+                                    out.push(InputEvent::Rotation { upside_down });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if self.voyage {
+                // 起点落在压感键冷区的手势整个丢掉 (KOReader 把它们改写成 "none")
+                let mut i = start;
+                while i < out.len() {
+                    if matches!(&out[i], InputEvent::Gesture(g) if in_voyage_cold_spot(g.start.0, g.start.1)) {
+                        out.remove(i);
+                    } else {
+                        i += 1;
                     }
                 }
             }
@@ -616,6 +704,8 @@ impl InputReader {
         Ok(())
     }
 
+    pub fn set_upside_down(&mut self, _upside_down: bool) {}
+
     pub fn ungrab(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -647,5 +737,14 @@ mod tests {
         assert_eq!(to_screen(&info(true, true, false), (2048, 1024), r, r), (449, 400));
         assert_eq!(to_screen(&info(false, false, true), (0, 4095), r, r), (0, 0));
         assert!(matches!(axis_sample(&info(true, false, false), true, 4095, 0, 4095), TouchSample::Y(799)));
+    }
+
+    #[test]
+    fn gyro_and_voyage_cold_spots() {
+        assert_eq!(orientation_from_gyro(19), Some(false));
+        assert_eq!(orientation_from_gyro(20), Some(true));
+        assert_eq!(orientation_from_gyro(21), None);
+        assert!(in_voyage_cold_spot(1071, 485) && in_voyage_cold_spot(0, 910));
+        assert!(!in_voyage_cold_spot(536, 724) && !in_voyage_cold_spot(1071, 1300));
     }
 }

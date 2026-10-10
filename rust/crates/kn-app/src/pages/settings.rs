@@ -18,6 +18,7 @@ enum Kind {
     Choice(&'static [(&'static str, &'static str)]),
 }
 
+#[derive(Clone, Copy)]
 struct Setting {
     key: &'static str,
     label: &'static str,
@@ -96,10 +97,22 @@ impl SettingsPage {
     }
 }
 
+/// 正文字号与页边距按 300 ppi 设计, 范围/步长/默认值按本机 ppi 换算 (与阅读页一致)。
+fn for_screen(s: &Setting, app: &KinNovel) -> Setting {
+    let (min, max, default, step) = match s.key {
+        "font_size" => super::reader::font_range(app),
+        "reader_margin" => (app.dpi_px(16.0), app.dpi_px(96.0), super::reader::default_margin(app), app.dpi_px(8.0).max(1)),
+        _ => return *s,
+    };
+    let Kind::Step { decimals, .. } = s.kind else { return *s };
+    Setting { kind: Kind::Step { min: min as f64, max: max as f64, step: step as f64, decimals }, default: default as f64, ..*s }
+}
+
 fn number(config: &crate::store::Config, s: &Setting) -> f64 {
     match s.kind {
         Kind::Toggle { default } => config.bool(s.key, default) as u8 as f64,
-        Kind::Step { .. } => config.float(s.key, s.default),
+        // 已保存的值可能超出本机范围 (换机型 / 低 ppi 缩放): 显示与步进都按钳过的值, 与阅读页实际用的一致
+        Kind::Step { min, max, .. } => config.float(s.key, s.default).clamp(min, max),
         Kind::Choice(options) => {
             let v = config.string(s.key, "");
             options.iter().position(|(value, _)| *value == v).unwrap_or(0) as f64
@@ -160,6 +173,7 @@ impl Page<KinNovel> for SettingsPage {
         let row_h = (m.touch as f32 * 1.15) as i32;
         let btn = m.touch as i32;
         for (i, s) in GROUPS[self.group].1.iter().enumerate() {
+            let s = &for_screen(s, cx.app);
             let r = Rect::new(0, y, cx.width, row_h as u32);
             let label_y = r.y + (row_h - (m.body * 1.25) as i32) / 2;
             let label_w = ink.width(s.label, m.body).ceil() as i32;
@@ -224,7 +238,8 @@ impl Page<KinNovel> for SettingsPage {
                 let index = ((id - SET_BASE) / 4) as usize;
                 if let Some(s) = settings.get(index) {
                     let delta = if (id - SET_BASE) % 4 == 0 { -1 } else { 1 };
-                    self.change(cx, s, delta);
+                    let s = for_screen(s, cx.app);
+                    self.change(cx, &s, delta);
                 }
             }
             _ => {}

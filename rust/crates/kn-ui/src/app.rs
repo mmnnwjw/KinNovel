@@ -623,6 +623,8 @@ pub fn run<A: App>(
     // 让 powerd 的流程走完; 若 POWER_KEY_GRACE 内没进入屏保, 再暂停框架并重画。
     let mut power_key_at: Option<std::time::Instant> = None;
     let mut wants_idle = true;
+    // 重力感应上报的最近朝向 (只有 Oasis / Scribe 会有); 变化时整屏翻转重画
+    let mut upside_down: Option<bool> = None;
     // KN_DEBUG=1: 每帧打印渲染/差分/提交耗时 (设备上测翻页延迟)
     let debug = std::env::var_os("KN_DEBUG").is_some();
     let _ = input.grab();
@@ -714,6 +716,26 @@ pub fn run<A: App>(
                         power.release_framework();
                         power_key_at = Some(std::time::Instant::now());
                     }
+                    continue;
+                }
+                if let InputEvent::Rotation { upside_down: ud } = event {
+                    // KOReader 的 rotation_map: 倒拿时画面翻转 180°, 触摸镜像, 翻页键互换
+                    if upside_down != Some(ud) {
+                        upside_down = Some(ud);
+                        display.set_upside_down(ud);
+                        input.set_upside_down(ud);
+                        scheduler.invalidate();
+                        rt.redraw = Some(RefreshHint::Flash);
+                        feedback_shown = false;
+                    }
+                    continue;
+                }
+                if let InputEvent::Key { code: KeyCode::Home, pressed: true } = event {
+                    // Kindle Touch 的实体 Home 键 (KOReader: 回主页)
+                    if !stack.apply(&mut rt, Transition::Home) {
+                        return Ok(());
+                    }
+                    wants_idle = true;
                     continue;
                 }
                 if let InputEvent::Gesture(g) = &event {

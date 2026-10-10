@@ -79,6 +79,9 @@ trap on_exit INT TERM EXIT
 resume_fb_users
 log "starting KinNovel (native)"
 cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; exit 1; }
+# 重力感应机型 (Oasis / Scribe) 的当前朝向 U/D/L/R (同 KOReader); winmgr 属于框架, 必须在暂停前读
+KN_ORIENTATION=$(lipc-get-prop com.lab126.winmgr accelerometer 2>/dev/null)
+export KN_ORIENTATION
 pause_fb_users
 usleep 200000 2>/dev/null || sleep 1
 KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" >> "$LOG_FILE" 2>&1

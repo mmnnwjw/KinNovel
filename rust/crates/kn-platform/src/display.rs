@@ -2,6 +2,8 @@
 
 use kn_render::{Bitmap, Rect};
 
+use crate::model::ModelCaps;
+
 /// 波形。FbinkDisplay 负责映射到 FBInk 的 `WFM_*`; 平台不支持时降级:
 /// Reagl → Gl16 → Gc16, A2 → Du → Gc16 (见 rust/research-kindle-devices.md 波形表)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +61,17 @@ pub struct DeviceInfo {
     pub touch_swap_axes: bool,
     pub touch_mirror_x: bool,
     pub touch_mirror_y: bool,
+    /// 帧缓冲当前的硬件旋转 (vInfo.rotate: 0 正, 1 顺时针, 2 倒置, 3 逆时针)
+    pub fb_rota: u8,
+    /// 机型能力 (KOReader 机型表); 未知机型 None
+    pub caps: Option<ModelCaps>,
+}
+
+impl DeviceInfo {
+    /// 有重力感应 (Oasis / Scribe), 可能倒着拿。
+    pub fn has_gsensor(&self) -> bool {
+        self.caps.is_some_and(|c| c.gsensor)
+    }
 }
 
 pub trait Display {
@@ -75,6 +88,10 @@ pub trait Display {
     fn reinit(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+
+    /// 用户把设备倒过来拿 (Oasis / Scribe 的重力感应, 只区分竖屏的正/倒)。
+    /// 实现保证上层画的帧在用户看来是正的 (必要时软件旋转 180°)。
+    fn set_upside_down(&mut self, _upside_down: bool) {}
 }
 
 /// 主机测试用显示: 内存帧 + 记录所有刷新请求。
@@ -102,6 +119,8 @@ impl MemoryDisplay {
             touch_swap_axes: false,
             touch_mirror_x: false,
             touch_mirror_y: false,
+            fb_rota: 0,
+            caps: None,
         };
         let screen = Bitmap::new(width, height, 0xFF);
         MemoryDisplay {
@@ -165,6 +184,11 @@ pub struct FbinkDisplay {
     fb_size: usize,
     fb_stride: usize,
     next_marker: u32,
+    /// 用户是否倒拿; 与帧缓冲硬件旋转不一致时软件旋转 180°
+    upside_down: bool,
+    sw_rotate: bool,
+    /// 软件旋转时的行缓冲
+    row: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
@@ -213,7 +237,9 @@ impl FbinkDisplay {
         // `!is_kindle_legacy` is the best available proxy for REAGL support
         // from FBInk alone. If FBInk ever exposes a direct REAGL/isREAGL flag,
         // switch to that instead of this proxy.
-        let supports_reagl = state.is_kindle_legacy == 0;
+        // 已知机型直接用 KOReader 的 isREAGL (Touch / PaperWhite 1 没有 REAGL); 未知机型才用上面的推断
+        let caps = ModelCaps::for_kindle(&state.device_name_str());
+        let supports_reagl = caps.map_or(state.is_kindle_legacy == 0, |c| c.reagl);
 
         let info = DeviceInfo {
             width: state.view_width,
@@ -231,6 +257,8 @@ impl FbinkDisplay {
             touch_swap_axes: state.touch_swap_axes != 0,
             touch_mirror_x: state.touch_mirror_x != 0,
             touch_mirror_y: state.touch_mirror_y != 0,
+            fb_rota: state.current_rota,
+            caps,
         };
 
         Ok(FbinkDisplay {
@@ -240,6 +268,10 @@ impl FbinkDisplay {
             fb_size,
             fb_stride: state.scanline_stride as usize,
             next_marker: 1,
+            // 默认: 用户的朝向与帧缓冲一致 (框架按重力感应旋转过帧缓冲), 不需要软件旋转
+            upside_down: state.current_rota == 2,
+            sw_rotate: false,
+            row: Vec::new(),
         })
     }
 
@@ -307,6 +339,10 @@ impl Display for FbinkDisplay {
         if rect.is_empty() {
             return Ok(0);
         }
+        let (sw, sh) = (self.info.width as i32, self.info.height as i32);
+        let rot = self.sw_rotate;
+        // 软件旋转 180°: 帧缓冲里的区域是 rect 的中心对称位置, 每行倒序写入
+        let fb_rect = if rot { Rect::new(sw - rect.right(), sh - rect.bottom(), rect.w, rect.h) } else { rect };
 
         // 只拷贝 rect 内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
         // 8 位直接 memcpy; RGB 帧缓冲 (ColorSoft) 把灰度展开成 R=G=B。
@@ -315,17 +351,23 @@ impl Display for FbinkDisplay {
         let bpp = self.info.bytes_per_pixel;
         let src_stride = frame.stride();
         let src_data = frame.data();
+        let mut row = std::mem::take(&mut self.row);
         for y in rect.y..rect.bottom() {
-            let y = y as usize;
-            let src_off = y * src_stride + x0;
+            let src_off = y as usize * src_stride + x0;
             if src_off + w > src_data.len() {
                 continue;
             }
-            let dst_off = y * self.fb_stride + x0 * bpp;
+            let fy = if rot { (sh - 1 - y) as usize } else { y as usize };
+            let dst_off = fy * self.fb_stride + fb_rect.x as usize * bpp;
             if dst_off + w * bpp > self.fb_size {
                 continue;
             }
-            let src = &src_data[src_off..src_off + w];
+            let mut src = &src_data[src_off..src_off + w];
+            if rot {
+                row.clear();
+                row.extend(src.iter().rev());
+                src = &row;
+            }
             // SAFETY: dst_off + w*bpp <= fb_size (检查见上), fb_ptr 映射在 Drop 前一直有效
             let dst = unsafe { std::slice::from_raw_parts_mut(self.fb_ptr.add(dst_off), w * bpp) };
             match bpp {
@@ -342,11 +384,19 @@ impl Display for FbinkDisplay {
                 }
             }
         }
+        self.row = row;
+        let rect = fb_rect;
 
         // MTK 原生翻页动画, 仅在设备支持且上层要求时启用。
         let mut is_animated = 0;
         if self.info.supports_swipe {
             if let Some(dir) = req.swipe {
+                // 软件旋转时屏幕上的左右与帧缓冲相反
+                let dir = match (rot, dir) {
+                    (true, SwipeDir::Left) => SwipeDir::Right,
+                    (true, SwipeDir::Right) => SwipeDir::Left,
+                    (false, d) => d,
+                };
                 let direction = swipe_direction_code(dir);
                 let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, 12u8) };
                 if rc == 0 {
@@ -404,8 +454,17 @@ impl Display for FbinkDisplay {
             self.info.width = state.view_width;
             self.info.height = state.view_height;
             self.info.stride = state.scanline_stride as usize;
+            self.info.fb_rota = state.current_rota;
+            self.set_upside_down(self.upside_down);
         }
         Ok(())
+    }
+
+    fn set_upside_down(&mut self, upside_down: bool) {
+        self.upside_down = upside_down;
+        // 竖屏两种朝向: 帧缓冲倒置 (rota 2) 与用户倒拿不一致时由我们旋转。横屏 rota 不处理
+        // (KOReader: 主页/KUAL 只有竖屏, 横屏只在系统阅读器里出现)。
+        self.sw_rotate = (self.info.fb_rota == 2) != upside_down;
     }
 }
 
