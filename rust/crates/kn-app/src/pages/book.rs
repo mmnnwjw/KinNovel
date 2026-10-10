@@ -250,13 +250,13 @@ impl Page<KinNovel> for BookDetailPage {
         let read_label = if resume { "继续阅读" } else { "开始阅读" };
         let read_rect = Rect::new(side, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, read_rect, read_label, if has_chapters { ButtonStyle::Primary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_READ, read_rect).enabled(has_chapters);
+        cx.hits.add(HIT_READ, read_rect).rounded(m.radius).enabled(has_chapters);
         let catalog_rect = Rect::new(read_rect.right() + gap, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, catalog_rect, "目录", if has_chapters { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_CATALOG, catalog_rect).enabled(has_chapters);
+        cx.hits.add(HIT_CATALOG, catalog_rect).rounded(m.radius).enabled(has_chapters);
         let comments_rect = Rect::new(catalog_rect.right() + gap, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, comments_rect, "评论", ButtonStyle::Secondary);
-        cx.hits.add(HIT_COMMENTS, comments_rect);
+        cx.hits.add(HIT_COMMENTS, comments_rect).rounded(m.radius);
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {

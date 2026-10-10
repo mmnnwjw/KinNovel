@@ -191,13 +191,13 @@ impl ImagePage {
         };
         let style = |on: bool| if on { ButtonStyle::Secondary } else { ButtonStyle::Disabled };
         widgets::button(&mut ink, frame, &theme, &m, cell(0), "返回", ButtonStyle::Secondary);
-        cx.hits.add(HIT_BACK, cell(0));
+        cx.hits.add(HIT_BACK, cell(0)).rounded(m.radius);
         widgets::button(&mut ink, frame, &theme, &m, cell(1), "缩小", style(can_out));
-        cx.hits.add(HIT_ZOOM_OUT, cell(1)).enabled(can_out);
+        cx.hits.add(HIT_ZOOM_OUT, cell(1)).rounded(m.radius).enabled(can_out);
         widgets::button(&mut ink, frame, &theme, &m, cell(2), "放大", style(can_in));
-        cx.hits.add(HIT_ZOOM_IN, cell(2)).enabled(can_in);
+        cx.hits.add(HIT_ZOOM_IN, cell(2)).rounded(m.radius).enabled(can_in);
         widgets::button(&mut ink, frame, &theme, &m, cell(3), orig_label, style(can_orig));
-        cx.hits.add(HIT_ORIGINAL, cell(3)).enabled(can_orig);
+        cx.hits.add(HIT_ORIGINAL, cell(3)).rounded(m.radius).enabled(can_orig);
     }
 }
 

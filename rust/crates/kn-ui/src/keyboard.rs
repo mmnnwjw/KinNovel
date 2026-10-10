@@ -372,7 +372,7 @@ impl TextEditor {
                 let w = (unit_w * width).round() as i32 - g;
                 let kr = Rect::new(x.round() as i32, y, w.max(1) as u32, kh as u32);
                 self.draw_key(ink, frame, theme, m, kr, *key, enter_label);
-                hits.add(HitId(self.base + r as u32 * 20 + c as u32), kr);
+                hits.add(HitId(self.base + r as u32 * 20 + c as u32), kr).rounded(m.radius);
                 x += unit_w * width;
             }
             y += kh + g;

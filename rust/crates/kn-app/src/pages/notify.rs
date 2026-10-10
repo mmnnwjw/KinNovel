@@ -164,7 +164,7 @@ impl Page<KinNovel> for NotificationsPage {
         let has_unread = self.items.iter().any(|i| !i.is_read);
         let action_rect = Rect::new(cx.width as i32 - side - (m.small * 6.0) as i32, bar.bottom(), (m.small * 6.0) as u32, m.touch);
         widgets::button(&mut ink, frame, &theme, &m, action_rect, if self.marking { "标记中…" } else { "全部已读" }, if has_unread && !self.marking { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_READ_ALL, action_rect).enabled(has_unread && !self.marking);
+        cx.hits.add(HIT_READ_ALL, action_rect).rounded(m.radius).enabled(has_unread && !self.marking);
 
         let list_top = bar.bottom() + m.touch as i32;
         let list_bottom = cx.height as i32 - m.pager_h() as i32;

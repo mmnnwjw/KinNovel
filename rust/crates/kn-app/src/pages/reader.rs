@@ -739,7 +739,7 @@ impl ReaderPage {
         for (i, (id, label)) in row.iter().enumerate() {
             let r = Rect::new(side + i as i32 * (col_w + gap), y, col_w as u32, btn_h as u32);
             widgets::button(&mut ink, frame, &theme, &m, r, label, ButtonStyle::Secondary);
-            cx.hits.add(*id, r);
+            cx.hits.add(*id, r).rounded(m.radius);
         }
         y += btn_h + gap;
 
@@ -751,14 +751,14 @@ impl ReaderPage {
         let cell = |i: i32| Rect::new(side + i * (col_w + gap), y, col_w as u32, btn_h as u32);
         let down = cell(0);
         widgets::button(&mut ink, frame, &theme, &m, down, "A－", if size > min_font { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_FONT_DOWN, down).enabled(size > min_font);
+        cx.hits.add(HIT_FONT_DOWN, down).rounded(m.radius).enabled(size > min_font);
         ink.text_centered(frame, cell(1), &format!("字号 {size}"), m.small, theme.foreground);
         let up = cell(2);
         widgets::button(&mut ink, frame, &theme, &m, up, "A＋", if size < max_font { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
-        cx.hits.add(HIT_FONT_UP, up).enabled(size < max_font);
+        cx.hits.add(HIT_FONT_UP, up).rounded(m.radius).enabled(size < max_font);
         let night = cell(3);
         widgets::button(&mut ink, frame, &theme, &m, night, if theme.night { "日间" } else { "夜间" }, ButtonStyle::Secondary);
-        cx.hits.add(HIT_NIGHT, night);
+        cx.hits.add(HIT_NIGHT, night).rounded(m.radius);
 
         // 提示条: 面板上方居中的反色圆角条
         if !self.note.is_empty() {

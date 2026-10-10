@@ -653,7 +653,7 @@ impl ComicReaderPage {
         for (i, (id, label, on)) in row.iter().enumerate() {
             let r = cell(i as i32, y);
             widgets::button(&mut ink, frame, &theme, &m, r, label, style(*on));
-            cx.hits.add(*id, r).enabled(*on);
+            cx.hits.add(*id, r).rounded(m.radius).enabled(*on);
         }
         y += btn_h + gap;
 
@@ -668,7 +668,7 @@ impl ComicReaderPage {
         ];
         for (i, (id, label)) in row.iter().enumerate() {
             widgets::button(&mut ink, frame, &theme, &m, cell(i as i32), label, ButtonStyle::Secondary);
-            cx.hits.add(*id, cell(i as i32));
+            cx.hits.add(*id, cell(i as i32)).rounded(m.radius);
         }
 
         if !self.note.is_empty() {

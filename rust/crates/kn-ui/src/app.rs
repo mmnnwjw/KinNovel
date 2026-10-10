@@ -742,9 +742,9 @@ pub fn run<A: App>(
                 if let InputEvent::Gesture(g) = &event {
                     if g.kind == GestureKind::Down {
                         let p = Point { x: g.start.0, y: g.start.1 };
-                        if let Some(rect) = rt.hits.feedback_rect(p) {
+                        if let Some((rect, radius)) = rt.hits.feedback_shape_at(p) {
                             let mut pressed = scheduler.screen().clone();
-                            pressed.invert_rect(rect);
+                            pressed.invert_rounded(rect, radius);
                             for req in scheduler.plan(&pressed, RefreshHint::Feedback) {
                                 if display.present(&pressed, &req).is_ok() {
                                     scheduler.commit(&pressed, &req, RefreshHint::Feedback);

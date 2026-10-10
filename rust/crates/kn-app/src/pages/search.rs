@@ -287,7 +287,7 @@ impl Page<KinNovel> for SearchPage {
                     }
                     let r = Rect::new(x, y, w as u32, chip_h as u32);
                     widgets::button(&mut ink, frame, &theme, &m, r, &text, ButtonStyle::Secondary);
-                    cx.hits.add(HitId(HISTORY_BASE + i as u32), r);
+                    cx.hits.add(HitId(HISTORY_BASE + i as u32), r).rounded(m.radius);
                     x += w + gap;
                 }
             }
@@ -301,7 +301,7 @@ impl Page<KinNovel> for SearchPage {
         let label = ink.fit(&text, m.body, (field.w - m.margin) as f32);
         let line_h = (m.body * 1.25) as i32;
         ink.text(frame, field.x + side / 2, field.y + (field.h as i32 - line_h) / 2, &label, m.body, color);
-        cx.hits.add(HIT_FIELD, field);
+        cx.hits.add(HIT_FIELD, field).rounded(m.radius);
         let y = self.draw_options(&mut ink, frame, cx.hits, &theme, &m, cx.width, field.bottom() + gap);
 
         let list_bottom = cx.height as i32 - m.pager_h() as i32;

@@ -457,7 +457,7 @@ impl Page<KinNovel> for DiscoverPage {
             Sub::Category => {
                 if let Some(cat) = self.selected.clone() {
                     widgets::button(&mut ink, frame, &theme, &m, back_rect, &format!("← 分类 · {}", cat.name), kn_ui::widgets::ButtonStyle::Secondary);
-                    cx.hits.add(HIT_BACK_CATEGORY, back_rect);
+                    cx.hits.add(HIT_BACK_CATEGORY, back_rect).rounded(m.radius);
                     match &self.category_list {
                         Fetch::Loading => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, books_area, "加载中…", None),
                         Fetch::Offline => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, books_area, "离线，无法加载", Some(("重试", HIT_RETRY))),

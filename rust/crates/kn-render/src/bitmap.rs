@@ -280,6 +280,42 @@ impl Bitmap {
         }
     }
 
+    /// 圆角矩形范围内反相 (按下反馈)。圆角边缘按像素覆盖率部分反相, 与 `rounded_rect` 的抗锯齿边缘对齐;
+    /// radius 为 0 时等同 `invert_rect`。
+    pub fn invert_rounded(&mut self, r: Rect, radius: u32) {
+        let radius = radius.min(r.w / 2).min(r.h / 2);
+        if radius == 0 {
+            self.invert_rect(r);
+            return;
+        }
+        let Some(clip) = r.intersect(&self.bounds()) else {
+            return;
+        };
+        let rad = radius as f32;
+        let (top_c, bot_c) = (r.y as f32 + rad, r.bottom() as f32 - rad);
+        let (left_c, right_c) = (r.x as f32 + rad, r.right() as f32 - rad);
+        for y in clip.y..clip.bottom() {
+            let fy = y as f32 + 0.5;
+            let dy = if fy < top_c { top_c - fy } else if fy > bot_c { fy - bot_c } else { 0.0 };
+            let row = &mut self.row_mut(y as u32)[clip.x as usize..clip.right() as usize];
+            if dy == 0.0 {
+                for v in row.iter_mut() {
+                    *v = 255 - *v;
+                }
+                continue;
+            }
+            for (i, v) in row.iter_mut().enumerate() {
+                let fx = (clip.x + i as i32) as f32 + 0.5;
+                let dx = if fx < left_c { left_c - fx } else if fx > right_c { fx - right_c } else { 0.0 };
+                let cov = if dx == 0.0 { 1.0 } else { (rad - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0) };
+                if cov > 0.0 {
+                    let x = *v as f32;
+                    *v = (x + cov * (255.0 - 2.0 * x)).round() as u8;
+                }
+            }
+        }
+    }
+
     /// 把 `src` 的 `src_rect` 区域复制到本位图 (dx, dy) 处; 两边都裁剪。按行 `copy_from_slice`。
     pub fn blit(&mut self, src: &Bitmap, src_rect: Rect, dx: i32, dy: i32) {
         let Some(src_clip) = src_rect.intersect(&src.bounds()) else {
@@ -889,6 +925,20 @@ mod tests {
         let a = Bitmap::new(10, 10, 5);
         let b = Bitmap::new(10, 10, 5);
         assert!(a.diff_bbox(&b).is_none());
+    }
+
+    #[test]
+    fn invert_rounded_keeps_corners() {
+        let mut b = Bitmap::new(40, 30, 255);
+        b.invert_rounded(Rect::new(5, 5, 30, 20), 8);
+        assert_eq!(b.get(5, 5), 255, "角外不反相");
+        assert_eq!(b.get(20, 15), 0, "中间反相");
+        assert_eq!(b.get(5, 15), 0, "左边中部反相");
+        assert_eq!(b.get(20, 5), 0, "上边中部反相");
+        assert_eq!(b.get(4, 15), 255, "矩形外不动");
+        let mut c = Bitmap::new(40, 30, 255);
+        c.invert_rounded(Rect::new(5, 5, 30, 20), 0);
+        assert_eq!(c.get(5, 5), 0);
     }
 
     #[test]

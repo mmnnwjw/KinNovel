@@ -15,6 +15,8 @@ struct Hit {
     /// 是否接受长按
     long_press: bool,
     enabled: bool,
+    /// 按下反馈的形状 (矩形, 圆角半径); None = 命中矩形本身、直角
+    shape: Option<(Rect, u32)>,
 }
 
 #[derive(Default)]
@@ -29,7 +31,7 @@ impl Hits {
 
     /// 登记可点区域 (默认: 有按下反馈, 不接受长按, 启用)。后登记的在上层, 查询时优先。
     pub fn add(&mut self, id: HitId, rect: Rect) -> &mut Self {
-        self.items.push(Hit { id, rect, feedback: true, long_press: false, enabled: true });
+        self.items.push(Hit { id, rect, feedback: true, long_press: false, enabled: true, shape: None });
         self
     }
 
@@ -37,6 +39,22 @@ impl Hits {
     pub fn no_feedback(&mut self) -> &mut Self {
         if let Some(h) = self.items.last_mut() {
             h.feedback = false;
+        }
+        self
+    }
+
+    /// 按下反馈按圆角矩形反相 (区域即命中矩形), 与画出来的圆角按钮一致。
+    pub fn rounded(&mut self, radius: u32) -> &mut Self {
+        if let Some(h) = self.items.last_mut() {
+            h.shape = Some((h.rect, radius));
+        }
+        self
+    }
+
+    /// 按下反馈只反相画出来的按钮 (命中区域比按钮大时用, 例如底部标签整格可点、黑色圆角块在中间)。
+    pub fn feedback_shape(&mut self, rect: Rect, radius: u32) -> &mut Self {
+        if let Some(h) = self.items.last_mut() {
+            h.shape = Some((rect, radius));
         }
         self
     }
@@ -60,14 +78,14 @@ impl Hits {
         self.items.iter().rev().find(|h| h.enabled && h.rect.contains(p)).map(|h| h.id)
     }
 
-    /// 需要按下反馈时返回其矩形。
-    pub fn feedback_rect(&self, p: Point) -> Option<Rect> {
+    /// 需要按下反馈时返回反相的形状 (矩形, 圆角半径)。
+    pub fn feedback_shape_at(&self, p: Point) -> Option<(Rect, u32)> {
         self.items
             .iter()
             .rev()
             .find(|h| h.enabled && h.rect.contains(p))
             .filter(|h| h.feedback)
-            .map(|h| h.rect)
+            .map(|h| h.shape.unwrap_or((h.rect, 0)))
     }
 
     pub fn accepts_long(&self, p: Point) -> Option<HitId> {

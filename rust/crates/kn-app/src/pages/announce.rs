@@ -286,7 +286,7 @@ impl Page<KinNovel> for AnnouncementDetailPage {
 
         let comments_rect = Rect::new(cx.width as i32 - side - (m.small * 5.0) as i32, bar.bottom(), (m.small * 5.0) as u32, m.touch);
         widgets::button(&mut ink, frame, &theme, &m, comments_rect, "评论", ButtonStyle::Secondary);
-        cx.hits.add(DET_HIT_COMMENTS, comments_rect);
+        cx.hits.add(DET_HIT_COMMENTS, comments_rect).rounded(m.radius);
 
         if self.lines.is_empty() && !detail.paragraphs.is_empty() {
             let body_w = (cx.width - 2 * m.margin) as f32;

@@ -109,7 +109,7 @@ fn draw_continue(frame: &mut Bitmap, ink: &mut Ink, hits: &mut kn_ui::Hits, them
         let filled = (inner as f32 * (last.page + 1) as f32 / last.pages as f32).max(track_h as f32) as u32;
         frame.rounded_rect(Rect::new(track.x, track.y, filled.min(inner as u32), track_h), track_h / 2, Some(theme.foreground), None, 0);
     }
-    hits.add(HIT_CONTINUE, rect);
+    hits.add(HIT_CONTINUE, rect).rounded(m.radius);
 }
 
 impl Page<KinNovel> for ShelfPage {

@@ -224,14 +224,15 @@ pub fn tab_bar(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme
     let cell_w = bar.w as i32 / n;
     for (i, label) in tabs.iter().enumerate() {
         let cell = Rect::new(i as i32 * cell_w, bar.y + 2, cell_w as u32, h - 2);
+        let pill = Rect::new(cell.x + pad, cell.y + pad, (cell_w - 2 * pad) as u32, h - 2 - 2 * pad as u32);
         if i == active {
-            let pill = Rect::new(cell.x + pad, cell.y + pad, (cell_w - 2 * pad) as u32, h - 2 - 2 * pad as u32);
             frame.rounded_rect(pill, m.radius, Some(theme.foreground), None, 0);
             ink.text_centered(frame, pill, label, m.body, theme.background);
         } else {
             ink.text_centered(frame, cell, label, m.body, theme.foreground);
         }
-        hits.add(HitId(first_id + i as u32), cell);
+        // 整格可点, 按下只反相中间的圆角块 (与选中样式同形)
+        hits.add(HitId(first_id + i as u32), cell).feedback_shape(pill, m.radius);
     }
     bar
 }
@@ -337,7 +338,7 @@ pub fn segmented(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &The
         let r = Rect::new(rect.x + i as i32 * (w as i32 + gap), rect.y, w, rect.h);
         let style = if i == active { ButtonStyle::Primary } else { ButtonStyle::Secondary };
         button(ink, frame, theme, m, r, label, style);
-        hits.add(HitId(first_id + i as u32), r);
+        hits.add(HitId(first_id + i as u32), r).rounded(m.radius);
     }
 }
 
@@ -379,7 +380,7 @@ pub fn dialog(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme,
     for (i, (label, id, style)) in buttons.iter().enumerate() {
         let r = Rect::new(rect.x + pad + i as i32 * (bw as i32 + gap), y, bw, btn_h as u32);
         button(ink, frame, theme, m, r, label, *style);
-        hits.add(*id, r);
+        hits.add(*id, r).rounded(m.radius);
     }
     rect
 }
@@ -413,6 +414,6 @@ pub fn state_message(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: 
         let w = (area.w as f32 * 0.45) as u32;
         let r = Rect::new(area.x + (area.w - w) as i32 / 2, y + m.margin as i32 / 2, w, m.touch);
         button(ink, frame, theme, m, r, label, ButtonStyle::Primary);
-        hits.add(id, r);
+        hits.add(id, r).rounded(m.radius);
     }
 }

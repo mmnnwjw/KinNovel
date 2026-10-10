@@ -198,8 +198,8 @@ impl Page<KinNovel> for SettingsPage {
                     widgets::button(&mut ink, frame, &theme, &m, minus, "－", style(v > min));
                     ink.text_centered(frame, value_r, &format!("{v:.decimals$}"), m.body, theme.foreground);
                     widgets::button(&mut ink, frame, &theme, &m, plus, "＋", style(v < max));
-                    cx.hits.add(id(0), minus).enabled(v > min);
-                    cx.hits.add(id(1), plus).enabled(v < max);
+                    cx.hits.add(id(0), minus).rounded(m.radius).enabled(v > min);
+                    cx.hits.add(id(1), plus).rounded(m.radius).enabled(v < max);
                 }
                 Kind::Toggle { .. } => {
                     let on = v != 0.0;

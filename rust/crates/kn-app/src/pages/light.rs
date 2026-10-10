@@ -54,9 +54,9 @@ pub fn draw(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme, m
         let minus = Rect::new(side + label_w, y, btn as u32, btn as u32);
         let plus = Rect::new(w as i32 - side - btn, y, btn as u32, btn as u32);
         sign_button(frame, &theme, &m, minus, false, level.value > 0);
-        hits.add(down, minus).enabled(level.value > 0);
+        hits.add(down, minus).rounded(m.radius).enabled(level.value > 0);
         sign_button(frame, &theme, &m, plus, true, level.value < level.max);
-        hits.add(up, plus).enabled(level.value < level.max);
+        hits.add(up, plus).rounded(m.radius).enabled(level.value < level.max);
 
         // 滑条: 整行高度都可点; 圆点两侧各留半个圆点, 端点也能点中
         let area = Rect::new(minus.right() + gap, y, (plus.x - gap - minus.right() - gap).max(1) as u32, btn as u32);

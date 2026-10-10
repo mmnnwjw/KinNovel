@@ -128,7 +128,7 @@ impl Page<KinNovel> for MePage {
                     ink.text(frame, side + pad, card.y + (row_h - (m.small * 1.25) as i32) / 2, &text, m.small, theme.muted);
                     let r = Rect::new(card.right() - pad - (m.small * 4.0) as i32, card.y + (row_h - m.touch as i32) / 2, (m.small * 4.0) as u32, m.touch);
                     widgets::button(&mut ink, frame, &theme, &m, r, "重试", ButtonStyle::Secondary);
-                    cx.hits.add(HIT_RETRY, r);
+                    cx.hits.add(HIT_RETRY, r).rounded(m.radius);
                 }
                 Some(Ok(info)) => {
                     let title = format!("{} · Lv.{}", info.user_name, info.level);
@@ -140,7 +140,7 @@ impl Page<KinNovel> for MePage {
                     let signed = info.today_signed || self.signing_in;
                     let label = if info.today_signed { "今日已签到" } else if self.signing_in { "签到中…" } else { "每日签到" };
                     widgets::button(&mut ink, frame, &theme, &m, r, label, if signed { ButtonStyle::Disabled } else { ButtonStyle::Primary });
-                    cx.hits.add(HIT_SIGN_IN, r).enabled(!signed);
+                    cx.hits.add(HIT_SIGN_IN, r).rounded(m.radius).enabled(!signed);
                 }
                 None => {}
             }
