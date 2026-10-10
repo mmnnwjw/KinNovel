@@ -117,8 +117,21 @@ pub fn button(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, rec
     ink.text_centered(frame, rect.inflate(-8), label, m.small, text);
 }
 
+/// 顶栏右端的图标按钮 (命中区域 = 顶栏右端 h×h 的方块, 由调用方登记)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderIcon {
+    Home,
+    Search,
+}
+
 /// 顶栏: 返回箭头 (可选)、标题、右侧状态文字 (时间 · 电量)、主页图标 (可选)。返回顶栏矩形。
 pub fn header(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, title: &str, status: &str, back: bool, home: bool) -> Rect {
+    header_with_icon(ink, frame, theme, m, title, status, back, home.then_some(HeaderIcon::Home))
+}
+
+/// [`header`] 的一般形式: 右端可以是主页或搜索图标。
+#[allow(clippy::too_many_arguments)]
+pub fn header_with_icon(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, title: &str, status: &str, back: bool, icon_kind: Option<HeaderIcon>) -> Rect {
     let h = (m.touch as f32 * 1.1) as u32;
     let bar = Rect::new(0, 0, frame.width(), h);
     frame.fill_rect(bar, theme.light);
@@ -132,7 +145,22 @@ pub fn header(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, tit
         frame.line(cx - icon, cy, cx, cy + icon, line, theme.foreground);
     }
     let mut right = frame.width() as f32;
-    if home {
+    if icon_kind == Some(HeaderIcon::Search) {
+        // 放大镜: 圆 + 右下手柄
+        let cx = frame.width() as f32 - h as f32 / 2.0 - icon * 0.25;
+        let cy = cy - icon * 0.25;
+        let r = icon * 0.72;
+        let steps = 28;
+        for i in 0..steps {
+            let a0 = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / steps as f32 * std::f32::consts::TAU;
+            frame.line(cx + r * a0.cos(), cy + r * a0.sin(), cx + r * a1.cos(), cy + r * a1.sin(), line, theme.foreground);
+        }
+        let d = r * std::f32::consts::FRAC_1_SQRT_2;
+        frame.line(cx + d, cy + d, cx + d + icon * 0.6, cy + d + icon * 0.6, line * 1.4, theme.foreground);
+        right -= h as f32;
+    }
+    if icon_kind == Some(HeaderIcon::Home) {
         let cx = frame.width() as f32 - h as f32 / 2.0;
         let s = icon * 0.9;
         frame.line(cx - s, cy, cx, cy - s, line, theme.foreground);

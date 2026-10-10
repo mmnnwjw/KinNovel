@@ -9,7 +9,7 @@
        KinNovel/bin/kinnovel.sh     launcher (0755)
        KinNovel/bin/config.json     default settings (must not contain an account)
        KinNovel/{config.xml,menu.json,manifest.json,launch.sh,install.sh,uninstall.sh,
-                 LICENSE,README.md,THIRD-PARTY-NOTICES.md}
+                 LICENSE,LICENSE-rime-pinyin-simp,README.md,THIRD-PARTY-NOTICES.md}
 3. Refuses to package anything that looks like a credential.
 """
 
@@ -37,6 +37,8 @@ FILES = [
     ("LICENSE", ROOT / "LICENSE"),
     ("README.md", ROOT / "README.md"),
     ("THIRD-PARTY-NOTICES.md", ROOT / "THIRD-PARTY-NOTICES.md"),
+    # Apache-2.0 requires the license text next to the embedded pinyin dictionary
+    ("LICENSE-rime-pinyin-simp", ROOT / "rust" / "crates" / "kn-ime" / "data" / "LICENSE-rime-pinyin-simp"),
 ]
 EXECUTABLE = {"bin/kinnovel", "bin/kinnovel.sh", "launch.sh", "install.sh", "uninstall.sh"}
 

@@ -1,4 +1,5 @@
 //! 发现: 最新 / 排行 / 分类 (对照 Python `browse.py` / `rank.py`) / 漫画 (对照网页版 `Manga/Discover.vue`)。
+//! 顶栏右端的放大镜进入搜索 (`search.rs`)。
 //!
 //! 四个子页在同一个标签页内切换 (顶部分段控件), 不压栈。排行与漫画各有第二行分段 (榜单 / 排序)。分类分两步: 先列分类, 点一个分类后
 //! 在同一屏显示该分类的书 (有一个"返回分类"按钮清掉选中, 不是真正的页面栈)。
@@ -11,6 +12,7 @@ use kn_ui::widgets::{self, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
 use super::book::BookDetailPage;
+use super::search::SearchPage;
 use super::Tab;
 use crate::api::{self, BookItem, Category, ListPage};
 use crate::covers::CoverCache;
@@ -52,6 +54,7 @@ const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
 const HIT_BACK_CATEGORY: HitId = HitId(5);
+const HIT_SEARCH: HitId = HitId(6);
 const ROW_BASE: u32 = 1000;
 
 struct LatestLoaded(i64, Result<ListPage, String>);
@@ -374,7 +377,8 @@ impl Page<KinNovel> for DiscoverPage {
 
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        widgets::header(&mut ink, frame, &theme, &m, "发现", &super::status_text(), false, false);
+        let bar = widgets::header_with_icon(&mut ink, frame, &theme, &m, "发现", &super::status_text(), false, Some(widgets::HeaderIcon::Search));
+        cx.hits.add(HIT_SEARCH, Rect::new(bar.right() - bar.h as i32, 0, bar.h, bar.h));
         let labels: Vec<&str> = SUB_OPTIONS.iter().map(|(_, l)| *l).collect();
         let active = SUB_OPTIONS.iter().position(|(s, _)| *s == self.sub).unwrap_or(0);
         widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, seg_rect, &labels, active, SEG_SUB_BASE);
@@ -539,6 +543,7 @@ impl Page<KinNovel> for DiscoverPage {
             }
         }
         match hit {
+            HIT_SEARCH => Transition::Push(Box::new(SearchPage::default())),
             HIT_RETRY => {
                 match self.sub {
                     Sub::Latest => self.load_latest(cx, self.latest_page),

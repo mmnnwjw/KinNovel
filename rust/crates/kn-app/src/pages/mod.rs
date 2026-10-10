@@ -14,6 +14,7 @@ pub mod light;
 pub mod me;
 pub mod notify;
 pub mod reader;
+pub mod search;
 pub mod series;
 pub mod settings;
 pub mod shelf;

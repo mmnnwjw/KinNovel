@@ -339,6 +339,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kn-ime"
+version = "1.1.0"
+dependencies = [
+ "brotli-decompressor",
+]
+
+[[package]]
 name = "kn-net"
 version = "1.1.0"
 dependencies = [
@@ -389,6 +396,7 @@ dependencies = [
 name = "kn-ui"
 version = "1.1.0"
 dependencies = [
+ "kn-ime",
  "kn-platform",
  "kn-render",
  "libc",

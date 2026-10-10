@@ -162,6 +162,14 @@ impl Config {
         }
     }
 
+    /// 字符串数组 (非字符串项跳过); 键不存在或不是数组时为空。
+    pub fn strings(&self, key: &str) -> Vec<String> {
+        match self.data.get(key) {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// 设置并立即落盘 (缩进 2 空格、非 ASCII 原样, 与 Python `json.dump(indent=2, ensure_ascii=False)` 一致)。
     pub fn set(&mut self, key: &str, value: Value) {
         if self.data.get(key) == Some(&value) {

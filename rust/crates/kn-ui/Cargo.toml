@@ -8,3 +8,4 @@ license.workspace = true
 kn-render.workspace = true
 kn-platform.workspace = true
 libc.workspace = true
+kn-ime.workspace = true

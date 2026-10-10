@@ -695,6 +695,38 @@ impl Client {
         Ok(helpers::normalize_list(result, "Data"))
     }
 
+    /// Novel search, as the web client's `pages/Search.vue`: `method` is one of
+    /// `GetBookList` (fuzzy; exact = keywords wrapped in quotes), `GetBookListByTitle`,
+    /// `GetBookListByAuthor`, `GetBookListByName` (series) or `GetBookListByTags`
+    /// (comma-separated, AND). No `Order`: the server ranks the matches.
+    pub fn search_books(&self, method: &str, keywords: &str, page: i64, size: i64, ignore_japanese: bool, ignore_ai: bool) -> Result<Value, NetError> {
+        let params = json!({
+            "Page": page,
+            "Size": size,
+            "KeyWords": keywords,
+            "IgnoreJapanese": ignore_japanese,
+            "IgnoreAI": ignore_ai,
+        });
+        let result = self.invoke(method, params, 0, Duration::ZERO)?;
+        Ok(helpers::novel_data(result, "Data"))
+    }
+
+    /// Comic search (`SearchComicSeries`): same `Mode` values as the novel search
+    /// (fuzzy | exact | title | author | name | tags), results aggregated by series
+    /// (`{Data: [ComicListItem]}` like `GetComicList`).
+    pub fn search_comic_series(&self, keywords: &str, mode: &str, page: i64, size: i64, ignore_japanese: bool, ignore_ai: bool) -> Result<Value, NetError> {
+        let params = json!({
+            "KeyWords": keywords,
+            "Mode": mode,
+            "Page": page,
+            "Size": size,
+            "IgnoreJapanese": ignore_japanese,
+            "IgnoreAI": ignore_ai,
+        });
+        let result = self.invoke("SearchComicSeries", params, 0, Duration::ZERO)?;
+        Ok(helpers::normalize_list(result, "Data"))
+    }
+
     /// One batch of page image URLs of a comic chapter:
     /// `{Chapter: {Id, BookId, BookName, Title, SortNum, Total, Skip, Images}, ReadPosition?}`.
     /// The server only returns `ReadPosition` (`Position` = 1-based page) when `skip == 0`.

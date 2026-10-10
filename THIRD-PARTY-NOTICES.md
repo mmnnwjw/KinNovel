@@ -15,6 +15,20 @@ The complete license text is included in `LICENSE`.
 - License: GPL-3.0-or-later. Source: the `rust/third_party/FBInk` submodule of this
   repository, or upstream at the commit above.
 
+## Data
+
+### rime-pinyin-simp (pinyin dictionary)
+
+- URL: https://github.com/rime/rime-pinyin-simp, commit `0c6861e` (2024-12-29); itself
+  derived from the Android Open Source Project's PinyinIME.
+- Used for: the pinyin input of the on-screen keyboard (search). Converted by
+  `tools/gen_pinyin.py` and embedded (Brotli-compressed) in `bin/kinnovel`.
+- License: Apache-2.0. The license text is in `LICENSE-rime-pinyin-simp` (release zip) /
+  `rust/crates/kn-ime/data/LICENSE-rime-pinyin-simp` (source).
+
+The keyboard's layout and input behaviour follow KOReader's `VirtualKeyboard` and pinyin
+keyboard; no KOReader code is included.
+
 ## Rust crates
 
 `bin/kinnovel` is a single static binary built from the crates under `rust/` and the

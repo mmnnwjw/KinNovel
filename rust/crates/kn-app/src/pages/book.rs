@@ -11,8 +11,9 @@ use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 use super::comic::ComicReaderPage;
 use super::comments::CommentsPage;
 use super::reader::{Entry, ReaderPage};
+use super::search::SearchPage;
 use super::series::SeriesPage;
-use crate::api::{self, BookInfo, ChapterRef};
+use crate::api::{self, BookInfo, ChapterRef, SearchMode};
 use crate::covers::CoverCache;
 use crate::store;
 use crate::KinNovel;
@@ -23,6 +24,8 @@ const HIT_CATALOG: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
 const HIT_COMMENTS: HitId = HitId(5);
 const HIT_SERIES: HitId = HitId(6);
+const HIT_AUTHOR: HitId = HitId(7);
+const HIT_TAG_BASE: u32 = 100;
 
 enum Status {
     Loading,
@@ -183,10 +186,15 @@ impl Page<KinNovel> for BookDetailPage {
         let title = ink.fit(&info.book.title, m.title, info_w);
         ink.text(frame, info_x, y, &title, m.title, theme.foreground);
         y += (m.title * 1.3) as i32;
-        let author = if info.book.author.is_empty() { "未知作者".to_string() } else { info.book.author.clone() };
+        let has_author = !info.book.author.is_empty();
+        let author = if has_author { info.book.author.clone() } else { "未知作者".to_string() };
         let author = if info.is_comic { format!("{author} · 漫画 · {} 话", info.chapters.len()) } else { author };
         let author = ink.fit(&author, m.small, info_w);
-        ink.text(frame, info_x, y, &author, m.small, theme.muted);
+        let author_w = ink.text(frame, info_x, y, &author, m.small, if has_author { theme.foreground } else { theme.muted });
+        if has_author {
+            // 点作者 → 按作者搜索 (网页版 BookInfo 的作者链接)
+            cx.hits.add(HIT_AUTHOR, Rect::new(info_x, y, (author_w.ceil() as u32).max(m.touch), (m.small * 1.5) as u32));
+        }
         y += (m.small * 1.5) as i32;
         if !info.series_name.is_empty() {
             let series = ink.fit(&format!("系列: {} >", info.series_name), m.small, info_w);
@@ -202,9 +210,25 @@ impl Page<KinNovel> for BookDetailPage {
             y += (m.small * 1.5) as i32;
         }
         if !info.tags.is_empty() {
-            let tags = ink.fit(&format!("标签: {}", info.tags.join("、")), m.small, info_w);
-            ink.text(frame, info_x, y, &tags, m.small, theme.muted);
-            y += (m.small * 1.5) as i32;
+            // 每个标签单独可点 → 按标签搜索; 放不下的省略
+            let line_h = (m.small * 1.5) as i32;
+            let mut x = info_x as f32 + ink.text(frame, info_x, y, "标签: ", m.small, theme.muted);
+            let right = info_x as f32 + info_w;
+            for (i, tag) in info.tags.iter().enumerate() {
+                let sep = if i > 0 { "、" } else { "" };
+                let w = ink.width(sep, m.small) + ink.width(tag, m.small);
+                let ellipsis = ink.width("…", m.small);
+                let last = i + 1 == info.tags.len();
+                if x + w + if last { 0.0 } else { ellipsis } > right {
+                    ink.text(frame, x as i32, y, "…", m.small, theme.muted);
+                    break;
+                }
+                x += ink.text(frame, x as i32, y, sep, m.small, theme.muted);
+                let tw = ink.text(frame, x as i32, y, tag, m.small, theme.foreground);
+                cx.hits.add(HitId(HIT_TAG_BASE + i as u32), Rect::new(x as i32, y, tw.ceil() as u32, (line_h + m.margin as i32 / 2) as u32));
+                x += tw;
+            }
+            y += line_h;
         }
 
         // 简介 (限几行, 超宽截断, 不做真正的折行以保持简单可靠)
@@ -282,6 +306,17 @@ impl Page<KinNovel> for BookDetailPage {
                     return Transition::Push(Box::new(SeriesPage::with_books(info.series_name.clone(), self.book_id, info.series_books.clone())));
                 }
                 Transition::Push(Box::new(SeriesPage::new(info.series_name.clone(), self.book_id)))
+            }
+            HIT_AUTHOR => {
+                let Status::Ready(info) = &self.status else { return Transition::None };
+                Transition::Push(Box::new(SearchPage::with_query(&info.book.author, SearchMode::Author, info.is_comic)))
+            }
+            HitId(id) if (HIT_TAG_BASE..HIT_TAG_BASE + 100).contains(&id) => {
+                let Status::Ready(info) = &self.status else { return Transition::None };
+                match info.tags.get((id - HIT_TAG_BASE) as usize) {
+                    Some(tag) => Transition::Push(Box::new(SearchPage::with_query(tag, SearchMode::Tags, info.is_comic))),
+                    None => Transition::None,
+                }
             }
             _ => Transition::None,
         }

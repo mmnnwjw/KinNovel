@@ -15,6 +15,7 @@
 
 mod app;
 mod hits;
+pub mod keyboard;
 mod refresh;
 mod tasks;
 mod theme;

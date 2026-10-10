@@ -1,0 +1,20 @@
+{
+  "Page": 1,
+  "TotalPages": 1,
+  "Data": [
+    {
+      "Id": 40001,
+      "Title": "灯塔守望者",
+      "Cover": "fixture:comic/cover1.png",
+      "Count": 3,
+      "LastUpdatedAt": "2026-10-09T20:00:00"
+    },
+    {
+      "Id": 40011,
+      "Title": "雨季的邮差",
+      "Cover": "fixture:comic/cover2.png",
+      "Count": 12,
+      "LastUpdatedAt": "2026-10-07T12:00:00"
+    }
+  ]
+}

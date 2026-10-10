@@ -518,6 +518,89 @@ pub fn load_comic_list(net: Option<&Client>, page: i64, size: i64, order: &str) 
     Ok(parse_list_page_with(&v, page, BookItem::parse_comic))
 }
 
+/// 搜索维度, 对照网页版 `services/book/types.ts` 的 `SearchMode` 与 `components/SearchInput.vue` 的菜单。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMode {
+    /// 标题模糊 (默认, `GetBookList`)
+    Fuzzy,
+    /// 精确 (标题/作者包含, `GetBookList` + 关键词加引号)
+    Exact,
+    /// 按书名 (卷标题)
+    Title,
+    Author,
+    /// 按作品名/系列名
+    Name,
+    /// 按标签 (逗号分隔多个, 同时满足)
+    Tags,
+}
+
+impl SearchMode {
+    pub const ALL: [SearchMode; 6] = [SearchMode::Fuzzy, SearchMode::Exact, SearchMode::Title, SearchMode::Author, SearchMode::Name, SearchMode::Tags];
+
+    /// 网页版 URL / `SearchComicSeries.Mode` 用的值
+    pub fn key(self) -> &'static str {
+        match self {
+            SearchMode::Fuzzy => "fuzzy",
+            SearchMode::Exact => "exact",
+            SearchMode::Title => "title",
+            SearchMode::Author => "author",
+            SearchMode::Name => "name",
+            SearchMode::Tags => "tags",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SearchMode::Fuzzy => "模糊",
+            SearchMode::Exact => "精确",
+            SearchMode::Title => "书名",
+            SearchMode::Author => "作者",
+            SearchMode::Name => "系列",
+            SearchMode::Tags => "标签",
+        }
+    }
+
+    /// 小说搜索的接口名与实际发送的关键词
+    fn book_request(self, keywords: &str) -> (&'static str, String) {
+        match self {
+            SearchMode::Fuzzy => ("GetBookList", keywords.to_string()),
+            SearchMode::Exact => ("GetBookList", format!("\"{keywords}\"")),
+            SearchMode::Title => ("GetBookListByTitle", keywords.to_string()),
+            SearchMode::Author => ("GetBookListByAuthor", keywords.to_string()),
+            SearchMode::Name => ("GetBookListByName", keywords.to_string()),
+            SearchMode::Tags => ("GetBookListByTags", keywords.to_string()),
+        }
+    }
+}
+
+/// fixture 模式: 先找 `<name>_<mode>_p<page>`, 没有就用 `<name>_p<page>` (关键词不参与)。
+fn load_fake_search(name: &str, mode: SearchMode, page: i64) -> Result<Value, String> {
+    load_fake(&format!("{name}_{}_p{page}", mode.key())).or_else(|_| load_fake(&format!("{name}_p{page}")))
+}
+
+/// 搜索小说 (网页版 `pages/Search.vue` 的 Book 标签)。
+pub fn search_books(net: Option<&Client>, keywords: &str, mode: SearchMode, page: i64, size: i64, filters: Filters) -> Result<ListPage, String> {
+    let v = if fake_mode() {
+        load_fake_search("search", mode, page)?
+    } else {
+        let net = net.ok_or("离线，无法加载")?;
+        let (method, keywords) = mode.book_request(keywords);
+        net.search_books(method, &keywords, page, size, filters.ignore_japanese, filters.ignore_ai).map_err(|e| e.to_string())?
+    };
+    Ok(parse_list_page(&v, page))
+}
+
+/// 搜索漫画 (`SearchComicSeries`, 按系列聚合, 条目与漫画列表相同)。
+pub fn search_comics(net: Option<&Client>, keywords: &str, mode: SearchMode, page: i64, size: i64, filters: Filters) -> Result<ListPage, String> {
+    let v = if fake_mode() {
+        load_fake_search("search_comic", mode, page)?
+    } else {
+        let net = net.ok_or("离线，无法加载")?;
+        net.search_comic_series(keywords, mode.key(), page, size, filters.ignore_japanese, filters.ignore_ai).map_err(|e| e.to_string())?
+    };
+    Ok(parse_list_page_with(&v, page, BookItem::parse_comic))
+}
+
 /// `GetComicContent` 的一批 (网页版每批 6 页)。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ComicBatch {
@@ -930,6 +1013,14 @@ pub fn load_books_by_series(net: Option<&Client>, series_name: &str, page: i64, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn search_modes_follow_web_client() {
+        assert_eq!(SearchMode::Exact.book_request("魔法"), ("GetBookList", "\"魔法\"".to_string()));
+        assert_eq!(SearchMode::Fuzzy.book_request("魔法").0, "GetBookList");
+        assert_eq!(SearchMode::Tags.book_request("百合,校园"), ("GetBookListByTags", "百合,校园".to_string()));
+        assert_eq!(SearchMode::ALL.map(SearchMode::key), ["fuzzy", "exact", "title", "author", "name", "tags"]);
+    }
 
     #[test]
     fn book_item_defaults_title_from_id() {

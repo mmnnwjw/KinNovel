@@ -1,0 +1,9 @@
+[package]
+name = "kn-ime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# 词库是 Brotli 压缩的 (woff2 已经依赖它, 不增加新代码)
+brotli-decompressor = "4"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kn-render", "crates/kn-platform", "crates/kn-ui", "crates/kn-app", "crates/kn-text", "crates/kn-net"]
+members = ["crates/kn-render", "crates/kn-platform", "crates/kn-ui", "crates/kn-app", "crates/kn-text", "crates/kn-net", "crates/kn-ime"]
 exclude = ["spike-hello", "spike-fbink", "spike-font", "spike-net"]
 
 [workspace.package]
@@ -14,6 +14,7 @@ kn-render = { path = "crates/kn-render" }
 kn-platform = { path = "crates/kn-platform" }
 kn-ui = { path = "crates/kn-ui" }
 kn-text = { path = "crates/kn-text" }
+kn-ime = { path = "crates/kn-ime" }
 libc = "0.2"
 log = "0.4"
 skrifa = "0.31"
