@@ -115,6 +115,7 @@ impl BookItem {
     pub fn parse(v: &Value) -> BookItem {
         let id = i64_of(v, "Id");
         let title = str_of(v, "Title");
+        crate::sleep::note_cover(id, &str_of(v, "Cover"));
         BookItem {
             id,
             title: if title.is_empty() { format!("书籍 #{id}") } else { title },
@@ -230,6 +231,7 @@ impl BookInfo {
         let book_v = obj_of(v, "Book");
         let id = i64_of(book_v, "Id");
         let title = str_of(book_v, "Title");
+        crate::sleep::note_cover(id, &str_of(book_v, "Cover"));
         let classification = obj_of(obj_of(book_v, "Extra"), "classification");
         let author = {
             let a = str_of(book_v, "Author");

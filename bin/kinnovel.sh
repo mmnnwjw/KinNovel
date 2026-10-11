@@ -66,8 +66,11 @@ pause_fb_users() {
   done
 }
 
+SLEEP_COVER=0
+
 on_exit() {
   resume_fb_users
+  [ "$SLEEP_COVER" = 1 ] && lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
   # 让系统主页重新绘制屏幕
   lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >/dev/null 2>&1 || true
   rm -f "$BIN_RUN"
@@ -77,6 +80,17 @@ trap on_exit INT TERM EXIT
 
 # 上次异常退出可能留下被暂停的进程
 resume_fb_users
+# 休眠显示封面 (设置 sleep_cover, 同 KOReader): 暂停框架前卸载系统屏保模块, 退出时加载回来。
+# blanket 也会被暂停, 所以必须在 pause_fb_users 之前 / resume_fb_users 之后调用。有广告的机型 (ad_screensaver) 不动。
+CONFIG_FILE="$SCRIPT_DIR/config.json"
+[ -n "$KN_APP_DIR" ] && CONFIG_FILE="$KN_APP_DIR/bin/config.json"
+if grep -q '"sleep_cover": *true' "$CONFIG_FILE" 2>/dev/null; then
+  case "$(lipc-get-prop com.lab126.blanket load 2>/dev/null)" in
+    *ad_screensaver*) log "special offers device, keeping the system screensaver" ;;
+    *screensaver*) lipc-set-prop com.lab126.blanket unload screensaver 2>/dev/null && SLEEP_COVER=1 ;;
+  esac
+fi
+export KN_SLEEP_COVER=$SLEEP_COVER
 log "starting KinNovel (native)"
 cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; exit 1; }
 # 重力感应机型 (Oasis / Scribe) 的当前朝向 U/D/L/R (同 KOReader); winmgr 属于框架, 必须在暂停前读

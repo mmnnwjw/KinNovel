@@ -53,6 +53,12 @@ pub trait App: Sized + 'static {
     /// 休眠前 (落盘阅读进度等)。
     fn on_suspend(&mut self) {}
     fn on_resume(&mut self) {}
+    /// 自己画的屏保 (例如当前书的封面)。返回 Some 时运行时在进入屏保时把它渲染出来、整屏闪刷,
+    /// 再交还框架; 前提是系统屏保已被卸载 (启动脚本 `lipc-set-prop com.lab126.blanket unload screensaver`),
+    /// 否则会被系统锁屏盖掉。
+    fn sleep_screen(&mut self) -> Option<Box<dyn Page<Self>>> {
+        None
+    }
 }
 
 /// 后台结果的投递目标。
@@ -668,6 +674,19 @@ pub fn run<A: App>(
                     rt.app.on_suspend();
                     input.reset();
                     let _ = input.ungrab();
+                    if let Some(mut page) = rt.app.sleep_screen() {
+                        // 框架还暂停着, 先画好屏保再交还 (唤醒后整屏重画)
+                        let started = std::time::Instant::now();
+                        frame.fill_rect(frame.bounds(), rt.app.theme().background);
+                        rt.hits.clear();
+                        page.render(&mut rt.cx(0), &mut frame);
+                        scheduler.invalidate();
+                        for req in scheduler.plan(&frame, RefreshHint::Flash) {
+                            let _ = display.present(&frame, &req);
+                        }
+                        scheduler.invalidate();
+                        eprintln!("[sleep] 屏保 {} ms", started.elapsed().as_millis());
+                    }
                     power.release_framework();
                 }
                 PowerEvent::OutOfScreenSaver if sleeping => {

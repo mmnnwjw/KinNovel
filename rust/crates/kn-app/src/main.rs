@@ -10,6 +10,7 @@ mod crash;
 mod covers;
 mod net;
 mod pages;
+mod sleep;
 mod stats;
 mod store;
 mod tz;
@@ -70,6 +71,10 @@ impl App for KinNovel {
 
     fn theme(&self) -> Theme {
         Theme::new(self.night)
+    }
+
+    fn sleep_screen(&mut self) -> Option<Box<dyn Page<Self>>> {
+        sleep::enabled().then(|| Box::new(sleep::SleepPage) as Box<dyn Page<Self>>)
     }
 }
 
@@ -178,6 +183,11 @@ fn preview(args: &[String]) {
                 let chapter: i64 = args[i + 2].parse().expect("chapter id");
                 ui.push(Box::new(pages::comic::ComicReaderPage::new(book, chapter, pages::reader::Entry::Resume)));
                 i += 3;
+            }
+            // 屏保页 (封面屏保的样子)
+            "--sleep" => {
+                ui.push(Box::new(sleep::SleepPage));
+                i += 1;
             }
             "--tap" => {
                 let (x, y) = args[i + 1].split_once(',').expect("x,y");

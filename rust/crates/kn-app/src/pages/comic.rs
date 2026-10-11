@@ -342,6 +342,7 @@ impl ComicReaderPage {
         self.focus.store(self.page as i64, Ordering::Relaxed);
         self.request_page(cx, self.page, 0);
         self.save_progress(cx, true);
+        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.height);
         // 预取交来的第一页已经解码好: 直接显示
         if matches!(self.slots.get(&self.page), Some(Slot::Ready(_))) {
             let delta = self.pending_present.take().unwrap_or(0);

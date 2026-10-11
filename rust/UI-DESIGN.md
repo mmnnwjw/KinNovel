@@ -56,6 +56,12 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   chapter's obfuscation font, which is remembered per bookmark), relative time; long press → delete dialog.
   Picking a chapter or bookmark returns to the same reader instance, which reloads/jumps in place (`ReaderJump`), so the stack does not grow.
   Bookmarks live in `data/bookmarks/{book}.json` (not under `cache/`, so cache clearing keeps them).
+- 我的 entries: 消息通知 / 积分商城 (logged in) / 公告 / 阅读统计 / 设置 / 存储空间 / 关于 / 退出 (rows `touch × 1.12` so 8 fit).
+  阅读统计 = three cards (今天 / 近 7 天 / 累计: time + pages), streak line, 14-day bar chart (today black), top 5 books.
+  存储空间 = total + per-kind rows (章节 / 章节字体 / 插图与封面 / 漫画) with 清理, 全部清理; confirm dialog each time.
+  关于 shows 有新版本 x.y.z when the daily GitHub check found one; the dialog has 检查更新.
+- Sleep screen (设置 → 显示 → 休眠显示封面, restart needed): cover of the last-read book fitted above an info band
+  (book title, chapter, "KinNovel · 休眠中"); without a cached cover a bordered title card. Full GC16 flash.
 - Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:
   one page fitted to the whole screen, no bars. Tap left/right 30 % = previous/next (mirrored when 翻页方向 = 从右往左),
   middle = overlay menu (话名 · 页码, progress bar filling from the reading side, 上一话 / 目录 / 放大 / 下一话,

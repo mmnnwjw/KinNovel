@@ -411,6 +411,7 @@ impl ReaderPage {
         self.save_progress(cx, true);
         self.prefetch_neighbors(cx);
         self.tracker.start();
+        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.height);
         // 进入阅读器/换章: 正文第一屏闪刷, 清掉上一页面与 "正在打开章节" 的残影
         cx.request_redraw(RefreshHint::Flash);
     }

@@ -60,6 +60,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
             toggle("page_turn_animation", "翻页动画", "PW5 及更新机型", true),
             toggle("page_flash", "翻页全屏刷新", "重启后生效", false),
             step("full_refresh_every", "残影清理间隔 (屏)", "重启后生效", 2.0, 12.0, 1.0, 0, 6.0),
+            toggle("sleep_cover", "休眠显示封面", "重启后生效", false),
         ],
     ),
     (
