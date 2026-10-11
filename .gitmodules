@@ -1,3 +1,6 @@
 [submodule "rust/third_party/FBInk"]
 	path = rust/third_party/FBInk
 	url = https://github.com/NiLuJe/FBInk
+[submodule "rust/third_party/libwebp"]
+	path = rust/third_party/libwebp
+	url = https://github.com/webmproject/libwebp

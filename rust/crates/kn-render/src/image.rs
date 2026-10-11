@@ -44,6 +44,7 @@ fn luma(r: u8, g: u8, b: u8) -> u8 {
     ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29 + 128) >> 8) as u8
 }
 
+#[cfg_attr(kn_libwebp, allow(dead_code))]
 fn from_pixels(width: u32, height: u32, data: &[u8], channels: usize) -> Result<Bitmap, ImageError> {
     if width as u64 * height as u64 > MAX_PIXELS {
         return Err(ImageError::TooLarge);
@@ -198,6 +199,7 @@ fn vp8_luma_lut() -> [u8; 256] {
 }
 
 /// 有损、无透明、非动图的 WebP 里 `VP8 ` 块的数据; 其它情况 None (走完整解码)。
+#[cfg_attr(kn_libwebp, allow(dead_code))]
 fn webp_plain_vp8(bytes: &[u8]) -> Option<&[u8]> {
     let mut i = 12;
     while i + 8 <= bytes.len() {
@@ -237,10 +239,48 @@ fn decode_png(bytes: &[u8]) -> Result<Bitmap, ImageError> {
     from_pixels(frame.width, frame.height, &buf[..frame.buffer_size()], channels)
 }
 
-fn decode_webp(bytes: &[u8]) -> Result<Bitmap, ImageError> {
-    decode_webp_with(bytes, true)
+/// WebP: 设备 (Linux) 上用静态编入的 libwebp (NEON, 直接解码到目标尺寸), 其它平台用 image-webp。
+fn decode_webp(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
+    #[cfg(kn_libwebp)]
+    {
+        decode_webp_native(bytes, target)
+    }
+    #[cfg(not(kn_libwebp))]
+    {
+        let _ = target;
+        decode_webp_with(bytes, true)
+    }
 }
 
+#[cfg(kn_libwebp)]
+mod native {
+    extern "C" {
+        pub fn kn_webp_decode_luma(data: *const u8, size: usize, tw: i32, th: i32, max_pixels: u64, ow: *mut i32, oh: *mut i32, status: *mut i32) -> *mut u8;
+        pub fn kn_webp_free(p: *mut u8);
+    }
+}
+
+/// libwebp 解码亮度平面 (`target` 给出时用它的缩放器直接解码到等比放进 target 的尺寸)。
+#[cfg(kn_libwebp)]
+fn decode_webp_native(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
+    let (tw, th) = target.map_or((0, 0), |(w, h)| (w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32));
+    let (mut w, mut h, mut status) = (0i32, 0i32, 0i32);
+    // SAFETY: bytes 在调用期间有效; 返回的缓冲区 (w*h 字节) 由 kn_webp_free 释放, 只在本函数内读取
+    let ptr = unsafe { native::kn_webp_decode_luma(bytes.as_ptr(), bytes.len(), tw, th, MAX_PIXELS, &mut w, &mut h, &mut status) };
+    if ptr.is_null() {
+        return Err(match status {
+            -1 => ImageError::TooLarge,
+            s => ImageError::Decode(format!("libwebp 解码失败 ({s})")),
+        });
+    }
+    let (w, h) = (w as u32, h as u32);
+    let plane = unsafe { std::slice::from_raw_parts(ptr, w as usize * h as usize) };
+    let result = from_plane(w, h, plane, w as usize, 1, Some(&vp8_luma_lut()));
+    unsafe { native::kn_webp_free(ptr) };
+    result
+}
+
+#[cfg_attr(kn_libwebp, allow(dead_code))]
 fn decode_webp_with(bytes: &[u8], luma_only: bool) -> Result<Bitmap, ImageError> {
     if let Some(vp8) = webp_plain_vp8(bytes).filter(|_| luma_only) {
         let frame = image_webp::vp8::Vp8Decoder::decode_frame(Cursor::new(vp8)).map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -273,7 +313,7 @@ pub fn decode_gray(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, I
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         decode_png(bytes)
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        decode_webp(bytes)
+        decode_webp(bytes, target)
     } else {
         Err(ImageError::Unsupported)
     }
@@ -388,6 +428,27 @@ mod tests {
         // 带透明: 不走快速路径 (要合成到白底)
         assert!(webp_plain_vp8(include_bytes!("../tests/data/alpha.webp")).is_none());
         assert!(decode_gray(include_bytes!("../tests/data/alpha.webp"), None).is_ok());
+    }
+
+    /// libwebp 与 image-webp 的亮度平面一致 (VP8 解码是规范精确的), 缩放解码等比放进目标尺寸。
+    #[cfg(kn_libwebp)]
+    #[test]
+    fn libwebp_matches_image_webp_luma() {
+        let bytes = include_bytes!("../tests/data/color.webp");
+        let native = decode_webp_native(bytes, None).unwrap();
+        let reference = decode_webp_with(bytes, true).unwrap();
+        assert_eq!((native.width(), native.height()), (reference.width(), reference.height()));
+        let max_diff = (0..native.height())
+            .flat_map(|y| (0..native.width()).map(move |x| (x, y)))
+            .map(|(x, y)| (native.get(x, y) as i32 - reference.get(x, y) as i32).abs())
+            .max()
+            .unwrap();
+        assert!(max_diff <= 1, "max diff {max_diff}");
+        let (w, h) = (native.width() / 3, native.height() / 3);
+        let scaled = decode_webp_native(bytes, Some((w, h))).unwrap();
+        assert!(scaled.width() <= w && scaled.height() <= h && (scaled.width() == w || scaled.height() == h));
+        assert!(decode_webp_native(include_bytes!("../tests/data/alpha.webp"), Some((8, 8))).is_ok());
+        assert!(decode_webp_native(b"RIFF    WEBPVP8 junk", None).is_err());
     }
 
     #[test]
