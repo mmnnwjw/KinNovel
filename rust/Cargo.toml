@@ -30,7 +30,9 @@ sha2 = "0.10"
 opt-level = 3
 lto = true
 codegen-units = 1
-strip = true
+# 不在链接时剥离 (zig 的链接器会连符号表一起剥掉): build.sh 之后用 llvm-objcopy --strip-debug,
+# 只去掉调试信息、保留符号表, 崩溃日志里的调用栈才有函数名 (+1 MB, zip 里 +0.4 MB)
+strip = false
 panic = "abort"
 
 [profile.dev]

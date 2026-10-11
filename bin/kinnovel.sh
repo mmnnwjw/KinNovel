@@ -87,4 +87,19 @@ usleep 200000 2>/dev/null || sleep 1
 KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" >> "$LOG_FILE" 2>&1
 RET=$?
 log "exited with $RET"
+# 异常退出: panic 时程序自己写了 last_crash.txt (含消息); 被信号杀死 (段错误等) 时在这里补一个,
+# 下次启动书架页会提示。SIGTERM/SIGINT (正常的 kill / 关机) 不算。
+CRASH_MARKER="$LOG_DIR/last_crash.txt"
+case "$RET" in
+  0|130|143) ;;
+  *)
+    if [ ! -f "$CRASH_MARKER" ]; then
+      if [ "$RET" -gt 128 ]; then
+        echo "程序被信号 $((RET - 128)) 终止" > "$CRASH_MARKER"
+      else
+        echo "退出码 $RET" > "$CRASH_MARKER"
+      fi
+    fi
+    ;;
+esac
 exit $RET

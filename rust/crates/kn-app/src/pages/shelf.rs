@@ -71,7 +71,11 @@ pub struct ShelfPage {
     cloud: Option<Result<Vec<BookItem>, String>>,
     cloud_loading: bool,
     covers: CoverCache,
+    /// 一次性提示 (上次异常退出), 几秒后消失
+    notice: Option<String>,
 }
+
+const NOTICE_TOKEN: u32 = 0x5e1f;
 
 fn use_cloud(cx: &Cx<KinNovel>) -> bool {
     cx.app.signed_in()
@@ -118,6 +122,10 @@ impl Page<KinNovel> for ShelfPage {
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, _returning: bool) {
+        if let Some(text) = cx.app.startup_notice.take() {
+            self.notice = Some(text);
+            cx.after(std::time::Duration::from_secs(8), NOTICE_TOKEN);
+        }
         // 从阅读页返回时也重新读: "继续阅读" 要反映刚才的进度
         let paths = cx.app.paths.clone();
         cx.spawn(move || load(&paths));
@@ -161,6 +169,60 @@ impl Page<KinNovel> for ShelfPage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
+        self.render_shelf(cx, frame);
+        if let Some(text) = &self.notice {
+            let (theme, m) = (cx.theme, cx.app.metrics);
+            let chain = cx.app.ui_fonts.clone();
+            let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+            let bottom = cx.height as i32 - m.tab_bar_h() as i32 - m.margin as i32 / 2;
+            widgets::toast(&mut ink, frame, &theme, &m, text, bottom);
+        }
+    }
+
+    fn on_timer(&mut self, cx: &mut Cx<KinNovel>, token: u32) {
+        if token == NOTICE_TOKEN && self.notice.take().is_some() {
+            cx.request_redraw(RefreshHint::Clean);
+        }
+    }
+
+    fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        let InputEvent::Gesture(g) = event else { return Transition::None };
+        match g.kind {
+            GestureKind::Tap => {
+                let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
+                if let Some(t) = super::tab_transition(hit, Tab::Shelf) {
+                    return t;
+                }
+                let last = self.data.as_ref().and_then(|d| d.last.clone());
+                let cloud_mode = self.showing_cloud(cx);
+                match hit {
+                    HIT_CONTINUE => match last {
+                        Some(l) if l.comic => Transition::Push(Box::new(ComicReaderPage::new(l.book_id, l.chapter_id, Entry::Resume))),
+                        Some(l) => Transition::Push(Box::new(ReaderPage::new(l.book_id, l.sort_num, Entry::Resume))),
+                        None => Transition::None,
+                    },
+                    HIT_PREV => self.turn(cx, -1),
+                    HIT_NEXT => self.turn(cx, 1),
+                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.cloud.as_ref().and_then(|r| r.as_ref().ok()).and_then(|v| v.get((id - ROW_BASE) as usize)) {
+                        Some(b) => Transition::Push(Box::new(BookDetailPage::new(b.id))),
+                        None => Transition::None,
+                    },
+                    HitId(id) if id >= ROW_BASE => match self.data.as_ref().and_then(|d| d.books.get((id - ROW_BASE) as usize)) {
+                        Some(b) => Transition::Push(Box::new(CachedBookPage::new(b.clone()))),
+                        None => Transition::None,
+                    },
+                    _ => Transition::None,
+                }
+            }
+            GestureKind::SwipeUp | GestureKind::SwipeLeft => self.turn(cx, 1),
+            GestureKind::SwipeDown | GestureKind::SwipeRight => self.turn(cx, -1),
+            _ => Transition::None,
+        }
+    }
+}
+
+impl ShelfPage {
+    fn render_shelf(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let m = cx.app.metrics;
         let tabs_top = super::draw_tabs(cx, frame, Tab::Shelf);
@@ -272,43 +334,6 @@ impl Page<KinNovel> for ShelfPage {
         }
     }
 
-    fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
-        let InputEvent::Gesture(g) = event else { return Transition::None };
-        match g.kind {
-            GestureKind::Tap => {
-                let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
-                if let Some(t) = super::tab_transition(hit, Tab::Shelf) {
-                    return t;
-                }
-                let last = self.data.as_ref().and_then(|d| d.last.clone());
-                let cloud_mode = self.showing_cloud(cx);
-                match hit {
-                    HIT_CONTINUE => match last {
-                        Some(l) if l.comic => Transition::Push(Box::new(ComicReaderPage::new(l.book_id, l.chapter_id, Entry::Resume))),
-                        Some(l) => Transition::Push(Box::new(ReaderPage::new(l.book_id, l.sort_num, Entry::Resume))),
-                        None => Transition::None,
-                    },
-                    HIT_PREV => self.turn(cx, -1),
-                    HIT_NEXT => self.turn(cx, 1),
-                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.cloud.as_ref().and_then(|r| r.as_ref().ok()).and_then(|v| v.get((id - ROW_BASE) as usize)) {
-                        Some(b) => Transition::Push(Box::new(BookDetailPage::new(b.id))),
-                        None => Transition::None,
-                    },
-                    HitId(id) if id >= ROW_BASE => match self.data.as_ref().and_then(|d| d.books.get((id - ROW_BASE) as usize)) {
-                        Some(b) => Transition::Push(Box::new(CachedBookPage::new(b.clone()))),
-                        None => Transition::None,
-                    },
-                    _ => Transition::None,
-                }
-            }
-            GestureKind::SwipeUp | GestureKind::SwipeLeft => self.turn(cx, 1),
-            GestureKind::SwipeDown | GestureKind::SwipeRight => self.turn(cx, -1),
-            _ => Transition::None,
-        }
-    }
-}
-
-impl ShelfPage {
     /// 云端书架加载失败 (断网、服务器故障) 时退回本地缓存, 已缓存的书照样能读。
     fn showing_cloud(&self, cx: &Cx<KinNovel>) -> bool {
         use_cloud(cx) && !matches!(self.cloud, Some(Err(_)))

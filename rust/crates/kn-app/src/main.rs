@@ -6,6 +6,7 @@
 
 mod api;
 mod comic;
+mod crash;
 mod covers;
 mod net;
 mod pages;
@@ -56,6 +57,8 @@ pub struct KinNovel {
     online: bool,
     /// 从阅读页打开的目录/书签列表选了位置: 返回阅读页后由它就地跳转 (不再叠一层阅读页)
     pub reader_jump: Option<pages::reader::ReaderJump>,
+    /// 启动时的一次性提示 (上次异常退出), 书架页显示
+    pub startup_notice: Option<String>,
 }
 
 impl App for KinNovel {
@@ -76,7 +79,7 @@ impl KinNovel {
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
         net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None }
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。
@@ -218,6 +221,9 @@ fn run_device() {
     use kn_platform::{Display, FbinkDisplay, GestureConfig, InputReader, PowerMonitor};
     use kn_ui::{RefreshPolicy, RefreshScheduler};
 
+    let paths = Paths::from_env();
+    crash::install_panic_hook(&paths);
+    let crash_notice = crash::take_crash_notice(&paths);
     let mut display = FbinkDisplay::open().expect("FBInk 初始化失败");
     let info = display.info().clone();
     eprintln!(
@@ -236,7 +242,6 @@ fn run_device() {
         info.touch_mirror_x,
         info.touch_mirror_y
     );
-    let paths = Paths::from_env();
     let config = Config::load(paths.config_file());
     let mut fonts = FontStore::new();
     let ui_fonts = load_ui_fonts(&mut fonts, &config);
@@ -256,8 +261,19 @@ fn run_device() {
         }
     });
     let light = kn_platform::Frontlight::detect(info.caps);
-    let app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
+    let mut app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
+    app.startup_notice = crash_notice;
     app.login_in_background();
+    // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
+    if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {
+        std::thread::Builder::new()
+            .name("test-panic".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(secs));
+                panic!("KN_TEST_PANIC 测试崩溃");
+            })
+            .ok();
+    }
     let mut input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
     // 测试钩子 KN_TEST_GSENSOR: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D)。
     // 值为 "flip" 时假装框架没转过屏幕, 于是画面软件旋转 180° —— 在 KPW5 上倒着拿就能端到端验证。

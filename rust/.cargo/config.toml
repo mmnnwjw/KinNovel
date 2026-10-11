@@ -3,4 +3,5 @@
 # 不用 `target-cpu=cortex-a8`: A8 的成本模型会放弃这些循环的向量化, 实测慢一倍。
 # 代价: rustc 对 arm32 的 `neon` 给一条 "unstable feature" 警告, 可忽略 (稳定版照常生效)。
 [target.armv7-unknown-linux-musleabihf]
-rustflags = ["-C", "target-feature=+neon"]
+# force-unwind-tables: panic = "abort" 默认不生成展开表, 崩溃日志的调用栈就只剩一帧
+rustflags = ["-C", "target-feature=+neon", "-C", "force-unwind-tables=yes"]
