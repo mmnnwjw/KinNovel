@@ -3,9 +3,11 @@
 //! 版式 (1.0 重新设计, 不沿用 Python 版):
 //! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏): 左章节名、中间时间 · 电量、右页码; 底边一条细进度线。
 //! - 点击: 插图 (仅图片实际绘制区域) 进入全屏预览; 其余左 30% 上一页, 右 30% 下一页, 中间呼出控件层;
-//!   左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
-//! - 控件层是覆盖在正文上的浮层 (不触发重排): 顶栏 (返回 / 书名 / 主页) + 底部面板
-//!   (章节信息与进度条、上一章 / 目录 / 设置 / 下一章、字号 − / + 、日夜切换), 按钮 ≥ 9 mm。
+//!   顶栏 (时间/电量那一条) 不响应点击; 左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
+//! - 控件层是覆盖在正文上的浮层 (不触发重排): 顶栏 (返回 / 书名 / 书签 / 主页) + 底部面板
+//!   (章节信息与进度条 [点按/滑动跳页]、上一章 / 目录 / 设置 / 下一章、字号 − / + 、日夜切换), 按钮 ≥ 9 mm。
+//! - 书签: 控件层顶栏的书签按钮切换当前页的书签 (存页首锚点, 改字号后仍准确); 有书签的页右上角显示书签角标;
+//!   目录页的「书签」标签列出全书书签。从阅读页打开的目录选章/选书签后回到本页就地跳转 (`ReaderJump`)。
 //!   从设置返回时: 排版参数变了就重排 (保持阅读位置), 简繁转换变了就重新加载章节 (同样保持位置)。
 //!
 //! 性能结构:
@@ -27,6 +29,7 @@ use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
 use crate::store::{self, Chapter, Progress};
+use crate::userdata::{self, Bookmark};
 use crate::KinNovel;
 
 /// 进入章节时停在哪里。
@@ -65,6 +68,20 @@ const HIT_FONT_UP: HitId = HitId(7);
 const HIT_NIGHT: HitId = HitId(8);
 const HIT_PANEL: HitId = HitId(9);
 const HIT_SETTINGS: HitId = HitId(10);
+const HIT_BOOKMARK: HitId = HitId(11);
+const HIT_TRACK: HitId = HitId(12);
+
+/// 书签摘录的字数
+const EXCERPT_CHARS: usize = 40;
+
+/// 从阅读页打开的目录里选了章节或书签: 回到阅读页后就地跳转。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderJump {
+    pub book_id: i64,
+    pub sort_num: i64,
+    /// None = 章节的阅读进度 (与从目录打开章节相同)
+    pub at: Option<Progress>,
+}
 
 /// 离开阅读页的原因 (决定是否上传阅读进度)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +160,10 @@ pub struct ReaderPage {
     note: String,
     saved: Option<Progress>,
     last_write: Option<Instant>,
+    /// 本书的书签 (进入时读取, 从目录返回时重读)
+    bookmarks: Vec<Bookmark>,
+    /// 控件层进度条的位置 (点按/滑动跳页时换算页号)
+    track: Rect,
 }
 
 impl ReaderPage {
@@ -170,6 +191,8 @@ impl ReaderPage {
             note: String::new(),
             saved: None,
             last_write: None,
+            bookmarks: Vec::new(),
+            track: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -605,6 +628,15 @@ impl ReaderPage {
     fn on_return(&mut self, cx: &mut Cx<KinNovel>) {
         // 主题可能变了: 正文位图重画
         self.cache.clear();
+        // 书签可能在目录页里删过
+        self.bookmarks = userdata::load_bookmarks(&cx.app.paths, self.book_id);
+        let jump = cx.app.reader_jump.take().filter(|j| j.book_id == self.book_id);
+        if let Some(jump) = jump.clone().filter(|j| j.sort_num != self.sort_num) {
+            // 换章: 就地重新加载 (离开本章前上传进度, 与翻到下一章一致)
+            self.upload_position(cx, crate::net::BACKGROUND_PRIORITY);
+            self.load_chapter(cx, jump.sort_num, jump.at);
+            return;
+        }
         if !matches!(self.status, Status::Ready) {
             return;
         }
@@ -622,11 +654,118 @@ impl ReaderPage {
             self.relayout_keep_position(cx);
             self.save_progress(cx, true);
         }
+        if let Some(at) = jump.and_then(|j| j.at) {
+            // 本章内的书签
+            self.paginate_all(cx);
+            let page = page_for_path(&self.pages, &at.path, Some(at.offset as i64), self.page);
+            self.page = page.min(self.pages.len().saturating_sub(1));
+            self.note.clear();
+            self.chrome = false;
+            self.save_progress(cx, true);
+        }
+    }
+
+    /// 在本实例里打开另一章 (目录/书签跳转), `at` 为要停的位置 (None = 阅读进度)。
+    fn load_chapter(&mut self, cx: &mut Cx<KinNovel>, sort_num: i64, at: Option<Progress>) {
+        self.save_progress(cx, true);
+        self.sort_num = sort_num;
+        self.entry = Entry::Resume;
+        self.resume_override = at;
+        self.status = Status::Loading;
+        self.chapter = Chapter::default();
+        self.blocks.clear();
+        self.paginator = None;
+        self.params = None;
+        self.pages.clear();
+        self.page = 0;
+        self.cache.clear();
+        self.images.clear();
+        self.image_hits.clear();
+        self.chrome = false;
+        self.note.clear();
+        self.saved = None;
+        self.last_write = None;
+        self.start_load(cx);
+        cx.request_redraw(RefreshHint::Ui);
+    }
+
+    /// 当前页上的书签 (下标)。
+    fn bookmark_on_page(&self) -> Option<usize> {
+        if self.pages.is_empty() {
+            return None;
+        }
+        self.bookmarks
+            .iter()
+            .position(|b| b.sort_num == self.sort_num && page_for_path(&self.pages, &b.path, Some(b.offset as i64), usize::MAX) == self.page)
+    }
+
+    /// 当前页开头的几十个字 (书签列表里显示)。
+    fn page_excerpt(&self) -> String {
+        let mut text = String::new();
+        for item in self.pages.get(self.page).into_iter().flatten() {
+            if let PageItem::Text { text: t, .. } = item {
+                text.push_str(t.trim());
+                if text.chars().count() >= EXCERPT_CHARS {
+                    break;
+                }
+            }
+        }
+        text.chars().take(EXCERPT_CHARS).collect()
+    }
+
+    fn toggle_bookmark(&mut self, cx: &mut Cx<KinNovel>) {
+        if let Some(i) = self.bookmark_on_page() {
+            self.bookmarks.remove(i);
+            self.note = "已删除书签".into();
+        } else if let Some(anchor) = self.anchor() {
+            self.bookmarks.push(Bookmark {
+                sort_num: self.sort_num,
+                chapter: self.chapter.title.clone(),
+                path: anchor.path,
+                offset: anchor.offset,
+                excerpt: self.page_excerpt(),
+                // 正文用了章节字体 (字体链不止系统字体) 时记下它, 书签列表用它画摘录
+                font: match &cx.app.chapter_font {
+                    Some((path, _)) if self.chain.len() > 1 => path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                    _ => String::new(),
+                },
+                time: store::unix_now(),
+            });
+            self.note = "已添加书签".into();
+        } else {
+            return;
+        }
+        if let Err(e) = userdata::save_bookmarks(&cx.app.paths, self.book_id, &self.bookmarks) {
+            eprintln!("[reader] 书签保存失败: {e}");
+            self.note = "书签保存失败".into();
+        }
+        cx.request_redraw(RefreshHint::Ui);
+    }
+
+    /// 进度条上点按/滑动到 x: 跳到章内对应的页 (先排完整章)。
+    fn jump_to_track(&mut self, cx: &mut Cx<KinNovel>, x: i32) {
+        if !matches!(self.status, Status::Ready) || self.track.w == 0 {
+            return;
+        }
+        self.paginate_all(cx);
+        let n = self.pages.len();
+        if n == 0 {
+            return;
+        }
+        let frac = ((x - self.track.x) as f32 / self.track.w as f32).clamp(0.0, 1.0);
+        let target = ((frac * n as f32) as usize).min(n - 1);
+        if target != self.page {
+            self.page = target;
+            self.note.clear();
+            self.save_progress(cx, false);
+        }
+        cx.request_redraw(RefreshHint::Ui);
     }
 
     /// 后台读取章节、字体与本地进度 (结果回到 on_message)。
     fn start_load(&mut self, cx: &mut Cx<KinNovel>) {
         self.convert = cx.app.config.convert();
+        self.bookmarks = userdata::load_bookmarks(&cx.app.paths, self.book_id);
         let paths = cx.app.paths.clone();
         let convert = cx.app.config.convert();
         let api = cx.app.config.api_server();
@@ -673,6 +812,12 @@ impl ReaderPage {
         let title_w = (status_x - margin - margin / 2).max(0) as f32;
         let title = ink.fit(&self.chapter.title, m.tiny, title_w);
         ink.text(frame, margin, style_top, &title, m.tiny, theme.muted);
+        // 书签角标: 右侧页边距里, 从屏幕顶边垂下
+        if self.bookmark_on_page().is_some() {
+            let rw = (margin as f32 * 0.42).max(10.0) as u32;
+            let rx = cx.width as i32 - margin / 2 - rw as i32 / 2;
+            ribbon(frame, Rect::new(rx, 0, rw, (top as f32 * 0.95) as u32), true, 2.0, theme.foreground);
+        }
         // 底部进度线
         if !self.pages.is_empty() {
             let y = cx.height as i32 - (margin / 2).max(10);
@@ -684,19 +829,29 @@ impl ReaderPage {
         }
     }
 
-    fn draw_chrome(&self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
+    fn draw_chrome(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let m = cx.app.metrics;
         let (w, h) = (cx.width, cx.height);
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
 
-        // 顶栏: 返回 / 书名 / 主页
+        // 顶栏: 返回 / 书名 / 书签 / 主页 (书名给书签按钮让出位置)
         let title = if self.chapter.book_name.is_empty() { "阅读".to_string() } else { self.chapter.book_name.clone() };
+        let bar_h = m.header_h() as i32;
+        let title = ink.fit(&title, m.title, (w as i32 - 4 * bar_h - 2 * m.margin as i32).max(0) as f32);
         let bar = widgets::header(&mut ink, frame, &theme, &m, &title, "", true, true);
         frame.fill_rect(Rect::new(0, bar.bottom(), w, 2), theme.foreground);
         cx.hits.add(HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
         cx.hits.add(HIT_HOME, Rect::new(w as i32 - bar.h as i32, 0, bar.h, bar.h));
+        if matches!(self.status, Status::Ready) {
+            let mark = Rect::new(w as i32 - 2 * bar.h as i32, 0, bar.h, bar.h);
+            let icon_h = (bar.h as f32 * 0.46) as u32;
+            let icon_w = (icon_h as f32 * 0.68) as u32;
+            let icon = Rect::new(mark.x + (mark.w - icon_w) as i32 / 2, (bar.h - icon_h) as i32 / 2, icon_w, icon_h);
+            ribbon(frame, icon, self.bookmark_on_page().is_some(), (4.0 * m.scale).max(3.0), theme.foreground);
+            cx.hits.add(HIT_BOOKMARK, mark);
+        }
         super::light::draw(&mut ink, frame, cx.hits, &theme, &m, &cx.app.light, w, bar.bottom() + 2);
 
         // 底部面板
@@ -722,8 +877,11 @@ impl ReaderPage {
         ink.text(frame, side, y + (info_h - (m.small * 1.25) as i32) / 2, &chapter_label, m.small, theme.foreground);
         y += info_h + gap / 2;
 
-        // 章内进度条
+        // 章内进度条 (点按/滑动跳页; 触摸区域上下放宽到一个按钮高)
         let track = Rect::new(side, y, inner_w as u32, track_h as u32);
+        self.track = track;
+        let touch = Rect::new(side - gap, y + track_h / 2 - btn_h / 2, (inner_w + 2 * gap) as u32, btn_h as u32);
+        cx.hits.add(HIT_TRACK, touch).no_feedback();
         let total = if self.done() { self.pages.len() } else { self.pages.len() + 1 };
         let filled = (inner_w as f32 * (self.page + 1) as f32 / total.max(1) as f32) as u32;
         frame.rounded_rect(track, track_h as u32 / 2, Some(theme.background), Some(theme.mid), 2);
@@ -799,7 +957,11 @@ impl ReaderPage {
                     .map(|(i, title)| crate::api::ChapterRef { id: 0, sort_num: i as i64 + 1, title: title.clone(), page_count: 0 })
                     .collect();
                 self.next_leave = Leave::Child;
-                Transition::Push(Box::new(super::book::CatalogPage::new(self.book_id, chapters, Some(self.sort_num))))
+                Transition::Push(Box::new(super::book::CatalogPage::from_reader(self.book_id, chapters, self.sort_num)))
+            }
+            HIT_BOOKMARK => {
+                self.toggle_bookmark(cx);
+                Transition::None
             }
             HIT_SETTINGS => {
                 self.next_leave = Leave::Child;
@@ -921,10 +1083,15 @@ impl Page<KinNovel> for ReaderPage {
             InputEvent::Key { code: KeyCode::PageBack, pressed: true } => self.turn(cx, -1),
             InputEvent::Gesture(g) => {
                 let p = Point { x: g.start.0, y: g.start.1 };
+                let (top, _) = Self::geometry(cx.width, cx.height);
                 match g.kind {
                     GestureKind::Tap | GestureKind::Long => {
                         if self.chrome {
                             return match cx.hits.at(p) {
+                                Some(HIT_TRACK) => {
+                                    self.jump_to_track(cx, p.x);
+                                    Transition::None
+                                }
                                 Some(id) if super::light::on_tap(cx, id, p) => Transition::None,
                                 Some(id) => self.on_chrome_hit(cx, id),
                                 None => {
@@ -943,6 +1110,10 @@ impl Page<KinNovel> for ReaderPage {
                                 return Transition::Push(Box::new(super::image::ImagePage::new(url.clone(), *h)));
                             }
                         }
+                        // 顶栏 (章节名、时间、页码) 不翻页
+                        if p.y < top {
+                            return Transition::None;
+                        }
                         let w = cx.width as i32;
                         if p.x < w * 3 / 10 {
                             self.turn(cx, -1)
@@ -952,6 +1123,12 @@ impl Page<KinNovel> for ReaderPage {
                             self.set_chrome(cx, true);
                             Transition::None
                         }
+                    }
+                    GestureKind::SwipeLeft | GestureKind::SwipeRight | GestureKind::SwipeUp | GestureKind::SwipeDown
+                        if self.chrome && cx.hits.at(p) == Some(HIT_TRACK) =>
+                    {
+                        self.jump_to_track(cx, g.end.0);
+                        Transition::None
                     }
                     GestureKind::SwipeLeft | GestureKind::SwipeRight | GestureKind::SwipeUp | GestureKind::SwipeDown
                         if self.chrome && super::light::on_swipe(cx, g) =>
@@ -1010,5 +1187,35 @@ impl Page<KinNovel> for ReaderPage {
             return true;
         }
         false
+    }
+}
+
+/// 书签图标: 竖长条, 下端 V 形缺口。filled = 实心 (有书签), 否则描边。
+fn ribbon(frame: &mut Bitmap, r: Rect, filled: bool, line: f32, color: u8) {
+    if r.w < 4 || r.h < 4 {
+        return;
+    }
+    let notch = (r.w as f32 * 0.45).min(r.h as f32 * 0.4);
+    let body = r.h as f32 - notch;
+    let (x0, y0, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+    if filled {
+        frame.fill_rect(Rect::new(r.x, r.y, r.w, body as u32), color);
+        // 缺口两侧的三角: 越往下, 中间的缺口越宽
+        for dy in 0..notch.ceil() as i32 {
+            let t = (dy as f32 + 0.5) / notch;
+            let half = (w / 2.0 * t).round() as u32;
+            let side = (r.w / 2).saturating_sub(half);
+            let y = r.y + body as i32 + dy;
+            frame.fill_rect(Rect::new(r.x, y, side, 1), color);
+            frame.fill_rect(Rect::new(r.x + r.w as i32 - side as i32, y, side, 1), color);
+        }
+    } else {
+        let mid = x0 + w / 2.0;
+        let (l, rr) = (x0 + line / 2.0, x0 + w - line / 2.0);
+        frame.line(l, y0 + line / 2.0, rr, y0 + line / 2.0, line, color);
+        frame.line(l, y0, l, y0 + h, line, color);
+        frame.line(rr, y0, rr, y0 + h, line, color);
+        frame.line(l, y0 + h, mid, y0 + body, line, color);
+        frame.line(mid, y0 + body, rr, y0 + h, line, color);
     }
 }

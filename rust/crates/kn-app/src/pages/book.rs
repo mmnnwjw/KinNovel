@@ -4,18 +4,19 @@
 use std::any::Any;
 
 use kn_platform::{GestureKind, InputEvent};
-use kn_render::{Bitmap, Point, Rect};
+use kn_render::{Bitmap, FontId, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
 use super::comic::ComicReaderPage;
 use super::comments::CommentsPage;
-use super::reader::{Entry, ReaderPage};
+use super::reader::{Entry, ReaderJump, ReaderPage};
 use super::search::SearchPage;
 use super::series::SeriesPage;
 use crate::api::{self, BookInfo, ChapterRef, SearchMode};
 use crate::covers::CoverCache;
 use crate::store;
+use crate::userdata::{self, Bookmark};
 use crate::KinNovel;
 
 const HIT_BACK: HitId = HitId(1);
@@ -358,13 +359,17 @@ fn wrap_plain(text: &str, ink: &Ink, size: f32, max_width: f32, max_lines: usize
 }
 
 // ---------------------------------------------------------------------------
-// 目录
+// 目录 (+ 从阅读页打开时的「书签」标签)
 // ---------------------------------------------------------------------------
 
 const CAT_HIT_BACK: HitId = HitId(1);
 const CAT_HIT_PREV: HitId = HitId(2);
 const CAT_HIT_NEXT: HitId = HitId(3);
+const CAT_HIT_DELETE: HitId = HitId(4);
+const CAT_HIT_CANCEL: HitId = HitId(5);
+const CAT_SEG_BASE: u32 = 10;
 const CAT_ROW_BASE: u32 = 1000;
+const CAT_MARK_BASE: u32 = 100_000;
 
 pub struct CatalogPage {
     book_id: i64,
@@ -372,14 +377,37 @@ pub struct CatalogPage {
     /// 小说: 当前章节序号; 漫画: 当前话的章节 id
     current: Option<i64>,
     comic: bool,
+    /// 从阅读页打开: 选章/选书签后返回阅读页让它就地跳转 (`ReaderJump`), 并显示「书签」标签
+    from_reader: bool,
+    /// 0 = 目录, 1 = 书签
+    tab: usize,
+    bookmarks: Vec<Bookmark>,
+    /// 长按书签后待确认删除的下标
+    confirm_delete: Option<usize>,
+    /// 画书签摘录用的章节字体: (文件名, 字体, 是否本页加载的 [离开时卸载])
+    fonts: Vec<(String, FontId, bool)>,
     page: usize,
+    mark_page: usize,
     /// 首次渲染时跳到当前章节所在页
     jumped: bool,
 }
 
 impl CatalogPage {
     pub fn new(book_id: i64, chapters: Vec<ChapterRef>, current: Option<i64>) -> Self {
-        CatalogPage { book_id, chapters, current, comic: false, page: 0, jumped: false }
+        CatalogPage {
+            book_id,
+            chapters,
+            current,
+            comic: false,
+            from_reader: false,
+            tab: 0,
+            bookmarks: Vec::new(),
+            confirm_delete: None,
+            fonts: Vec::new(),
+            page: 0,
+            mark_page: 0,
+            jumped: false,
+        }
     }
 
     /// 漫画目录: 每行显示页数, 点击用漫画阅读页打开。`current` 是章节 id。
@@ -387,8 +415,22 @@ impl CatalogPage {
         CatalogPage { comic: true, ..CatalogPage::new(book_id, chapters, current) }
     }
 
+    /// 阅读页菜单里的目录: 带书签标签; 选中后回到阅读页跳转。
+    pub fn from_reader(book_id: i64, chapters: Vec<ChapterRef>, current: i64) -> Self {
+        CatalogPage { from_reader: true, ..CatalogPage::new(book_id, chapters, Some(current)) }
+    }
+
     fn is_current(&self, ch: &ChapterRef) -> bool {
         self.current == Some(if self.comic { ch.id } else { ch.sort_num })
+    }
+
+    /// 打开章节 (或书签位置)。
+    fn open(&self, cx: &mut Cx<KinNovel>, sort_num: i64, at: Option<store::Progress>) -> Transition<KinNovel> {
+        if self.from_reader {
+            cx.app.reader_jump = Some(ReaderJump { book_id: self.book_id, sort_num, at });
+            return Transition::Back;
+        }
+        Transition::Push(Box::new(ReaderPage::new(self.book_id, sort_num, Entry::Resume)))
     }
 }
 
@@ -397,21 +439,68 @@ impl Page<KinNovel> for CatalogPage {
         PageId(201)
     }
 
+    fn enter(&mut self, cx: &mut Cx<KinNovel>, _returning: bool) {
+        if !self.from_reader {
+            return;
+        }
+        self.bookmarks = userdata::load_bookmarks(&cx.app.paths, self.book_id);
+        // 摘录是混淆码位, 要用记下的章节字体画: 阅读页正在用的直接借用, 其余从字体缓存读 (TTF 旁路, 几十毫秒)
+        for b in &self.bookmarks {
+            if b.font.is_empty() || self.fonts.iter().any(|(name, _, _)| *name == b.font) {
+                continue;
+            }
+            let current = cx.app.chapter_font.as_ref().filter(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some(&b.font));
+            if let Some((_, id)) = current {
+                self.fonts.push((b.font.clone(), *id, false));
+                continue;
+            }
+            let path = cx.app.paths.cache_dir().join("fonts").join(&b.font);
+            match store::load_chapter_font(&path).and_then(|bytes| cx.fonts.load_bytes(bytes).map_err(|e| format!("{e:?}"))) {
+                Ok(id) => self.fonts.push((b.font.clone(), id, true)),
+                Err(e) => eprintln!("[catalog] 书签字体 {}: {e}", b.font),
+            }
+        }
+    }
+
+    fn leave(&mut self, cx: &mut Cx<KinNovel>) {
+        for (_, id, owned) in self.fonts.drain(..) {
+            if owned {
+                cx.fonts.unload(id);
+                cx.glyphs.forget_font(id);
+            }
+        }
+    }
+
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let m = cx.app.metrics;
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let bar = widgets::header(&mut ink, frame, &theme, &m, "目录", &super::status_text(), true, false);
+        let title = if self.from_reader { "目录与书签" } else { "目录" };
+        let bar = widgets::header(&mut ink, frame, &theme, &m, title, &super::status_text(), true, false);
         cx.hits.add(CAT_HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
-        if self.chapters.is_empty() {
-            let area = Rect::new(0, bar.bottom(), cx.width, cx.height - bar.h);
-            widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "暂无章节", None);
-            return;
+        let mut top = bar.bottom();
+        if self.from_reader {
+            let side = m.margin as i32;
+            let gap = side / 3;
+            let seg = Rect::new(side, top + gap, cx.width - 2 * m.margin, m.touch);
+            let marks = if self.bookmarks.is_empty() { "书签".to_string() } else { format!("书签 ({})", self.bookmarks.len()) };
+            widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, seg, &["目录", &marks], self.tab, CAT_SEG_BASE);
+            top = seg.bottom() + gap;
+            frame.fill_rect(Rect::new(0, top - 1, cx.width, 1), theme.mid);
         }
         let row_h = m.row_h();
         let list_bottom = cx.height as i32 - m.pager_h() as i32;
-        let per_page = ((list_bottom - bar.bottom()) / row_h as i32).max(1) as usize;
+        let per_page = ((list_bottom - top) / row_h as i32).max(1) as usize;
+        if self.tab == 1 {
+            self.render_bookmarks(cx, frame, top, per_page, list_bottom);
+            return;
+        }
+        if self.chapters.is_empty() {
+            let area = Rect::new(0, top, cx.width, (cx.height as i32 - top) as u32);
+            widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "暂无章节", None);
+            return;
+        }
         let pages = self.chapters.len().div_ceil(per_page).max(1);
         if !self.jumped {
             self.jumped = true;
@@ -421,7 +510,7 @@ impl Page<KinNovel> for CatalogPage {
         }
         self.page = self.page.min(pages - 1);
         for (row, (index, ch)) in self.chapters.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
-            let r = Rect::new(0, bar.bottom() + row as i32 * row_h as i32, cx.width, row_h);
+            let r = Rect::new(0, top + row as i32 * row_h as i32, cx.width, row_h);
             let unit = if self.comic { "话" } else { "章" };
             let title = if ch.title.is_empty() { format!("第 {} {unit}", ch.sort_num) } else { ch.title.clone() };
             let meta = match (self.is_current(ch), self.comic && ch.page_count > 0) {
@@ -441,14 +530,63 @@ impl Page<KinNovel> for CatalogPage {
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
         let InputEvent::Gesture(g) = event else { return Transition::None };
+        let hit = cx.hits.at(Point { x: g.start.0, y: g.start.1 });
+        if let Some(index) = self.confirm_delete {
+            if g.kind == GestureKind::Tap {
+                match hit {
+                    Some(CAT_HIT_DELETE) => {
+                        if index < self.bookmarks.len() {
+                            self.bookmarks.remove(index);
+                            if let Err(e) = userdata::save_bookmarks(&cx.app.paths, self.book_id, &self.bookmarks) {
+                                eprintln!("[catalog] 书签保存失败: {e}");
+                            }
+                        }
+                        self.confirm_delete = None;
+                        cx.request_redraw(RefreshHint::Clean);
+                    }
+                    Some(CAT_HIT_CANCEL) => {
+                        self.confirm_delete = None;
+                        cx.request_redraw(RefreshHint::Clean);
+                    }
+                    _ => {}
+                }
+            }
+            return Transition::None;
+        }
         match g.kind {
-            GestureKind::Tap => match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
+            GestureKind::Long => match hit {
+                Some(HitId(id)) if id >= CAT_MARK_BASE && ((id - CAT_MARK_BASE) as usize) < self.bookmarks.len() => {
+                    self.confirm_delete = Some((id - CAT_MARK_BASE) as usize);
+                    cx.request_redraw(RefreshHint::Ui);
+                    Transition::None
+                }
+                _ => Transition::None,
+            },
+            GestureKind::Tap => match hit {
                 Some(CAT_HIT_BACK) => Transition::Back,
                 Some(CAT_HIT_PREV) => self.turn(cx, -1),
                 Some(CAT_HIT_NEXT) => self.turn(cx, 1),
+                Some(HitId(id)) if (CAT_SEG_BASE..CAT_SEG_BASE + 2).contains(&id) => {
+                    let tab = (id - CAT_SEG_BASE) as usize;
+                    if tab != self.tab {
+                        self.tab = tab;
+                        cx.request_redraw(RefreshHint::Ui);
+                    }
+                    Transition::None
+                }
+                Some(HitId(id)) if id >= CAT_MARK_BASE => match self.bookmarks.get((id - CAT_MARK_BASE) as usize) {
+                    Some(b) => {
+                        let at = store::Progress { path: b.path.clone(), offset: b.offset, page: 0 };
+                        self.open(cx, b.sort_num, Some(at))
+                    }
+                    None => Transition::None,
+                },
                 Some(HitId(id)) if id >= CAT_ROW_BASE => match self.chapters.get((id - CAT_ROW_BASE) as usize) {
                     Some(ch) if self.comic => Transition::Push(Box::new(ComicReaderPage::new(self.book_id, ch.id, Entry::Resume))),
-                    Some(ch) => Transition::Push(Box::new(ReaderPage::new(self.book_id, ch.sort_num, Entry::Resume))),
+                    Some(ch) => {
+                        let sort_num = ch.sort_num;
+                        self.open(cx, sort_num, None)
+                    }
                     None => Transition::None,
                 },
                 _ => Transition::None,
@@ -462,11 +600,70 @@ impl Page<KinNovel> for CatalogPage {
 
 impl CatalogPage {
     fn turn(&mut self, cx: &mut Cx<KinNovel>, delta: i64) -> Transition<KinNovel> {
-        let next = self.page as i64 + delta;
+        let page = if self.tab == 1 { &mut self.mark_page } else { &mut self.page };
+        let next = *page as i64 + delta;
         if next >= 0 {
-            self.page = next as usize;
+            *page = next as usize;
             cx.request_redraw(RefreshHint::Ui);
         }
         Transition::None
+    }
+
+    fn render_bookmarks(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap, top: i32, per_page: usize, list_bottom: i32) {
+        let theme = cx.theme;
+        let m = cx.app.metrics;
+        let chain = cx.app.ui_fonts.clone();
+        let ink = &mut Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+        if self.bookmarks.is_empty() {
+            let area = Rect::new(0, top, cx.width, (cx.height as i32 - top) as u32);
+            widgets::state_message(ink, frame, cx.hits, &theme, &m, area, "还没有书签\n阅读时点屏幕中间打开菜单, 再点顶栏的书签按钮", None);
+            return;
+        }
+        // 留一行给 "长按删除" 提示
+        let per_page = per_page.saturating_sub(1).max(1);
+        let pages = self.bookmarks.len().div_ceil(per_page).max(1);
+        self.mark_page = self.mark_page.min(pages - 1);
+        let row_h = m.row_h() as i32;
+        let mut y = top;
+        for (index, b) in self.bookmarks.iter().enumerate().skip(self.mark_page * per_page).take(per_page) {
+            let r = Rect::new(0, y, cx.width, row_h as u32);
+            let title = if b.chapter.is_empty() { format!("第 {} 章", b.sort_num) } else { b.chapter.clone() };
+            // 副标题 (摘录) 自己画: 字体链不同; list_row 只给它留位置
+            widgets::list_row(ink, frame, &theme, &m, r, &title, " ", &super::relative_time(b.time));
+            let font = self.fonts.iter().find(|(name, _, _)| *name == b.font).map(|(_, id, _)| *id);
+            let excerpt = match font {
+                Some(_) if !b.excerpt.is_empty() => b.excerpt.clone(),
+                None if b.font.is_empty() && !b.excerpt.is_empty() => b.excerpt.clone(),
+                _ => format!("第 {} 章内的书签", b.sort_num),
+            };
+            let chain: Vec<FontId> = font.into_iter().chain(chain.iter().copied()).collect();
+            let mut sub = Ink { fonts: &*ink.fonts, glyphs: &mut *ink.glyphs, chain: &chain };
+            let (title_h, sub_h) = ((m.body * 1.25) as i32, (m.small * 1.25) as i32);
+            let gap = (m.small * 0.3) as i32;
+            let sub_y = r.y + (r.h as i32 - (title_h + sub_h + gap)) / 2 + title_h + gap;
+            let side = m.margin as i32;
+            let excerpt = sub.fit(&excerpt, m.small, (r.w as i32 - 2 * side) as f32);
+            sub.text(frame, r.x + side, sub_y, &excerpt, m.small, theme.muted);
+            cx.hits.add(HitId(CAT_MARK_BASE + index as u32), r);
+            y += row_h;
+        }
+        ink.text_centered(frame, Rect::new(0, y, cx.width, row_h as u32), "长按书签可删除", m.small, theme.muted);
+        if pages > 1 {
+            let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
+            widgets::pager(ink, frame, cx.hits, &theme, &m, pr, self.mark_page, pages, CAT_HIT_PREV, CAT_HIT_NEXT);
+        }
+        if let Some(index) = self.confirm_delete {
+            let label = self.bookmarks.get(index).map(|b| b.excerpt.clone()).unwrap_or_default();
+            widgets::dialog(
+                ink,
+                frame,
+                cx.hits,
+                &theme,
+                &m,
+                "删除这个书签？",
+                &[&label],
+                &[("取消", CAT_HIT_CANCEL, ButtonStyle::Secondary), ("删除", CAT_HIT_DELETE, ButtonStyle::Primary)],
+            );
+        }
     }
 }

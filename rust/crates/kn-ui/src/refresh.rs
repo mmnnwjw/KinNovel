@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn distant_changes_refresh_as_separate_regions() {
-        let (mut s, mut f) = big();
+        let (s, mut f) = big();
         f.fill_rect(Rect::new(10, 10, 20, 10), 0);
         f.fill_rect(Rect::new(300, 500, 20, 10), 0);
         let reqs = s.plan(&f, RefreshHint::Ui);

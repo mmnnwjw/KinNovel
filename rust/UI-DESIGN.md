@@ -48,6 +48,14 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   (tap the slider to jump, swipe on it to drag; only the panel region refreshes, `Ui`). Values are powerd's own
   (`flIntensity` 0..flMaxIntensity, `currentAmberLevel` 0..24 via `lipc-set-prop`), so they persist after exit;
   rows the device doesn't support are hidden (no panel at all without a frontlight).
+- Novel reader: taps on the thin status band at the top (chapter · time/battery · page) do nothing (no accidental turns).
+  Menu header = back · book title · bookmark ribbon (outline / filled = toggle a bookmark on this page) · home.
+  The chapter progress bar in the bottom panel is a slider (tap or swipe → page in the chapter, whole chapter laid out first).
+  A bookmarked page shows a small filled ribbon hanging from the top edge in the right margin.
+  目录 from the reader = "目录与书签": segmented 目录 / 书签 (n); bookmark rows = chapter title, excerpt (drawn with the
+  chapter's obfuscation font, which is remembered per bookmark), relative time; long press → delete dialog.
+  Picking a chapter or bookmark returns to the same reader instance, which reloads/jumps in place (`ReaderJump`), so the stack does not grow.
+  Bookmarks live in `data/bookmarks/{book}.json` (not under `cache/`, so cache clearing keeps them).
 - Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:
   one page fitted to the whole screen, no bars. Tap left/right 30 % = previous/next (mirrored when 翻页方向 = 从右往左),
   middle = overlay menu (话名 · 页码, progress bar filling from the reading side, 上一话 / 目录 / 放大 / 下一话,

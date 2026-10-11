@@ -11,6 +11,7 @@ mod net;
 mod pages;
 mod store;
 mod tz;
+mod userdata;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,6 +54,8 @@ pub struct KinNovel {
     /// 网络客户端; 离线模式 (主机预览, KN_OFFLINE=1) 下不使用
     net_client: kn_net::Client,
     online: bool,
+    /// 从阅读页打开的目录/书签列表选了位置: 返回阅读页后由它就地跳转 (不再叠一层阅读页)
+    pub reader_jump: Option<pages::reader::ReaderJump>,
 }
 
 impl App for KinNovel {
@@ -73,7 +76,7 @@ impl KinNovel {
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
         net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None }
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。
