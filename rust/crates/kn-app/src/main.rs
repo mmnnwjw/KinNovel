@@ -12,6 +12,7 @@ mod net;
 mod pages;
 mod store;
 mod tz;
+mod update;
 mod userdata;
 
 use std::path::{Path, PathBuf};
@@ -156,6 +157,8 @@ fn preview(args: &[String]) {
         _ => 300,
     };
     let app = KinNovel::new(paths, config, ui_fonts, w, h, dpi, kn_platform::Frontlight::detect(None), online);
+    // 只读出上次的检查结果 (不联网)
+    update::start(&app.paths, None, false);
     let mut ui = kn_ui::Headless::new(app, fonts, w, h).expect("headless");
     let settle = |ui: &mut kn_ui::Headless<KinNovel>| ui.settle(Duration::from_secs(20));
     settle(&mut ui);
@@ -264,6 +267,7 @@ fn run_device() {
     let mut app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.startup_notice = crash_notice;
     app.login_in_background();
+    update::start(&app.paths, app.net(), app.config.bool("check_update", true));
     // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
     if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {
         std::thread::Builder::new()

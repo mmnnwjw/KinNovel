@@ -19,6 +19,7 @@ pub mod series;
 pub mod settings;
 pub mod shelf;
 pub mod shop;
+pub mod storage;
 
 use kn_render::Bitmap;
 use kn_ui::widgets::{self, Ink};

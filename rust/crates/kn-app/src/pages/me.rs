@@ -1,5 +1,5 @@
-//! "我的": 账号卡片 (登录状态/签到) + 入口列表 (设置、关于、退出), 对照 Python `account.py`。
-//! 设置项在二级页 [`super::settings::SettingsPage`]。
+//! "我的": 账号卡片 (登录状态/签到) + 入口列表 (设置、存储空间、关于、退出), 对照 Python `account.py`。
+//! 设置项在二级页 [`super::settings::SettingsPage`]。有新版本时「关于」一行提示, 关于对话框里可手动检查更新。
 
 use std::any::Any;
 use std::time::Duration;
@@ -18,6 +18,7 @@ const HIT_DIALOG_CLOSE: HitId = HitId(60);
 const HIT_DIALOG_EXIT: HitId = HitId(61);
 const HIT_SIGN_IN: HitId = HitId(70);
 const HIT_RETRY: HitId = HitId(71);
+const HIT_CHECK_UPDATE: HitId = HitId(72);
 const TOAST_TOKEN: u32 = 1;
 
 /// 入口列表的行
@@ -27,6 +28,7 @@ enum Row {
     Announcements,
     Shop,
     Settings,
+    Storage,
     About,
     Exit,
 }
@@ -38,6 +40,7 @@ impl Row {
             Row::Announcements => "公告",
             Row::Shop => "积分商城",
             Row::Settings => "设置",
+            Row::Storage => "存储空间",
             Row::About => "关于 KinNovel",
             Row::Exit => "退出",
         }
@@ -49,7 +52,7 @@ fn rows(logged_in: bool) -> Vec<Row> {
     if logged_in {
         rows.extend([Row::Notifications, Row::Shop]);
     }
-    rows.extend([Row::Announcements, Row::Settings, Row::About, Row::Exit]);
+    rows.extend([Row::Announcements, Row::Settings, Row::Storage, Row::About, Row::Exit]);
     rows
 }
 
@@ -61,6 +64,7 @@ enum Dialog {
 
 struct InfoLoaded(Result<MyInfo, String>);
 struct SignInDone(Result<(), String>);
+struct UpdateChecked(Result<String, String>);
 
 #[derive(Default)]
 pub struct MePage {
@@ -69,6 +73,8 @@ pub struct MePage {
     info_loading: bool,
     signing_in: bool,
     toast: Option<String>,
+    /// 关于对话框里的手动检查: None = 没查过, Some(None) = 进行中, Some(Some(结果))
+    update_check: Option<Option<Result<String, String>>>,
 }
 
 fn logged_in(cx: &Cx<KinNovel>) -> bool {
@@ -153,9 +159,13 @@ impl Page<KinNovel> for MePage {
             if y + entry_h > tabs_top {
                 break;
             }
-            let meta = if row == Row::About { env!("CARGO_PKG_VERSION") } else { "" };
+            let meta = match (row, crate::update::available()) {
+                (Row::About, Some(v)) => format!("有新版本 {v}"),
+                (Row::About, None) => env!("CARGO_PKG_VERSION").to_string(),
+                _ => String::new(),
+            };
             let r = Rect::new(0, y, cx.width, entry_h as u32);
-            widgets::list_row(&mut ink, frame, &theme, &m, r, row.label(), "", meta);
+            widgets::list_row(&mut ink, frame, &theme, &m, r, row.label(), "", &meta);
             cx.hits.add(HitId(ROW_BASE + i as u32), r);
             y += entry_h;
         }
@@ -163,8 +173,22 @@ impl Page<KinNovel> for MePage {
         match self.dialog {
             Some(Dialog::About) => {
                 let version = format!("KinNovel {} (Rust)", env!("CARGO_PKG_VERSION"));
-                let lines = [version.as_str(), "轻书架 Kindle 客户端", "显示: FBInk (GPL-3.0)", "github.com/mmnnwjw/KinNovel"];
-                widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, "关于", &lines, &[("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]);
+                let update = match (&self.update_check, crate::update::available()) {
+                    (Some(None), _) => Some("正在检查更新…".to_string()),
+                    (_, Some(v)) => Some(format!("有新版本 {v}, 可到 Releases 下载")),
+                    (Some(Some(Err(e))), None) => Some(format!("检查失败: {e}")),
+                    (Some(Some(Ok(_))), None) => Some("已是最新版本".to_string()),
+                    (None, None) => None,
+                };
+                let mut lines = vec![version.as_str(), "轻书架 Kindle 客户端", "显示: FBInk (GPL-3.0)", crate::update::PROJECT_PAGE];
+                lines.extend(update.as_deref());
+                let checking = matches!(self.update_check, Some(None));
+                let buttons: &[(&str, HitId, ButtonStyle)] = if cx.app.net().is_some() {
+                    &[("检查更新", HIT_CHECK_UPDATE, if checking { ButtonStyle::Disabled } else { ButtonStyle::Secondary }), ("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]
+                } else {
+                    &[("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]
+                };
+                widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, "关于", &lines, buttons);
             }
             Some(Dialog::Exit) => {
                 widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, "退出 KinNovel？", &["阅读进度已保存"], &[("取消", HIT_DIALOG_CLOSE, ButtonStyle::Secondary), ("退出", HIT_DIALOG_EXIT, ButtonStyle::Primary)]);
@@ -188,6 +212,14 @@ impl Page<KinNovel> for MePage {
             Ok(loaded) => {
                 self.info_loading = false;
                 self.info = Some(loaded.0);
+                cx.request_redraw(RefreshHint::Ui);
+                return;
+            }
+            Err(other) => other,
+        };
+        let msg = match msg.downcast::<UpdateChecked>() {
+            Ok(done) => {
+                self.update_check = Some(Some(done.0));
                 cx.request_redraw(RefreshHint::Ui);
                 return;
             }
@@ -221,6 +253,12 @@ impl Page<KinNovel> for MePage {
         if self.dialog.is_some() {
             match hit {
                 HIT_DIALOG_EXIT => return Transition::Exit,
+                HIT_CHECK_UPDATE if !matches!(self.update_check, Some(None)) => {
+                    self.update_check = Some(None);
+                    let (paths, net) = (cx.app.paths.clone(), cx.app.net());
+                    cx.spawn(move || UpdateChecked(crate::update::check_now(&paths, net.as_ref())));
+                    cx.request_redraw(RefreshHint::Ui);
+                }
                 HIT_DIALOG_CLOSE => {
                     self.dialog = None;
                     // 弹窗区域局部闪刷: 深色按钮在普通局部刷新下残留严重
@@ -236,6 +274,7 @@ impl Page<KinNovel> for MePage {
         match hit {
             HitId(id) if id >= ROW_BASE => match rows(logged_in(cx)).get((id - ROW_BASE) as usize) {
                 Some(Row::Settings) => return Transition::Push(Box::new(super::settings::SettingsPage::default())),
+                Some(Row::Storage) => return Transition::Push(Box::new(super::storage::StoragePage::default())),
                 Some(Row::Notifications) => return Transition::Push(Box::new(super::notify::NotificationsPage::new())),
                 Some(Row::Announcements) => return Transition::Push(Box::new(super::announce::AnnouncementsPage::new())),
                 Some(Row::Shop) => return Transition::Push(Box::new(super::shop::ShopPage::new())),
