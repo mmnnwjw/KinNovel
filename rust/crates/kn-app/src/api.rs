@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use kn_net::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn fake_dir() -> Option<PathBuf> {
     std::env::var_os("KN_FAKE_DIR").map(PathBuf::from)
@@ -345,53 +345,192 @@ fn index_key(item: &Value) -> i64 {
     i64_of(item, "index")
 }
 
-/// 书架原始条目 -> 按 index 排序、去掉文件夹、去重后的书籍 id 列表 (小说与漫画都保留)
-/// (不支持文件夹嵌套导航 —— 1.0 的书架只展示一层, 文件夹内的书一并列出)。
-fn shelf_book_ids(v: &Value) -> Vec<i64> {
-    let items: Vec<&Value> = match v {
-        Value::Object(_) => {
-            let d = arr_of(v, "data");
-            if d.is_empty() { arr_of(v, "Data") } else { d }
-        }
-        Value::Array(items) => items.iter().collect(),
-        _ => Vec::new(),
-    };
-    let mut entries: Vec<(i64, i64)> = Vec::new(); // (index, id)
-    let mut seen = std::collections::HashSet::new();
-    for item in items {
-        if !item.is_object() || is_kind(item, "folder") {
-            continue;
-        }
-        let id = i64_of(item, "id").max(i64_of(item, "Id"));
-        if id <= 0 || !seen.insert(id) {
-            continue;
-        }
-        entries.push((index_key(item), id));
-    }
-    entries.sort_by_key(|(i, _)| *i);
-    entries.into_iter().map(|(_, id)| id).collect()
-}
-
 // ---------------------------------------------------------------------------
 // 加载函数 (fixture 优先, 否则走 `net`; `net` 为 None 时离线返回错误)
 // ---------------------------------------------------------------------------
 
-/// 书架 (已与书籍元数据合并; 顺序 = 书架里的顺序)。只请求当前实际存在的 id。
-pub fn load_book_shelf(net: Option<&Client>) -> Result<Vec<BookItem>, String> {
-    let envelope = if fake_mode() {
-        load_fake("book_shelf")?
-    } else {
-        let net = net.ok_or("离线，无法加载")?;
-        crate::net::ensure_login(net)?;
-        net.get_book_shelf().map_err(|e| e.to_string())?
-    };
-    let ids = shelf_book_ids(&envelope);
-    if ids.is_empty() {
-        return Ok(Vec::new());
+// ---------------------------------------------------------------------------
+// 书架的文件夹层级与写回 (对照 Python `pages/shelf.py` / `pages/book.py::_set_shelf`)
+//
+// 书架是一张表: 条目 `{id, type: NOVEL|COMIC|FOLDER, index, parents: [文件夹 id...], title?, updateAt?}`,
+// 条目所在的文件夹 = parents 的最后一个。`SaveBookShelf` 整表覆盖, 所以每次写之前都重新拉取最新的表,
+// 只改目标条目, 其余条目 (含不认识的字段) 原样写回。
+// ---------------------------------------------------------------------------
+
+/// 书架当前层的一项。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShelfEntry {
+    Folder { id: String, title: String, count: usize },
+    Book(BookItem),
+}
+
+/// 云端书架: 原始条目 + 书籍元数据。
+#[derive(Clone, Debug, Default)]
+pub struct ShelfData {
+    pub raw: Vec<Value>,
+    pub books: std::collections::HashMap<i64, BookItem>,
+}
+
+fn shelf_items(envelope: &Value) -> Vec<Value> {
+    match envelope {
+        Value::Object(_) => {
+            let d = arr_of(envelope, "data");
+            if d.is_empty() { arr_of(envelope, "Data") } else { d }
+        }
+        Value::Array(items) => items.iter().collect(),
+        _ => Vec::new(),
     }
-    let books = load_books_by_ids_any(net, &ids)?;
-    let by_id: std::collections::HashMap<i64, BookItem> = books.into_iter().map(|b| (b.id, b)).collect();
-    Ok(ids.into_iter().filter_map(|id| by_id.get(&id).cloned()).collect())
+    .into_iter()
+    .cloned()
+    .collect()
+}
+
+/// 文件夹 id 是 nanoid 字符串 (也容忍数字)。
+fn folder_id(item: &Value) -> Option<String> {
+    is_kind(item, "folder").then(|| match get(item, "id") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    })
+}
+
+fn shelf_book_id(item: &Value) -> Option<i64> {
+    if !item.is_object() || is_kind(item, "folder") {
+        return None;
+    }
+    Some(i64_of(item, "id").max(i64_of(item, "Id"))).filter(|&id| id > 0)
+}
+
+fn last_parent(item: &Value) -> Option<String> {
+    let parents = arr_of(item, "parents");
+    parents.last().map(|p| match p {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+impl ShelfData {
+    /// 某一层 (None = 根) 的条目, 按 index 排序; 元数据缺失的书跳过。
+    pub fn level(&self, folder: Option<&str>) -> Vec<ShelfEntry> {
+        let mut items: Vec<&Value> = self.raw.iter().filter(|it| it.is_object() && last_parent(it).as_deref() == folder).collect();
+        items.sort_by_key(|it| index_key(it));
+        let mut seen = std::collections::HashSet::new();
+        items
+            .into_iter()
+            .filter_map(|it| match folder_id(it) {
+                Some(id) => {
+                    let count = self.raw.iter().filter(|x| last_parent(x).as_deref() == Some(id.as_str())).count();
+                    let title = str_of(it, "title");
+                    Some(ShelfEntry::Folder { title: if title.is_empty() { "文件夹".into() } else { title }, id, count })
+                }
+                None => {
+                    let id = shelf_book_id(it)?;
+                    seen.insert(id).then(|| self.books.get(&id).cloned().map(ShelfEntry::Book)).flatten()
+                }
+            })
+            .collect()
+    }
+
+    pub fn folder_title(&self, id: &str) -> String {
+        self.raw
+            .iter()
+            .find(|it| folder_id(it).as_deref() == Some(id))
+            .map(|it| str_of(it, "title"))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "文件夹".into())
+    }
+
+    pub fn has_folder(&self, id: &str) -> bool {
+        self.raw.iter().any(|it| folder_id(it).as_deref() == Some(id))
+    }
+}
+
+/// fixture 模式下的书架写回 (只在内存里, 预览用)。
+static FAKE_SHELF: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+fn fetch_shelf(net: Option<&Client>) -> Result<Value, String> {
+    if fake_mode() {
+        if let Some(v) = FAKE_SHELF.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Ok(v);
+        }
+        return load_fake("book_shelf");
+    }
+    let net = net.ok_or("离线，无法加载")?;
+    crate::net::ensure_login(net)?;
+    net.get_book_shelf().map_err(|e| e.to_string())
+}
+
+fn save_shelf(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
+    if fake_mode() {
+        *FAKE_SHELF.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "data": items }));
+        return Ok(());
+    }
+    let net = net.ok_or("离线，无法保存")?;
+    // `ver` 与 Python 版 / 网页版写回时带的格式版本一致
+    net.save_book_shelf(Value::Array(items), "20260921").map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// 云端书架 (含文件夹; 书籍元数据一次取齐)。
+pub fn load_shelf(net: Option<&Client>) -> Result<ShelfData, String> {
+    let raw = shelf_items(&fetch_shelf(net)?);
+    let ids: Vec<i64> = {
+        let mut seen = std::collections::HashSet::new();
+        raw.iter().filter_map(shelf_book_id).filter(|id| seen.insert(*id)).collect()
+    };
+    let books = if ids.is_empty() { Vec::new() } else { load_books_by_ids_any(net, &ids)? };
+    Ok(ShelfData { raw, books: books.into_iter().map(|b| (b.id, b)).collect() })
+}
+
+/// "2026-10-11T03:40:00.000Z" (UTC)
+fn iso_now() -> String {
+    let now = crate::store::unix_now();
+    let (y, m, d) = crate::stats::civil_from_days(now.div_euclid(86_400));
+    let s = now.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", s / 3600, s / 60 % 60, s % 60)
+}
+
+fn without_book(items: Vec<Value>, book_id: i64) -> Vec<Value> {
+    items.into_iter().filter(|it| shelf_book_id(it) != Some(book_id)).collect()
+}
+
+fn with_book(mut items: Vec<Value>, book_id: i64, comic: bool, now: &str) -> Vec<Value> {
+    if !items.iter().any(|it| shelf_book_id(it) == Some(book_id)) {
+        let kind = if comic { "COMIC" } else { "NOVEL" };
+        items.insert(0, json!({"id": book_id, "type": kind, "parents": [], "index": 0, "updateAt": now}));
+    }
+    items
+}
+
+/// 删除文件夹: 去掉文件夹条目, 并把它从其余条目的 parents 里拿掉 (里面的书移到上一层)。
+fn without_folder(items: Vec<Value>, id: &str) -> Vec<Value> {
+    items
+        .into_iter()
+        .filter(|it| folder_id(it).as_deref() != Some(id))
+        .map(|mut it| {
+            if let Some(Value::Array(parents)) = it.get_mut("parents") {
+                parents.retain(|p| p.as_str() != Some(id) && p.to_string() != id);
+            }
+            it
+        })
+        .collect()
+}
+
+/// 这本书是否在书架上 (书籍详情页的按钮状态)。
+pub fn shelf_contains(net: Option<&Client>, book_id: i64) -> Result<bool, String> {
+    Ok(shelf_items(&fetch_shelf(net)?).iter().any(|it| shelf_book_id(it) == Some(book_id)))
+}
+
+/// 加入/移出书架 (拉取最新的表、只改这一本、整表写回)。返回操作后是否在书架上。
+pub fn shelf_set_book(net: Option<&Client>, book_id: i64, comic: bool, on_shelf: bool) -> Result<bool, String> {
+    let items = shelf_items(&fetch_shelf(net)?);
+    let items = if on_shelf { with_book(items, book_id, comic, &iso_now()) } else { without_book(items, book_id) };
+    save_shelf(net, items)?;
+    Ok(on_shelf)
+}
+
+pub fn shelf_delete_folder(net: Option<&Client>, folder: &str) -> Result<(), String> {
+    let items = shelf_items(&fetch_shelf(net)?);
+    save_shelf(net, without_folder(items, folder))
 }
 
 /// 阅读历史的全部 id (最新在前, 对照 `GetReadHistory()`): 小说是书 id, 漫画是分卷 (书) id。
@@ -1068,15 +1207,48 @@ mod tests {
         assert_eq!(parse_categories(&bare), vec![Category { id: 2, name: "都市".into() }]);
     }
 
-    #[test]
-    fn shelf_book_ids_skip_folders_keep_comics_and_sort_by_index() {
+    fn shelf_fixture() -> ShelfData {
         let v = json!({"data": [
-            {"id": 3, "type": "NOVEL", "index": 2},
-            {"id": "folder1", "type": "FOLDER", "index": 0},
-            {"id": 5, "type": "COMIC", "index": 1},
-            {"id": 9, "type": "NOVEL", "index": 0},
+            {"id": 3, "type": "NOVEL", "index": 2, "parents": []},
+            {"id": "f1", "type": "FOLDER", "index": 0, "parents": [], "title": "存档"},
+            {"id": 5, "type": "COMIC", "index": 1, "parents": []},
+            {"id": 9, "type": "NOVEL", "index": 0, "parents": ["f1"], "extra": "keep"},
+            {"id": 7, "type": "NOVEL", "index": 3, "parents": []},
         ]});
-        assert_eq!(shelf_book_ids(&v), vec![9, 5, 3]);
+        let book = |id: i64| (id, BookItem { id, title: format!("b{id}"), ..Default::default() });
+        // 7 没有元数据 (例如已下架): 不显示, 但写回时保留
+        ShelfData { raw: shelf_items(&v), books: [book(3), book(5), book(9)].into_iter().collect() }
+    }
+
+    #[test]
+    fn shelf_levels_follow_last_parent_and_index() {
+        let s = shelf_fixture();
+        let root = s.level(None);
+        assert_eq!(root.len(), 3);
+        assert!(matches!(&root[0], ShelfEntry::Folder { id, title, count: 1 } if id == "f1" && title == "存档"));
+        assert!(matches!(&root[1], ShelfEntry::Book(b) if b.id == 5));
+        assert!(matches!(&root[2], ShelfEntry::Book(b) if b.id == 3));
+        let inner = s.level(Some("f1"));
+        assert!(matches!(inner.as_slice(), [ShelfEntry::Book(b)] if b.id == 9));
+        assert_eq!(s.folder_title("f1"), "存档");
+    }
+
+    #[test]
+    fn shelf_writes_touch_only_the_target() {
+        let raw = shelf_fixture().raw;
+        let removed = without_book(raw.clone(), 9);
+        assert_eq!(removed.len(), 4);
+        assert!(removed.iter().any(|it| it["id"] == 7));
+        let added = with_book(removed.clone(), 11, true, "T");
+        assert_eq!(added[0], json!({"id": 11, "type": "COMIC", "parents": [], "index": 0, "updateAt": "T"}));
+        assert_eq!(&added[1..], &removed[..]);
+        assert_eq!(with_book(raw.clone(), 9, false, "T"), raw);
+        let unfoldered = without_folder(raw, "f1");
+        assert_eq!(unfoldered.len(), 4);
+        let nine = unfoldered.iter().find(|it| it["id"] == 9).unwrap();
+        assert_eq!(nine["parents"], json!([]));
+        assert_eq!(nine["extra"], "keep");
+        assert!(iso_now().ends_with(".000Z") && iso_now().len() == 24);
     }
 
     #[test]

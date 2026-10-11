@@ -1,7 +1,8 @@
 //! 书架 (首页)。
 //!
 //! 顶部 "继续阅读" 卡片 (一点即回到上次的页), 下面是书目列表: 在线且登录时显示云端书架
-//! (对照 Python `shelf.py`, 不支持文件夹嵌套导航 —— 见 `crate::api::load_book_shelf`),
+//! (对照 Python `shelf.py`): 文件夹可以点进去 (顶栏返回箭头回上一层), 长按书 = 移出书架,
+//! 长按文件夹 = 删除文件夹 (里面的书移到上一层), 都先确认; 写回见 `crate::api::shelf_set_book`。
 //! 否则列出本地缓存里有章节的书, 点进去是该书已缓存的章节。
 
 use std::any::Any;
@@ -16,7 +17,7 @@ use super::book::BookDetailPage;
 use super::comic::ComicReaderPage;
 use super::reader::{Entry, ReaderPage};
 use super::Tab;
-use crate::api::{self, BookItem};
+use crate::api::{self, ShelfData, ShelfEntry};
 use crate::covers::CoverCache;
 use crate::store::{self, Chapter, LastRead};
 use crate::KinNovel;
@@ -25,6 +26,9 @@ const HIT_CONTINUE: HitId = HitId(1);
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_BACK: HitId = HitId(4);
+const HIT_FOLDER_UP: HitId = HitId(5);
+const HIT_CONFIRM: HitId = HitId(6);
+const HIT_CANCEL: HitId = HitId(7);
 /// 列表行: ROW_BASE + 序号
 const ROW_BASE: u32 = 1000;
 
@@ -61,16 +65,29 @@ fn rows_fit(area_h: i32, row_h: u32) -> usize {
     (area_h / row_h as i32).max(1) as usize
 }
 
-struct CloudLoaded(Result<Vec<BookItem>, String>);
+struct CloudLoaded(Result<ShelfData, String>);
+/// 书架写回的结果: Ok(提示文字)
+struct ShelfWritten(Result<String, String>);
+
+/// 等待确认的书架操作
+enum Confirm {
+    RemoveBook { id: i64, title: String },
+    DeleteFolder { id: String, title: String },
+}
 
 #[derive(Default)]
 pub struct ShelfPage {
     data: Option<Loaded>,
     page: usize,
     /// `None` = 本地缓存模式 (离线或未登录); `Some` = 云端书架 (加载中时为空 Err 占位由 loading 标志区分)
-    cloud: Option<Result<Vec<BookItem>, String>>,
+    cloud: Option<Result<ShelfData, String>>,
     cloud_loading: bool,
     covers: CoverCache,
+    /// 当前所在的文件夹路径 (空 = 根)
+    folder: Vec<String>,
+    confirm: Option<Confirm>,
+    /// 正在写回书架
+    saving: bool,
     /// 一次性提示 (上次异常退出), 几秒后消失
     notice: Option<String>,
 }
@@ -79,6 +96,17 @@ const NOTICE_TOKEN: u32 = 0x5e1f;
 
 fn use_cloud(cx: &Cx<KinNovel>) -> bool {
     cx.app.signed_in()
+}
+
+/// 文件夹图标: 画在封面位置, 圆角框 + 左上的标签页。
+fn draw_folder_icon(frame: &mut Bitmap, theme: &kn_ui::Theme, m: &kn_ui::widgets::Metrics, slot: Rect) {
+    let w = (slot.w as f32 * 0.8) as u32;
+    let h = (w as f32 * 0.7) as u32;
+    let x = slot.x + (slot.w - w) as i32 / 2;
+    let y = slot.y + (slot.h as i32 - h as i32) / 2 + (h / 10) as i32;
+    let tab = Rect::new(x, y - (h / 6) as i32, w * 2 / 5, h / 4);
+    frame.rounded_rect(tab, m.radius / 2, Some(theme.foreground), None, 0);
+    frame.rounded_rect(Rect::new(x, y, w, h), m.radius / 2, Some(theme.light), Some(theme.foreground), 3);
 }
 
 /// "继续阅读" 卡片 (整张卡片可点)。
@@ -138,7 +166,7 @@ impl Page<KinNovel> for ShelfPage {
                 return;
             }
             self.cloud_loading = true;
-            cx.spawn(move || CloudLoaded(api::load_book_shelf(net.as_ref())));
+            cx.spawn(move || CloudLoaded(api::load_shelf(net.as_ref())));
         } else {
             self.cloud = None;
         }
@@ -161,9 +189,35 @@ impl Page<KinNovel> for ShelfPage {
             }
             Err(other) => other,
         };
-        if let Ok(cloud) = msg.downcast::<CloudLoaded>() {
-            self.cloud_loading = false;
-            self.cloud = Some(cloud.0);
+        let msg = match msg.downcast::<CloudLoaded>() {
+            Ok(cloud) => {
+                self.cloud_loading = false;
+                if let Ok(data) = &cloud.0 {
+                    // 别处删掉的文件夹: 退回到还存在的那一层
+                    while self.folder.last().is_some_and(|f| !data.has_folder(f)) {
+                        self.folder.pop();
+                    }
+                }
+                self.cloud = Some(cloud.0);
+                cx.request_redraw(RefreshHint::Ui);
+                return;
+            }
+            Err(other) => other,
+        };
+        if let Ok(done) = msg.downcast::<ShelfWritten>() {
+            self.saving = false;
+            let text = match done.0 {
+                Ok(text) => {
+                    // 重新拉取 (书架以服务器为准)
+                    self.cloud_loading = true;
+                    let net = cx.app.net();
+                    cx.spawn(move || CloudLoaded(api::load_shelf(net.as_ref())));
+                    text
+                }
+                Err(e) => format!("保存失败: {e}"),
+            };
+            self.notice = Some(text);
+            cx.after(std::time::Duration::from_secs(3), NOTICE_TOKEN);
             cx.request_redraw(RefreshHint::Ui);
         }
     }
@@ -187,11 +241,49 @@ impl Page<KinNovel> for ShelfPage {
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
         let InputEvent::Gesture(g) = event else { return Transition::None };
+        if self.confirm.is_some() {
+            if g.kind == GestureKind::Tap {
+                match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
+                    Some(HIT_CONFIRM) => {
+                        let confirm = self.confirm.take().expect("checked");
+                        self.write(cx, confirm);
+                        cx.request_redraw(RefreshHint::Clean);
+                    }
+                    Some(HIT_CANCEL) => {
+                        self.confirm = None;
+                        cx.request_redraw(RefreshHint::Clean);
+                    }
+                    _ => {}
+                }
+            }
+            return Transition::None;
+        }
         match g.kind {
+            GestureKind::Long if self.showing_cloud(cx) && !self.saving => {
+                let entry = match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
+                    Some(HitId(id)) if id >= ROW_BASE => self.entries().into_iter().nth((id - ROW_BASE) as usize),
+                    _ => None,
+                };
+                self.confirm = match entry {
+                    Some(ShelfEntry::Book(b)) => Some(Confirm::RemoveBook { id: b.id, title: b.title }),
+                    Some(ShelfEntry::Folder { id, title, .. }) => Some(Confirm::DeleteFolder { id, title }),
+                    None => None,
+                };
+                if self.confirm.is_some() {
+                    cx.request_redraw(RefreshHint::Ui);
+                }
+                Transition::None
+            }
             GestureKind::Tap => {
                 let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
                 if let Some(t) = super::tab_transition(hit, Tab::Shelf) {
                     return t;
+                }
+                if hit == HIT_FOLDER_UP {
+                    self.folder.pop();
+                    self.page = 0;
+                    cx.request_redraw(RefreshHint::Ui);
+                    return Transition::None;
                 }
                 let last = self.data.as_ref().and_then(|d| d.last.clone());
                 let cloud_mode = self.showing_cloud(cx);
@@ -203,8 +295,14 @@ impl Page<KinNovel> for ShelfPage {
                     },
                     HIT_PREV => self.turn(cx, -1),
                     HIT_NEXT => self.turn(cx, 1),
-                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.cloud.as_ref().and_then(|r| r.as_ref().ok()).and_then(|v| v.get((id - ROW_BASE) as usize)) {
-                        Some(b) => Transition::Push(Box::new(BookDetailPage::new(b.id))),
+                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.entries().into_iter().nth((id - ROW_BASE) as usize) {
+                        Some(ShelfEntry::Book(b)) => Transition::Push(Box::new(BookDetailPage::new(b.id))),
+                        Some(ShelfEntry::Folder { id, .. }) => {
+                            self.folder.push(id);
+                            self.page = 0;
+                            cx.request_redraw(RefreshHint::Ui);
+                            Transition::None
+                        }
                         None => Transition::None,
                     },
                     HitId(id) if id >= ROW_BASE => match self.data.as_ref().and_then(|d| d.books.get((id - ROW_BASE) as usize)) {
@@ -230,20 +328,23 @@ impl ShelfPage {
 
         // cx 整体借用 (封面预取) 必须在创建下面的 `ink` (借用 cx.fonts/cx.glyphs) 之前完成;
         // 预取用的分页算法要和下面绘制时用的完全一致, 否则请求和绘制的书对不上。
-        if cloud_mode {
-            if let Some(Ok(books)) = &self.cloud {
-                let list_bottom = tabs_top - m.pager_h() as i32;
-                let mut y = m.header_h() as i32 + m.margin as i32 / 2;
-                if self.data.as_ref().is_some_and(|d| d.last.is_some()) {
-                    y += (m.touch as f32 * 2.45) as i32 + m.margin as i32 / 2;
-                }
-                y += (m.small * 1.6) as i32;
-                let row_h = m.row_h_cover();
-                let per_page = rows_fit(list_bottom - y, row_h).max(1);
-                let pages = books.len().div_ceil(per_page).max(1);
-                let page = self.page.min(pages - 1);
-                let cover_rect = widgets::cover_slot(&m, Rect::new(0, 0, cx.width, row_h));
-                for book in books.iter().skip(page * per_page).take(per_page) {
+        let in_folder = cloud_mode && !self.folder.is_empty();
+        let show_continue = !in_folder && self.data.as_ref().is_some_and(|d| d.last.is_some());
+        if cloud_mode && matches!(self.cloud, Some(Ok(_))) {
+            let entries = self.entries();
+            let list_bottom = tabs_top - m.pager_h() as i32;
+            let mut y = m.header_h() as i32 + m.margin as i32 / 2;
+            if show_continue {
+                y += (m.touch as f32 * 2.45) as i32 + m.margin as i32 / 2;
+            }
+            y += (m.small * 1.6) as i32;
+            let row_h = m.row_h_cover();
+            let per_page = rows_fit(list_bottom - y, row_h).max(1);
+            let pages = entries.len().div_ceil(per_page).max(1);
+            let page = self.page.min(pages - 1);
+            let cover_rect = widgets::cover_slot(&m, Rect::new(0, 0, cx.width, row_h));
+            for entry in entries.iter().skip(page * per_page).take(per_page) {
+                if let ShelfEntry::Book(book) = entry {
                     self.covers.request(cx, &book.cover, cover_rect.w, cover_rect.h);
                 }
             }
@@ -251,7 +352,14 @@ impl ShelfPage {
 
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let bar = widgets::header(&mut ink, frame, &theme, &m, "书架", &super::status_text(), false, false);
+        let folder_title = match (&self.cloud, self.folder.last()) {
+            (Some(Ok(data)), Some(f)) if in_folder => data.folder_title(f),
+            _ => "书架".to_string(),
+        };
+        let bar = widgets::header(&mut ink, frame, &theme, &m, &folder_title, &super::status_text(), in_folder, false);
+        if in_folder {
+            cx.hits.add(HIT_FOLDER_UP, Rect::new(0, 0, bar.h, bar.h));
+        }
         let side = m.margin as i32;
         let mut y = bar.bottom() + m.margin as i32 / 2;
         let Some(data) = &self.data else {
@@ -259,7 +367,7 @@ impl ShelfPage {
             widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "加载中…", None);
             return;
         };
-        if let Some(last) = data.last.clone() {
+        if let Some(last) = data.last.clone().filter(|_| show_continue || !cloud_mode) {
             let h = (m.touch as f32 * 2.45) as u32;
             let rect = Rect::new(side, y, cx.width - 2 * m.margin, h);
             draw_continue(frame, &mut ink, cx.hits, theme, m, rect, &last);
@@ -267,30 +375,40 @@ impl ShelfPage {
         }
         let list_bottom = tabs_top - m.pager_h() as i32;
         if cloud_mode {
-            ink.text(frame, side, y, "我的书架", m.small, theme.muted);
+            let label = if self.saving { "我的书架 · 正在保存…" } else if in_folder { "文件夹 · 长按书籍可移出" } else { "我的书架 · 长按可移出" };
+            ink.text(frame, side, y, label, m.small, theme.muted);
             y += (m.small * 1.6) as i32;
             frame.fill_rect(Rect::new(side, y - 2, cx.width - 2 * m.margin, 2), theme.foreground);
+            let entries = self.entries();
             match &self.cloud {
                 None if self.cloud_loading => {
                     let area = Rect::new(0, y, cx.width, (tabs_top - y).max(0) as u32);
                     widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "加载中…", None);
                     return;
                 }
-                Some(Ok(books)) if books.is_empty() => {
+                Some(Ok(_)) if entries.is_empty() => {
                     let area = Rect::new(0, y, cx.width, (tabs_top - y).max(0) as u32);
-                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "书架为空", None);
-                    return;
+                    let text = if in_folder { "文件夹是空的" } else { "书架为空\n在书籍详情页点「加入书架」" };
+                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, text, None);
                 }
-                Some(Ok(books)) => {
+                Some(Ok(_)) => {
                     let row_h = m.row_h_cover();
                     let per_page = rows_fit(list_bottom - y, row_h);
-                    let pages = books.len().div_ceil(per_page);
+                    let pages = entries.len().div_ceil(per_page);
                     self.page = self.page.min(pages - 1);
-                    for (row, (index, book)) in books.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
+                    for (row, (index, entry)) in entries.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
                         let r = Rect::new(0, y + row as i32 * row_h as i32, cx.width, row_h);
                         let cover_rect = widgets::cover_slot(&m, r);
-                        let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-                        widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
+                        match entry {
+                            ShelfEntry::Book(book) => {
+                                let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
+                                widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
+                            }
+                            ShelfEntry::Folder { title, count, .. } => {
+                                widgets::list_row_cover(&mut ink, frame, &theme, &m, r, None, title, &format!("文件夹 · {count} 项"), "");
+                                draw_folder_icon(frame, &theme, &m, cover_rect);
+                            }
+                        }
                         cx.hits.add(HitId(ROW_BASE + index as u32), r);
                     }
                     if pages > 1 {
@@ -299,6 +417,14 @@ impl ShelfPage {
                     }
                 }
                 Some(Err(_)) | None => {}
+            }
+            if let Some(confirm) = &self.confirm {
+                let (title, line) = match confirm {
+                    Confirm::RemoveBook { title, .. } => ("从书架移出？".to_string(), title.clone()),
+                    Confirm::DeleteFolder { title, .. } => (format!("删除文件夹「{title}」？"), "其中的书会移到上一层".to_string()),
+                };
+                let ok = if matches!(confirm, Confirm::RemoveBook { .. }) { "移出" } else { "删除" };
+                widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, &title, &[&line], &[("取消", HIT_CANCEL, widgets::ButtonStyle::Secondary), (ok, HIT_CONFIRM, widgets::ButtonStyle::Primary)]);
             }
             return;
         }
@@ -334,6 +460,26 @@ impl ShelfPage {
         }
     }
 
+    /// 当前文件夹层的条目 (云端书架已加载时)。
+    fn entries(&self) -> Vec<ShelfEntry> {
+        match &self.cloud {
+            Some(Ok(data)) => data.level(self.folder.last().map(String::as_str)),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 执行确认过的书架操作 (后台: 拉取最新的表、改一项、整表写回)。
+    fn write(&mut self, cx: &mut Cx<KinNovel>, confirm: Confirm) {
+        self.saving = true;
+        let net = cx.app.net();
+        cx.spawn(move || {
+            ShelfWritten(match confirm {
+                Confirm::RemoveBook { id, .. } => api::shelf_set_book(net.as_ref(), id, false, false).map(|_| "已移出书架".to_string()),
+                Confirm::DeleteFolder { id, .. } => api::shelf_delete_folder(net.as_ref(), &id).map(|_| "已删除文件夹".to_string()),
+            })
+        });
+    }
+
     /// 云端书架加载失败 (断网、服务器故障) 时退回本地缓存, 已缓存的书照样能读。
     fn showing_cloud(&self, cx: &Cx<KinNovel>) -> bool {
         use_cloud(cx) && !matches!(self.cloud, Some(Err(_)))
@@ -341,7 +487,7 @@ impl ShelfPage {
 
     fn turn(&mut self, cx: &mut Cx<KinNovel>, delta: i64) -> Transition<KinNovel> {
         let has_rows = if self.showing_cloud(cx) {
-            self.cloud.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(|v| !v.is_empty())
+            !self.entries().is_empty()
         } else {
             self.data.as_ref().is_some_and(|d| !d.books.is_empty())
         };

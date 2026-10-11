@@ -26,6 +26,7 @@ const HIT_RETRY: HitId = HitId(4);
 const HIT_COMMENTS: HitId = HitId(5);
 const HIT_SERIES: HitId = HitId(6);
 const HIT_AUTHOR: HitId = HitId(7);
+const HIT_SHELF: HitId = HitId(8);
 const HIT_TAG_BASE: u32 = 100;
 
 enum Status {
@@ -36,6 +37,8 @@ enum Status {
 }
 
 struct Loaded(Result<BookInfo, String>);
+/// 这本书在不在书架上 (查询或加入/移出之后)
+struct ShelfState(Result<bool, String>);
 
 /// 继续阅读的目标章节 (优先本地最近阅读, 再找任一章节的本地进度文件, 最后用服务器阅读位置)。
 /// 对照 Python `book.py` 的 `_resume_sort_num` (做了简化: 不区分会话内/云端谁更靠后)。
@@ -78,11 +81,18 @@ pub struct BookDetailPage {
     book_id: i64,
     status: Status,
     covers: CoverCache,
+    /// 书架状态 (登录时才有这个按钮): None = 查询中/写回中
+    on_shelf: Option<bool>,
+    shelf_error: bool,
 }
 
 impl BookDetailPage {
     pub fn new(book_id: i64) -> Self {
-        BookDetailPage { book_id, status: Status::Loading, covers: CoverCache::default() }
+        BookDetailPage { book_id, status: Status::Loading, covers: CoverCache::default(), on_shelf: None, shelf_error: false }
+    }
+
+    fn shelf_button(cx: &Cx<KinNovel>) -> bool {
+        cx.app.signed_in() && (cx.app.net().is_some() || api::fake_mode())
     }
 
     fn load(&mut self, cx: &mut Cx<KinNovel>) {
@@ -117,12 +127,33 @@ impl Page<KinNovel> for BookDetailPage {
             }
             Err(other) => other,
         };
+        let msg = match msg.downcast::<ShelfState>() {
+            Ok(s) => {
+                match s.0 {
+                    Ok(v) => {
+                        self.on_shelf = Some(v);
+                        self.shelf_error = false;
+                    }
+                    Err(e) => {
+                        eprintln!("[book] 书架: {e}");
+                        self.shelf_error = true;
+                    }
+                }
+                cx.request_redraw(RefreshHint::Ui);
+                return;
+            }
+            Err(other) => other,
+        };
         if let Ok(l) = msg.downcast::<Loaded>() {
             self.status = match l.0 {
                 Ok(info) => {
                     // 漫画: 话列表写缓存, 阅读页换话、离线目录用
                     if info.is_comic {
                         crate::comic::ComicBook::from_info(&info).save(&cx.app.paths);
+                    }
+                    if Self::shelf_button(cx) && self.on_shelf.is_none() {
+                        let (net, id) = (cx.app.net(), self.book_id);
+                        cx.spawn(move || ShelfState(api::shelf_contains(net.as_ref(), id)));
                     }
                     Status::Ready(info)
                 }
@@ -148,6 +179,7 @@ impl Page<KinNovel> for BookDetailPage {
             false
         };
 
+        let shelf_button = Self::shelf_button(cx);
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
         let heading = if matches!(&self.status, Status::Ready(info) if info.is_comic) { "漫画详情" } else { "书籍详情" };
         let bar = widgets::header(&mut ink, frame, &theme, &m, heading, &super::status_text(), true, false);
@@ -245,7 +277,7 @@ impl Page<KinNovel> for BookDetailPage {
         let btn_h = m.touch as i32;
         let gap = m.margin as i32 / 3;
         let bottom_y = cx.height as i32 - btn_h - m.margin as i32 / 2;
-        let cols = 3;
+        let cols = if shelf_button { 4 } else { 3 };
         let col_w = (cx.width as i32 - 2 * side - gap * (cols - 1)) / cols;
         let has_chapters = !info.chapters.is_empty();
         let read_label = if resume { "继续阅读" } else { "开始阅读" };
@@ -255,7 +287,20 @@ impl Page<KinNovel> for BookDetailPage {
         let catalog_rect = Rect::new(read_rect.right() + gap, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, catalog_rect, "目录", if has_chapters { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
         cx.hits.add(HIT_CATALOG, catalog_rect).rounded(m.radius).enabled(has_chapters);
-        let comments_rect = Rect::new(catalog_rect.right() + gap, bottom_y, col_w as u32, btn_h as u32);
+        let mut next_x = catalog_rect.right() + gap;
+        if shelf_button {
+            let shelf_rect = Rect::new(next_x, bottom_y, col_w as u32, btn_h as u32);
+            let (label, style) = match (self.on_shelf, self.shelf_error) {
+                (_, true) => ("书架重试", ButtonStyle::Secondary),
+                (None, _) => ("书架…", ButtonStyle::Disabled),
+                (Some(true), _) => ("移出书架", ButtonStyle::Secondary),
+                (Some(false), _) => ("加入书架", ButtonStyle::Secondary),
+            };
+            widgets::button(&mut ink, frame, &theme, &m, shelf_rect, label, style);
+            cx.hits.add(HIT_SHELF, shelf_rect).rounded(m.radius).enabled(self.on_shelf.is_some() || self.shelf_error);
+            next_x = shelf_rect.right() + gap;
+        }
+        let comments_rect = Rect::new(next_x, bottom_y, col_w as u32, btn_h as u32);
         widgets::button(&mut ink, frame, &theme, &m, comments_rect, "评论", ButtonStyle::Secondary);
         cx.hits.add(HIT_COMMENTS, comments_rect).rounded(m.radius);
     }
@@ -297,6 +342,18 @@ impl Page<KinNovel> for BookDetailPage {
                 Transition::Push(Box::new(CatalogPage::new(self.book_id, info.chapters.clone(), current)))
             }
             HIT_COMMENTS => Transition::Push(Box::new(CommentsPage::new("Book", self.book_id))),
+            HIT_SHELF => {
+                let Status::Ready(info) = &self.status else { return Transition::None };
+                let (net, id, comic) = (cx.app.net(), self.book_id, info.is_comic);
+                match self.on_shelf.take() {
+                    // 上次查询失败: 重新查询
+                    None => cx.spawn(move || ShelfState(api::shelf_contains(net.as_ref(), id))),
+                    Some(current) => cx.spawn(move || ShelfState(api::shelf_set_book(net.as_ref(), id, comic, !current))),
+                }
+                self.shelf_error = false;
+                cx.request_redraw(RefreshHint::Ui);
+                Transition::None
+            }
             HIT_SERIES => {
                 let Status::Ready(info) = &self.status else { return Transition::None };
                 if info.series_name.is_empty() {

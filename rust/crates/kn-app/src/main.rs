@@ -189,10 +189,11 @@ fn preview(args: &[String]) {
                 ui.push(Box::new(sleep::SleepPage));
                 i += 1;
             }
-            "--tap" => {
+            "--tap" | "--long" => {
                 let (x, y) = args[i + 1].split_once(',').expect("x,y");
                 let p = (x.parse().unwrap(), y.parse().unwrap());
-                ui.input(&gesture(GestureKind::Tap, p, p));
+                let kind = if args[i] == "--long" { GestureKind::Long } else { GestureKind::Tap };
+                ui.input(&gesture(kind, p, p));
                 i += 2;
             }
             "--swipe" => {
