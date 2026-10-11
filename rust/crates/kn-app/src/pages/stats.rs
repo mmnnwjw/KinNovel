@@ -76,7 +76,9 @@ impl Page<KinNovel> for StatsPage {
         y += (m.small * 1.6) as i32;
         let chart_h = (cx.height as f32 * 0.16) as i32;
         let label_h = (m.tiny * 1.5) as i32;
-        let max = (0..CHART_DAYS).map(|b| day(b).0).max().unwrap_or(0).max(60);
+        let peak = (0..CHART_DAYS).map(|b| day(b).0).max().unwrap_or(0);
+        // 纵轴至少 1 分钟, 读得很少时柱子不会顶满
+        let max = peak.max(60);
         let col_w = inner_w / CHART_DAYS as i32;
         let bar_w = (col_w as f32 * 0.6) as i32;
         let base = y + chart_h;
@@ -93,9 +95,11 @@ impl Page<KinNovel> for StatsPage {
             let (_, d) = day_back(now, back);
             ink.text_centered(frame, Rect::new(side + i as i32 * col_w, base + 4, col_w as u32, label_h as u32), &d.to_string(), m.tiny, if back == 0 { theme.foreground } else { theme.muted });
         }
-        let peak = format!("最多 {}", duration_text(max));
-        let pw = ink.width(&peak, m.tiny).ceil() as i32;
-        ink.text(frame, side + inner_w - pw, y - (m.small * 1.6) as i32, &peak, m.tiny, theme.muted);
+        if peak >= 60 {
+            let peak = format!("最多 {}", duration_text(peak));
+            let pw = ink.width(&peak, m.tiny).ceil() as i32;
+            ink.text(frame, side + inner_w - pw, y - (m.small * 1.6) as i32, &peak, m.tiny, theme.muted);
+        }
         y = base + label_h + side;
 
         // 读得最多的书
