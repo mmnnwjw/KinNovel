@@ -164,6 +164,8 @@ pub struct ReaderPage {
     bookmarks: Vec<Bookmark>,
     /// 控件层进度条的位置 (点按/滑动跳页时换算页号)
     track: Rect,
+    /// 阅读统计计时
+    tracker: crate::stats::Tracker,
 }
 
 impl ReaderPage {
@@ -193,7 +195,12 @@ impl ReaderPage {
             last_write: None,
             bookmarks: Vec::new(),
             track: Rect::new(0, 0, 0, 0),
+            tracker: crate::stats::Tracker::default(),
         }
+    }
+
+    fn stop_tracking(&mut self, cx: &mut Cx<KinNovel>) {
+        self.tracker.stop(&cx.app.paths, self.book_id, &self.chapter.book_name, false);
     }
 
     /// 顶栏高度与正文区域高度 (正文区域从 top 到屏幕底; 底部进度线画在正文的下边距里)。
@@ -403,6 +410,7 @@ impl ReaderPage {
         );
         self.save_progress(cx, true);
         self.prefetch_neighbors(cx);
+        self.tracker.start();
         // 进入阅读器/换章: 正文第一屏闪刷, 清掉上一页面与 "正在打开章节" 的残影
         cx.request_redraw(RefreshHint::Flash);
     }
@@ -572,6 +580,7 @@ impl ReaderPage {
         self.page = target;
         self.note.clear();
         self.save_progress(cx, false);
+        self.tracker.page(&cx.app.paths, self.book_id, &self.chapter.book_name, false);
         // MTK 原生翻页动画 (Python `page_turn_animation`, 默认开): 向后翻内容左移, 向前翻右移
         let swipe = cx.app.config.bool("page_turn_animation", true).then_some(if delta > 0 { SwipeDir::Left } else { SwipeDir::Right });
         cx.request_turn(swipe);
@@ -668,6 +677,7 @@ impl ReaderPage {
     /// 在本实例里打开另一章 (目录/书签跳转), `at` 为要停的位置 (None = 阅读进度)。
     fn load_chapter(&mut self, cx: &mut Cx<KinNovel>, sort_num: i64, at: Option<Progress>) {
         self.save_progress(cx, true);
+        self.stop_tracking(cx);
         self.sort_num = sort_num;
         self.entry = Entry::Resume;
         self.resume_override = at;
@@ -996,6 +1006,9 @@ impl Page<KinNovel> for ReaderPage {
         self.next_leave = Leave::Exit;
         if returning {
             self.on_return(cx);
+            if matches!(self.status, Status::Ready) {
+                self.tracker.start();
+            }
         } else if matches!(self.status, Status::Loading) {
             self.start_load(cx);
         }
@@ -1003,6 +1016,7 @@ impl Page<KinNovel> for ReaderPage {
 
     fn leave(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
+        self.stop_tracking(cx);
         match self.next_leave {
             Leave::Exit => self.upload_position(cx, 0),
             Leave::Chapter => self.upload_position(cx, crate::net::BACKGROUND_PRIORITY),
@@ -1012,6 +1026,7 @@ impl Page<KinNovel> for ReaderPage {
 
     fn on_suspend(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
+        self.stop_tracking(cx);
         self.upload_position(cx, 0);
     }
 

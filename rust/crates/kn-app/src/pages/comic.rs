@@ -121,6 +121,8 @@ pub struct ComicReaderPage {
     next: Option<NextPrefetched>,
     next_leave: Leave,
     last_saved: Option<Instant>,
+    /// 阅读统计计时
+    tracker: crate::stats::Tracker,
 }
 
 impl ComicReaderPage {
@@ -143,6 +145,7 @@ impl ComicReaderPage {
             next: None,
             next_leave: Leave::Exit,
             last_saved: None,
+            tracker: crate::stats::Tracker::default(),
         }
     }
 
@@ -428,6 +431,8 @@ impl ComicReaderPage {
         }
         self.page = target as usize;
         self.note.clear();
+        let title = self.book_title();
+        self.tracker.page(&cx.app.paths, self.book_id, &title, true);
         let page = self.page as i64;
         self.focus.store(page, Ordering::Relaxed);
         let keep = Self::keep_radius(cx);
@@ -689,6 +694,7 @@ impl Page<KinNovel> for ComicReaderPage {
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
         self.next_leave = Leave::Exit;
+        self.tracker.start();
         if returning || !matches!(self.status, Status::Loading) {
             return;
         }
@@ -706,6 +712,8 @@ impl Page<KinNovel> for ComicReaderPage {
 
     fn leave(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
+        let title = self.book_title();
+        self.tracker.stop(&cx.app.paths, self.book_id, &title, true);
         if self.next_leave != Leave::Child {
             // 排队中的预取全部放弃
             self.focus.store(FOCUS_GONE, Ordering::Relaxed);
@@ -719,6 +727,8 @@ impl Page<KinNovel> for ComicReaderPage {
 
     fn on_suspend(&mut self, cx: &mut Cx<KinNovel>) {
         self.save_progress(cx, true);
+        let title = self.book_title();
+        self.tracker.stop(&cx.app.paths, self.book_id, &title, true);
         self.upload_position(cx, 0);
     }
 

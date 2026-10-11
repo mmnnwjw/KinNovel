@@ -27,6 +27,7 @@ enum Row {
     Notifications,
     Announcements,
     Shop,
+    Stats,
     Settings,
     Storage,
     About,
@@ -39,6 +40,7 @@ impl Row {
             Row::Notifications => "消息通知",
             Row::Announcements => "公告",
             Row::Shop => "积分商城",
+            Row::Stats => "阅读统计",
             Row::Settings => "设置",
             Row::Storage => "存储空间",
             Row::About => "关于 KinNovel",
@@ -52,7 +54,7 @@ fn rows(logged_in: bool) -> Vec<Row> {
     if logged_in {
         rows.extend([Row::Notifications, Row::Shop]);
     }
-    rows.extend([Row::Announcements, Row::Settings, Row::Storage, Row::About, Row::Exit]);
+    rows.extend([Row::Announcements, Row::Stats, Row::Settings, Row::Storage, Row::About, Row::Exit]);
     rows
 }
 
@@ -154,7 +156,8 @@ impl Page<KinNovel> for MePage {
         y = card.bottom() + m.margin as i32 / 3;
 
         // 入口列表
-        let entry_h = m.row_h() as i32;
+        // 入口较多 (登录后 8 行), 行高比普通列表略小, 仍 ≥ 1 个触摸单位
+        let entry_h = (m.touch as f32 * 1.12) as i32;
         for (i, row) in rows(logged_in).into_iter().enumerate() {
             if y + entry_h > tabs_top {
                 break;
@@ -274,6 +277,7 @@ impl Page<KinNovel> for MePage {
         match hit {
             HitId(id) if id >= ROW_BASE => match rows(logged_in(cx)).get((id - ROW_BASE) as usize) {
                 Some(Row::Settings) => return Transition::Push(Box::new(super::settings::SettingsPage::default())),
+                Some(Row::Stats) => return Transition::Push(Box::new(super::stats::StatsPage::default())),
                 Some(Row::Storage) => return Transition::Push(Box::new(super::storage::StoragePage::default())),
                 Some(Row::Notifications) => return Transition::Push(Box::new(super::notify::NotificationsPage::new())),
                 Some(Row::Announcements) => return Transition::Push(Box::new(super::announce::AnnouncementsPage::new())),

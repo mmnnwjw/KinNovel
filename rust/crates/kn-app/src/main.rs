@@ -10,6 +10,7 @@ mod crash;
 mod covers;
 mod net;
 mod pages;
+mod stats;
 mod store;
 mod tz;
 mod update;

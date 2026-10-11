@@ -19,6 +19,7 @@ pub mod series;
 pub mod settings;
 pub mod shelf;
 pub mod shop;
+pub mod stats;
 pub mod storage;
 
 use kn_render::Bitmap;
