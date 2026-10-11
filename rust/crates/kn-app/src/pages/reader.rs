@@ -221,6 +221,7 @@ impl ReaderPage {
             line_spacing: c.float("line_spacing", 1.42),
             margin: c.int("reader_margin", default_margin(cx.app)),
             first_line_indent: c.bool("first_line_indent", true),
+            paragraph_spacing: c.float("paragraph_spacing", 0.2),
             // 整页插图 (封面、彩页) 占满一页; 放不下当前页剩余空间时另起一页
             image_max_ratio: 1.0,
             unknown_image_full: true,

@@ -1,7 +1,7 @@
 //! KinNovel 1.0 入口。
 //!
 //! - 设备上: `kinnovel` (由 KUAL 启动脚本拉起, 脚本负责暂停/恢复框架进程, 并设置 `KN_APP_DIR`)。
-//! - 主机上: `kinnovel --preview out.pgm [--read BOOK SORT] [--tap X,Y]... [--swipe left|right|up|down]...`
+//! - 主机上: `kinnovel --preview out.pgm [--read BOOK SORT] [--comic BOOK CHAPTER] [--sleep] [--tap X,Y]... [--long X,Y]... [--swipe left|right|up|down]...`
 //!   用真实页面逻辑 (无显示/输入设备) 渲染最后一帧; `KN_APP_DIR` 指向一份设备缓存的拷贝。
 
 mod api;

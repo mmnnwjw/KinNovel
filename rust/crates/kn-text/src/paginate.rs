@@ -51,6 +51,8 @@ pub struct LayoutParams {
     pub line_spacing: f64,
     pub margin: i64,
     pub first_line_indent: bool,
+    /// 段落之后的间距, 以行高为单位 (Python 版固定 0.22)
+    pub paragraph_spacing: f64,
     /// 插图最大高度占可用高度的比例。Python 版是 0.62 (金标准测试用这个);
     /// 1.0 版阅读器用 1.0, 封面/彩页这类整页插图可以占满一页。
     pub image_max_ratio: f64,
@@ -68,6 +70,7 @@ impl Default for LayoutParams {
             line_spacing: 1.42,
             margin: 34,
             first_line_indent: true,
+            paragraph_spacing: PYTHON_PARAGRAPH_SPACING,
             image_max_ratio: PYTHON_IMAGE_MAX_RATIO,
             unknown_image_full: false,
         }
@@ -76,6 +79,8 @@ impl Default for LayoutParams {
 
 /// Python 版 `reader.py` 的插图高度上限比例。
 pub const PYTHON_IMAGE_MAX_RATIO: f64 = 0.62;
+/// Python 版的段后间距 (行高的倍数)。
+pub const PYTHON_PARAGRAPH_SPACING: f64 = 0.22;
 
 const FIRST_LINE_INDENT_PREFIX: &str = "\u{3000}\u{3000}";
 
@@ -225,7 +230,7 @@ impl Paginator {
                 self.add_line(m, &block.text, size, false, gap_before, gap_after, block.offset, &path);
             }
             BlockKind::Text => {
-                let gap_after = (self.line_height as f64 * 0.22) as i64;
+                let gap_after = (self.line_height as f64 * self.params.paragraph_spacing.clamp(0.0, 3.0)) as i64;
                 self.add_line(
                     m,
                     &block.text,
