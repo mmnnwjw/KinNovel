@@ -18,7 +18,7 @@ jobs:
 
       - name: Install Rust (+ Kindle target)
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component llvm-tools
           rustup target add armv7-unknown-linux-musleabihf
 
       - name: Install zig + cargo-zigbuild
@@ -27,10 +27,10 @@ jobs:
           cargo install cargo-zigbuild --locked
 
       - name: Unit tests (pure-Rust crates)
-        run: cargo test -p kn-render -p kn-text -p kn-net
+        run: cargo test -p kn-render -p kn-text -p kn-net -p kn-ime
 
       - name: Device binary (armv7 musl, static, FBInk)
-        run: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p kn-app
+        run: sh build.sh kindle
 
       - name: Upload device binary
         uses: actions/upload-artifact@v4

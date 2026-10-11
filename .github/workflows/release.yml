@@ -1,0 +1,64 @@
+name: Release
+
+# 推送 vX.Y.Z 标签: 测试 → 构建设备程序 → 打包 → 创建 (或更新) GitHub Release 并上传 zip。
+# 说明文字取 docs/releases/vX.Y.Z.md, 没有就让 GitHub 按提交生成。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with the FBInk submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust (+ Kindle target, llvm-tools for objcopy)
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools
+          rustup target add armv7-unknown-linux-musleabihf
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          python -m pip install ziglang
+          cargo install cargo-zigbuild --locked
+
+      - name: Tag matches the version
+        run: |
+          v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' rust/Cargo.toml | head -n 1)
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != rust/Cargo.toml $v"; exit 1; }
+
+      - name: Credential scan
+        run: python tools/credential_scan.py
+
+      - name: Unit tests (pure-Rust crates)
+        working-directory: rust
+        run: cargo test -p kn-render -p kn-text -p kn-net -p kn-ime
+
+      - name: Device binary + release zip
+        run: |
+          sh rust/build.sh kindle
+          python tools/package_release.py --no-build
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          zip="build/KinNovel-$tag.zip"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$zip" --clobber
+          elif [ -f "docs/releases/$tag.md" ]; then
+            gh release create "$tag" "$zip" --title "KinNovel ${tag#v}" --notes-file "docs/releases/$tag.md"
+          else
+            gh release create "$tag" "$zip" --title "KinNovel ${tag#v}" --generate-notes
+          fi

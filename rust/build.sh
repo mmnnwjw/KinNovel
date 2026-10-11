@@ -2,7 +2,9 @@
 # 交叉编译到 Kindle (armv7 hard-float, 静态 musl)。主机测试: ./build.sh host-test [cargo test 参数]
 set -e
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_ZIGBUILD_ZIG_PATH="$(python -c "import ziglang,os;print(os.path.join(os.path.dirname(ziglang.__file__),'zig.exe'))")"
+# zig 来自 pip 的 ziglang 包 (Windows 上是 zig.exe; Linux CI 上是 zig, 也可以直接用 PATH 里的)
+PYTHON=$(command -v python || command -v python3)
+export CARGO_ZIGBUILD_ZIG_PATH="$("$PYTHON" -c "import ziglang,os;d=os.path.dirname(ziglang.__file__);print(os.path.join(d,'zig.exe' if os.name=='nt' else 'zig'))")"
 cd "$(dirname "$0")"
 case "${1:-kindle}" in
   kindle)
