@@ -304,6 +304,7 @@ impl ReaderPage {
             page: self.page,
             pages: self.pages.len(),
             time: store::unix_now(),
+            cover: crate::sleep::known_cover(self.book_id).unwrap_or_default(),
         };
         if let Err(e) = store::save_last_read(&cx.app.paths, &last) {
             eprintln!("[reader] 最近阅读保存失败: {e}");

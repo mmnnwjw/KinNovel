@@ -38,6 +38,11 @@ pub fn note_cover(book_id: i64, url: &str) {
     }
 }
 
+/// 书目接口里见过的封面地址。
+pub fn known_cover(book_id: i64) -> Option<String> {
+    covers().lock().unwrap_or_else(|e| e.into_inner()).get(&book_id).cloned()
+}
+
 fn cover_file(paths: &Paths) -> std::path::PathBuf {
     paths.data_dir().join("sleep_cover.json")
 }

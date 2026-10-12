@@ -38,7 +38,7 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 
 - The app opens on **书架** (shelf). There is no menu grid any more.
 - Four top-level tabs; switching tabs replaces the stack root (`Transition::Home`-like), never deepens it.
-  - **书架** — "继续阅读" card (last book/chapter/page, one tap → reader at the saved position), then the user's shelf (cloud shelf when logged in, offline cache otherwise).
+  - **书架** — "继续阅读" card (cover on the left — the catalog cover URL remembered with the last-read record, else the first image of the cached first chapter; last book/chapter/page; one tap → reader at the saved position), then the user's shelf (cloud shelf when logged in, offline cache otherwise).
     Cloud folders show as rows with a folder icon; tapping one opens it in place (header gets a back arrow to the parent level, the stack does not grow).
     Long press a book → confirm "移出书架"; long press a folder → confirm delete (its books move up one level). Every write fetches the shelf fresh,
     changes one entry and saves the whole table (`SaveBookShelf` overwrites); the result shows as a toast.

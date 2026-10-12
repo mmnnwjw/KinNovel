@@ -284,6 +284,8 @@ pub struct LastRead {
     pub pages: usize,
     /// Unix 秒
     pub time: i64,
+    /// 封面地址 (书目接口给的; 不知道时为空, 书架卡片改用第一章的卷首图)
+    pub cover: String,
 }
 
 impl Paths {
@@ -304,14 +306,21 @@ pub fn load_last_read(paths: &Paths) -> Option<LastRead> {
         page: as_i64(v.get("page")).max(0) as usize,
         pages: as_i64(v.get("pages")).max(0) as usize,
         time: as_i64(v.get("time")),
+        cover: as_string(v.get("cover")),
     })
     .filter(|r| r.book_id > 0 && if r.comic { r.chapter_id > 0 } else { r.sort_num > 0 })
 }
 
+/// 保存最近阅读。`cover` 为空时沿用上一条记录里同一本书的封面地址。
 pub fn save_last_read(paths: &Paths, r: &LastRead) -> std::io::Result<()> {
+    let cover = if r.cover.is_empty() {
+        load_last_read(paths).filter(|old| old.book_id == r.book_id).map(|old| old.cover).unwrap_or_default()
+    } else {
+        r.cover.clone()
+    };
     let v = serde_json::json!({
         "book_id": r.book_id, "sort_num": r.sort_num, "comic": r.comic, "chapter_id": r.chapter_id, "book_name": r.book_name,
-        "chapter_title": r.chapter_title, "page": r.page, "pages": r.pages, "time": r.time,
+        "chapter_title": r.chapter_title, "page": r.page, "pages": r.pages, "time": r.time, "cover": cover,
     });
     atomic_write(&paths.last_read_file(), v.to_string().as_bytes())
 }
@@ -398,6 +407,16 @@ pub fn touch(path: &Path) {
 }
 
 /// 缓存目录里的章节 (书名、章节名、序号), 供离线书架使用。按书名、序号排序。
+/// 一本书缓存的第一章 (序号 1) 里的第一张图 (卷首图, 通常就是封面); 没缓存或没有图返回 None。
+pub fn first_image_of_book(paths: &Paths, book_id: i64) -> Option<String> {
+    let (_, file) = list_cached_chapters(paths).into_iter().find(|(c, _)| c.book_id == book_id && c.sort_num == 1)?;
+    let chapter = Chapter::parse(&std::fs::read(file).ok()?, true)?;
+    kn_text::extract_blocks(&chapter.content, SITE_BASE)
+        .into_iter()
+        .find(|b| b.kind == kn_text::BlockKind::Image && !b.source_url.is_empty())
+        .map(|b| b.source_url)
+}
+
 pub fn list_cached_chapters(paths: &Paths) -> Vec<(Chapter, PathBuf)> {
     let mut out = Vec::new();
     let Ok(dir) = std::fs::read_dir(paths.cache_dir().join("content")) else {

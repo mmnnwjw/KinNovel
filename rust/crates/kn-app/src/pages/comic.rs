@@ -508,6 +508,7 @@ impl ComicReaderPage {
             page: self.page,
             pages: self.total(),
             time: now,
+            cover: crate::sleep::known_cover(self.book_id).unwrap_or_default(),
         };
         if let Err(e) = store::save_last_read(&cx.app.paths, &last) {
             eprintln!("[comic] 最近阅读保存失败: {e}");

@@ -42,6 +42,8 @@ struct CachedBook {
 
 struct Loaded {
     last: Option<LastRead>,
+    /// 继续阅读卡片的封面: 记录里的封面地址, 没有就用第一章的卷首图
+    last_cover: String,
     books: Vec<CachedBook>,
 }
 
@@ -57,7 +59,23 @@ fn load(paths: &store::Paths) -> Loaded {
     if let Some(l) = &last {
         books.sort_by_key(|b| b.book_id != l.book_id);
     }
-    Loaded { last, books }
+    let last_cover = match &last {
+        Some(l) if !l.cover.is_empty() => l.cover.clone(),
+        Some(l) => crate::sleep::known_cover(l.book_id).or_else(|| store::first_image_of_book(paths, l.book_id)).unwrap_or_default(),
+        None => String::new(),
+    };
+    Loaded { last, last_cover, books }
+}
+
+/// 继续阅读卡片的高度与其中封面的位置 (卡片内边距之内, 宽高比 0.72)。
+fn continue_layout(m: &kn_ui::widgets::Metrics, rect: Rect) -> Rect {
+    let pad = m.margin as i32 / 2 + 8;
+    let h = (rect.h as i32 - 2 * pad).max(1);
+    Rect::new(rect.x + pad, rect.y + pad, ((h as f32) * 0.72) as u32, h as u32)
+}
+
+fn continue_h(m: &kn_ui::widgets::Metrics) -> u32 {
+    (m.touch as f32 * 2.45) as u32
 }
 
 /// 列表分页: 可用高度里放得下几行。
@@ -110,18 +128,33 @@ fn draw_folder_icon(frame: &mut Bitmap, theme: &kn_ui::Theme, m: &kn_ui::widgets
 }
 
 /// "继续阅读" 卡片 (整张卡片可点)。
-fn draw_continue(frame: &mut Bitmap, ink: &mut Ink, hits: &mut kn_ui::Hits, theme: kn_ui::Theme, m: kn_ui::widgets::Metrics, rect: Rect, last: &LastRead) {
+/// 有封面地址时左侧画封面 (未加载好是占位框), 文字右移。
+#[allow(clippy::too_many_arguments)]
+fn draw_continue(frame: &mut Bitmap, ink: &mut Ink, hits: &mut kn_ui::Hits, theme: kn_ui::Theme, m: kn_ui::widgets::Metrics, rect: Rect, last: &LastRead, cover: Option<Option<&Bitmap>>) {
     widgets::card(frame, &theme, &m, rect);
     let pad = m.margin as i32 / 2 + 8;
-    let inner = rect.w as i32 - 2 * pad;
+    let mut left = rect.x + pad;
+    if let Some(img) = cover {
+        let slot = continue_layout(&m, rect);
+        match img {
+            Some(img) => {
+                let dx = slot.x + (slot.w as i32 - img.width() as i32) / 2;
+                let dy = slot.y + (slot.h as i32 - img.height() as i32) / 2;
+                frame.blit(img, img.bounds(), dx, dy);
+            }
+            None => crate::covers::placeholder(frame, &theme, &m, slot),
+        }
+        left = slot.right() + pad;
+    }
+    let inner = rect.right() - pad - left;
     let mut y = rect.y + pad;
-    ink.text(frame, rect.x + pad, y, "继续阅读", m.tiny, theme.muted);
+    ink.text(frame, left, y, "继续阅读", m.tiny, theme.muted);
     let when = super::relative_time(last.time);
     let when_w = ink.width(&when, m.tiny).ceil() as i32;
     ink.text(frame, rect.right() - pad - when_w, y, &when, m.tiny, theme.muted);
     y += (m.tiny * 1.5) as i32;
     let name = ink.fit(&last.book_name, m.title, inner as f32);
-    ink.text(frame, rect.x + pad, y, &name, m.title, theme.foreground);
+    ink.text(frame, left, y, &name, m.title, theme.foreground);
     y += (m.title * 1.35) as i32;
     // 漫画的话名通常自带 "第N话", 不再加前缀; 页码直接写出来 (漫画没有章内百分比的概念)
     let chapter = if last.comic {
@@ -131,11 +164,11 @@ fn draw_continue(frame: &mut Bitmap, ink: &mut Ink, hits: &mut kn_ui::Hits, them
         format!("第 {} 章 · {}", last.sort_num, last.chapter_title)
     };
     let chapter = ink.fit(&chapter, m.small, inner as f32);
-    ink.text(frame, rect.x + pad, y, &chapter, m.small, theme.foreground);
+    ink.text(frame, left, y, &chapter, m.small, theme.foreground);
     y += (m.small * 1.5) as i32;
     // 章内进度条
     let track_h = (8.0 * m.scale).max(6.0) as u32;
-    let track = Rect::new(rect.x + pad, y + 6, inner as u32, track_h);
+    let track = Rect::new(left, y + 6, inner as u32, track_h);
     frame.rounded_rect(track, track_h / 2, Some(theme.background), Some(theme.mid), 2);
     if last.pages > 0 {
         let filled = (inner as f32 * (last.page + 1) as f32 / last.pages as f32).max(track_h as f32) as u32;
@@ -335,7 +368,7 @@ impl ShelfPage {
             let list_bottom = tabs_top - m.pager_h() as i32;
             let mut y = m.header_h() as i32 + m.margin as i32 / 2;
             if show_continue {
-                y += (m.touch as f32 * 2.45) as i32 + m.margin as i32 / 2;
+                y += continue_h(&m) as i32 + m.margin as i32 / 2;
             }
             y += (m.small * 1.6) as i32;
             let row_h = m.row_h_cover();
@@ -347,6 +380,15 @@ impl ShelfPage {
                 if let ShelfEntry::Book(book) = entry {
                     self.covers.request(cx, &book.cover, cover_rect.w, cover_rect.h);
                 }
+            }
+        }
+
+        // 继续阅读卡片的封面 (与下面绘制时的位置一致)
+        let continue_rect = Rect::new(m.margin as i32, m.header_h() as i32 + m.margin as i32 / 2, cx.width - 2 * m.margin, continue_h(&m));
+        let continue_slot = continue_layout(&m, continue_rect);
+        if let Some(data) = &self.data {
+            if data.last.is_some() && !data.last_cover.is_empty() {
+                self.covers.request(cx, &data.last_cover, continue_slot.w, continue_slot.h);
             }
         }
 
@@ -368,9 +410,9 @@ impl ShelfPage {
             return;
         };
         if let Some(last) = data.last.clone().filter(|_| show_continue || !cloud_mode) {
-            let h = (m.touch as f32 * 2.45) as u32;
-            let rect = Rect::new(side, y, cx.width - 2 * m.margin, h);
-            draw_continue(frame, &mut ink, cx.hits, theme, m, rect, &last);
+            let rect = Rect::new(side, y, cx.width - 2 * m.margin, continue_h(&m));
+            let cover = (!data.last_cover.is_empty()).then(|| self.covers.get(&data.last_cover, continue_slot.w, continue_slot.h));
+            draw_continue(frame, &mut ink, cx.hits, theme, m, rect, &last, cover);
             y = rect.bottom() + m.margin as i32 / 2;
         }
         let list_bottom = tabs_top - m.pager_h() as i32;
