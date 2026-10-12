@@ -98,7 +98,9 @@ cd KinNovel/rust
 
 构建需要 Rust、[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)，以及 pip 安装的 `ziglang`。推送 `vX.Y.Z` 标签后，GitHub Actions 会自动构建并发布 Release。
 
-早先的 Python 版本保存在 [`legacy`](https://github.com/mmnnwjw/KinNovel/tree/legacy) 分支。欢迎提交 Pull Request。
+早先的 Python 版本保存在 [`legacy`](https://github.com/mmnnwjw/KinNovel/tree/legacy) 分支。
+
+欢迎提交 Pull Request。
 
 ## 计划
 
