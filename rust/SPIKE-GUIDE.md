@@ -1,4 +1,8 @@
-# Rust rewrite — Phase 0 spike guide (shared by all spike tasks)
+# Rust rewrite — Phase 0 spike guide (historical)
+
+> Phase 0 is finished (results in `DESIGN.md`). This file is kept as a record of how the `rust/spike-*`
+> crates were built and tested; it is not a guide for current work. The Python files it mentions are now
+> only on the `legacy` branch.
 
 Goal of Phase 0: prove each risky piece of the native stack works **on the real Kindle**
 before the rewrite starts. Each spike is a small standalone cargo crate under `rust/spike-*`.
@@ -23,15 +27,15 @@ cargo zigbuild --release --target armv7-unknown-linux-musleabihf
 - Release profile for spikes: `opt-level = 3`, `lto = true`, `strip = true` is fine.
 
 ## Device access
-- Helper: `python E:/Temp/claude/E--Downloads-KinNovel/ae308a91-c8a1-42b1-93ab-656c7bd2a163/scratchpad/kssh.py run "<cmd>" [timeout_s]`,
-  `... kssh.py put <local> <remote>`, `... kssh.py get <remote> <local>` (SSH root@192.168.1.6:2222, empty password).
+- SSH as root to the test device (paramiko; the device has no SFTP subsystem, so upload with
+  `exec_command("cat > path")`). A small local helper wrapped `run` / `put` / `get`.
 - **Always `export MSYS_NO_PATHCONV=1`** before calling it, and give local paths in Windows form
   (`E:/Downloads/...`), remote paths in POSIX form (`/tmp/...`).
 - Put binaries in `/tmp/` on the device (tmpfs; `/mnt/us` is vfat — no exec bit). `chmod +x` in /tmp works.
-- Do NOT modify `/mnt/us/extensions/kinnovel` (the installed Python app) and don't leave processes running.
+- Do NOT modify `/mnt/us/extensions/kinnovel` (the installed app) and don't leave processes running.
 
 ## Screen ownership (only the display spike needs this)
-The Kindle framework (awesome/cvm) owns the framebuffer. The Python app's `bin/start.sh` shows how to
+The Kindle framework (awesome/cvm) owns the framebuffer. The Python app's `bin/start.sh` (branch `legacy`; today `bin/kinnovel.sh`) shows how to
 take it over: find PIDs holding `/dev/fb0`, `kill -STOP` them, save a snapshot, run, then restore
 snapshot + `kill -CONT` + `lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home`.
 Write your own small wrapper script based on it (in /tmp), always restoring on exit (trap).
@@ -39,7 +43,7 @@ Write your own small wrapper script based on it (in /tmp), always restoring on e
 ## Network etiquette (LightNovelShelf API)
 The test account can get banned. **At most 3 HTTP/WS requests per spike run, ≥ 6 s apart**, and
 prefer unauthenticated endpoints. Never print or commit credentials.
-Reference implementation of the protocol: `bin/src/kinnovel/transport.py` and `api.py`.
+Reference implementation of the protocol: `bin/src/kinnovel/transport.py` and `api.py` (branch `legacy`).
 
 ## Reporting
 Each spike: commit nothing (leave files in `rust/spike-<name>/`, add `target/` to a local .gitignore),

@@ -1,9 +1,9 @@
-# KinNovel 1.0 — UI design
+# KinNovel — UI design
 
-The Rust rewrite gets a new interface (decided by the user: layouts are redesigned, not ported). Goals, in order:
+The Rust implementation (1.x) has its own interface (decided by the user: layouts are redesigned, not ported). Goals, in order:
 **operable on e-ink** (big targets, no scrolling, few full refreshes) → **fast to the text** (one tap to resume reading) → **calm and legible** (black on white, generous whitespace, one accent: solid black).
 
-Baseline: KPW5, 1236 × 1648 px, 300 ppi. All sizes below are at that baseline and scale with `Metrics::for_screen` (0.75–1.15).
+Baseline: KPW5, 1236 × 1648 px, 300 ppi. All sizes below are at that baseline and scale with `Metrics::for_screen` (0.45–1.15, so 600 × 800 and 758 × 1024 screens fit). Reader font size and margins scale by ppi instead.
 
 ## Tokens (`kn_ui::widgets::Metrics`, `kn_ui::Theme`)
 
@@ -39,9 +39,13 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - The app opens on **书架** (shelf). There is no menu grid any more.
 - Four top-level tabs; switching tabs replaces the stack root (`Transition::Home`-like), never deepens it.
   - **书架** — "继续阅读" card (last book/chapter/page, one tap → reader at the saved position), then the user's shelf (cloud shelf when logged in, offline cache otherwise).
+    Cloud folders show as rows with a folder icon; tapping one opens it in place (header gets a back arrow to the parent level, the stack does not grow).
+    Long press a book → confirm "移出书架"; long press a folder → confirm delete (its books move up one level). Every write fetches the shelf fresh,
+    changes one entry and saves the whole table (`SaveBookShelf` overwrites); the result shows as a toast.
   - **历史** — reading history (cloud + local), newest first; segmented 小说 / 漫画 (comic history is aggregated by series, like the web client).
-  - **发现** — segmented control: 最新 / 排行 / 分类 / 漫画 (second row: 日榜/周榜/月榜 for 排行, 最近更新/上架时间/总点击量 for 漫画); search is not offered (no keyboard).
-  - **我的** — account card (login state, sign-in), settings, notifications, announcements, about, exit.
+  - **发现** — segmented control: 最新 / 排行 / 分类 / 漫画 (second row: 日榜/周榜/月榜 for 排行, 最近更新/上架时间/总点击量 for 漫画); a magnifier in the header opens **搜索**: 小说 / 漫画 tabs, modes 模糊 / 精确 / 书名 / 作者 / 系列 / 标签, recent searches, and the on-screen keyboard (en + pinyin, `kn_ui::keyboard` + `kn-ime`). The input field sits right above the keyboard so a keystroke refreshes only the lower half.
+  - **我的** — account card (login state, sign-in; the account itself is configured in `bin/config.json`) and the entry list below.
+- Book detail: cover, meta, intro, action row 开始/继续阅读 · 目录 · 加入书架 / 移出书架 (logged in) · 评论; author and each tag start a search.
 - Pushed pages (book detail, catalog, series, settings sub-pages, reader) show a back arrow in the header and **no tab bar**.
 - The reader is full-screen; its overlay menu has back + home (home = shelf).
   Under the menu header (novel and comic reader alike) a quick-light panel: rows 亮度 / 色温 = value · − · slider · ＋
@@ -51,6 +55,9 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - Novel reader: taps on the thin status band at the top (chapter · time/battery · page) do nothing (no accidental turns).
   Menu header = back · book title · bookmark ribbon (outline / filled = toggle a bookmark on this page) · home.
   The chapter progress bar in the bottom panel is a slider (tap or swipe → page in the chapter, whole chapter laid out first).
+  Illustrations: only the cover (first image of the volume's first chapter, with no body text before it) fills a page;
+  every other image is laid out with its real size (the CDN URL carries `size=WxH`), at most 62 % of the text area high,
+  and flows with the text. Images narrower than half the text width (gaiji standing in for rare characters) keep their natural size.
   A bookmarked page shows a small filled ribbon hanging from the top edge in the right margin.
   目录 from the reader = "目录与书签": segmented 目录 / 书签 (n); bookmark rows = chapter title, excerpt (drawn with the
   chapter's obfuscation font, which is remembered per bookmark), relative time; long press → delete dialog.

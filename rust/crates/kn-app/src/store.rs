@@ -6,7 +6,7 @@
 //! - 字体 `cache/fonts/sha256(absolute_url(api_server, Font)).woff2`; 解码后的 TTF 另存为 `<同名>.ttf`
 //!   (WOFF2 解码在设备上要 ~350 ms, 只做一次)
 //!
-//! 以后会拆成 kn-store crate (Phase 3, 连同会话与网络缓存)。
+//! 1.x 新增、Python 版没有的数据 (书签、阅读统计、更新检查、休眠封面) 放在 `data/` (见 `userdata.rs` 等), 不随缓存清理。
 
 use std::path::{Path, PathBuf};
 

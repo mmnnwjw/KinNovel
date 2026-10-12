@@ -169,15 +169,28 @@ pub fn image_bytes(paths: &Paths, net: Option<&Client>, url: &str, height: u32) 
         store::touch(&file);
         return Ok(Some(bytes));
     }
-    let Some(net) = net else { return Ok(None) };
+    let Some(net) = net else { return Ok(any_cached_size(paths, url)) };
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Ok(None);
     }
-    let bytes = net.download(&scaled_image_url(url, height), IMAGE_LIMIT).map_err(|e| e.to_string())?;
+    let bytes = match net.download(&scaled_image_url(url, height), IMAGE_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(e) => return any_cached_size(paths, url).map(Some).ok_or_else(|| e.to_string()),
+    };
     if let Err(e) = store::atomic_write(&file, &bytes) {
         eprintln!("[net] 图片缓存写入失败: {e}");
     }
     Ok(Some(bytes))
+}
+
+/// 同一张图缓存过的其它尺寸 (大的优先): 离线或下载失败时用, 例如排版改动后插图换了尺寸档位。
+fn any_cached_size(paths: &Paths, url: &str) -> Option<Vec<u8>> {
+    kn_render::HEIGHT_BUCKETS.iter().rev().find_map(|&h| {
+        let file = paths.image_file(url, h);
+        let bytes = std::fs::read(&file).ok()?;
+        store::touch(&file);
+        Some(bytes)
+    })
 }
 
 /// CDN 能否给出比阅读页所用版本更高的分辨率: 只有带 `size=` 的站内图片支持缩放参数,

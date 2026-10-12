@@ -210,7 +210,7 @@ impl ReaderPage {
         (top, height - top as u32)
     }
 
-    fn layout_params(cx: &Cx<KinNovel>) -> LayoutParams {
+    fn layout_params(cx: &Cx<KinNovel>, sort_num: i64) -> LayoutParams {
         let (_, content_h) = Self::geometry(cx.width, cx.height);
         let c = &cx.app.config;
         let (min_font, max_font, default_font, _) = font_range(cx.app);
@@ -222,9 +222,11 @@ impl ReaderPage {
             margin: c.int("reader_margin", default_margin(cx.app)),
             first_line_indent: c.bool("first_line_indent", true),
             paragraph_spacing: c.float("paragraph_spacing", 0.2),
-            // 整页插图 (封面、彩页) 占满一页; 放不下当前页剩余空间时另起一页
-            image_max_ratio: 1.0,
-            unknown_image_full: true,
+            // 只有封面 (每卷第一章开头的第一张图) 占满一页; 彩页和插图按真实尺寸与正文混排,
+            // 高度不超过正文区的 62% (同 Python 版), 放不下当前页剩余空间时另起一页
+            image_max_ratio: kn_text::PYTHON_IMAGE_MAX_RATIO,
+            cover_full_page: sort_num == 1,
+            real_image_size: true,
         }
     }
 
@@ -256,7 +258,7 @@ impl ReaderPage {
 
     /// 从头开始分页 (首次加载、字号变化)。
     fn restart_layout(&mut self, cx: &mut Cx<KinNovel>) {
-        let params = Self::layout_params(cx);
+        let params = Self::layout_params(cx, self.sort_num);
         self.paginator = Some(Paginator::new(self.blocks.clone(), params.clone()));
         self.params = Some(params);
         self.pages.clear();
@@ -660,7 +662,7 @@ impl ReaderPage {
             self.pages.clear();
             self.paginator = None;
             self.start_load(cx);
-        } else if self.params.as_ref() != Some(&Self::layout_params(cx)) {
+        } else if self.params.as_ref() != Some(&Self::layout_params(cx, self.sort_num)) {
             // 字号/行距/页边距/首行缩进变了
             self.relayout_keep_position(cx);
             self.save_progress(cx, true);
@@ -808,7 +810,7 @@ impl ReaderPage {
     fn draw_header(&self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap, top: i32) {
         let theme = cx.theme;
         let m = cx.app.metrics;
-        let margin = Self::layout_params(cx).margin as i32;
+        let margin = Self::layout_params(cx, self.sort_num).margin as i32;
         frame.fill_rect(Rect::new(0, 0, cx.width, top as u32), theme.background);
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };

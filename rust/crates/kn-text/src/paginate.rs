@@ -53,12 +53,15 @@ pub struct LayoutParams {
     pub first_line_indent: bool,
     /// 段落之后的间距, 以行高为单位 (Python 版固定 0.22)
     pub paragraph_spacing: f64,
-    /// 插图最大高度占可用高度的比例。Python 版是 0.62 (金标准测试用这个);
-    /// 1.0 版阅读器用 1.0, 封面/彩页这类整页插图可以占满一页。
+    /// 插图最大高度占可用高度的比例 (Python 版 0.62, 阅读器也用它)。
     pub image_max_ratio: f64,
-    /// `<img>` 没写宽高时: false = Python 规则 (高 = 宽 × 0.72, 不超过上限);
-    /// true = 直接给最大高度 (阅读器: 轻小说插图几乎都是整页图, 实际图片在框内等比适配)。
-    pub unknown_image_full: bool,
+    /// 封面占满一页: 本章第一张图且它前面没有正文时, 给它整页高度。阅读器只在每卷第一章打开
+    /// (第一章开头的第一张图就是封面; 后面的彩页、插图照常与正文混排)。
+    pub cover_full_page: bool,
+    /// 用真实图片尺寸排版: `<img>` 没写宽高时读图片地址里的 `size=宽x高` (轻书架的图片地址都带);
+    /// 宽度不到可用宽度一半的小图 (替代生僻字的"外字"等) 按原始像素大小显示, 不放大到整行宽。
+    /// false = Python 规则 (金标准测试用)。
+    pub real_image_size: bool,
 }
 
 impl Default for LayoutParams {
@@ -72,7 +75,8 @@ impl Default for LayoutParams {
             first_line_indent: true,
             paragraph_spacing: PYTHON_PARAGRAPH_SPACING,
             image_max_ratio: PYTHON_IMAGE_MAX_RATIO,
-            unknown_image_full: false,
+            cover_full_page: false,
+            real_image_size: false,
         }
     }
 }
@@ -117,6 +121,20 @@ pub struct Paginator {
     footnotes_done: bool,
     finished: bool,
     any_page_pushed: bool,
+    /// 已经排过正文 / 插图 (判断封面用)
+    seen_text: bool,
+    seen_image: bool,
+}
+
+/// 图片地址里的 `size=宽x高` 提示 (轻书架 CDN 地址, 例如 `...jpg?placeholder=..&amp;size=1350x1920&amp;t=..`)。
+pub fn url_size_hint(url: &str) -> Option<(u32, u32)> {
+    let query = url.split_once('?')?.1;
+    query.split('&').find_map(|kv| {
+        let kv = kv.strip_prefix("amp;").unwrap_or(kv);
+        let (w, h) = kv.strip_prefix("size=")?.split_once(['x', 'X'])?;
+        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+        (w > 0 && h > 0).then_some((w, h))
+    })
 }
 
 impl Paginator {
@@ -144,6 +162,8 @@ impl Paginator {
             footnotes_done: false,
             finished: false,
             any_page_pushed: false,
+            seen_text: false,
+            seen_image: false,
         }
     }
 
@@ -198,11 +218,27 @@ impl Paginator {
         match block.kind {
             BlockKind::Image => {
                 let max_image_height = (self.usable_height as f64 * self.params.image_max_ratio.clamp(0.1, 1.0)) as i64;
-                let image_height = if block.width > 0 && block.height > 0 {
-                    let h = (self.usable_width * block.height as f64 / block.width as f64) as i64;
-                    h.max(1).min(max_image_height)
-                } else if self.params.unknown_image_full {
-                    max_image_height
+                let is_cover = self.params.cover_full_page && !self.seen_image && !self.seen_text;
+                self.seen_image = true;
+                let (natural_w, natural_h) = if block.width > 0 && block.height > 0 {
+                    (block.width, block.height)
+                } else if self.params.real_image_size {
+                    url_size_hint(&block.source_url).unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+                let mut image_width = self.usable_width as i64;
+                let image_height = if is_cover {
+                    self.usable_height
+                } else if natural_w > 0 && natural_h > 0 {
+                    if self.params.real_image_size && (natural_w as f64) < self.usable_width * 0.5 {
+                        let h = (natural_h as i64).min(max_image_height).max(1);
+                        image_width = ((natural_w as f64 * h as f64 / natural_h as f64) as i64).max(1);
+                        h
+                    } else {
+                        let h = (self.usable_width * natural_h as f64 / natural_w as f64) as i64;
+                        h.max(1).min(max_image_height)
+                    }
                 } else {
                     max_image_height.min((self.usable_width * 0.72) as i64)
                 };
@@ -211,9 +247,9 @@ impl Paginator {
                 }
                 self.current.push(PageItem::Image {
                     url: block.source_url.clone(),
-                    x: self.margin,
+                    x: self.margin + (self.usable_width as i64 - image_width) / 2,
                     y: self.margin + self.y,
-                    width: self.usable_width as i64,
+                    width: image_width,
                     height: image_height,
                     path: path.clone(),
                     offset: block.offset,
@@ -230,6 +266,9 @@ impl Paginator {
                 self.add_line(m, &block.text, size, false, gap_before, gap_after, block.offset, &path);
             }
             BlockKind::Text => {
+                if !block.text.trim().is_empty() {
+                    self.seen_text = true;
+                }
                 let gap_after = (self.line_height as f64 * self.params.paragraph_spacing.clamp(0.0, 3.0)) as i64;
                 self.add_line(
                     m,

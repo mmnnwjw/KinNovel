@@ -112,6 +112,18 @@ Dithering（抖动）：`dithering_mode`（`HWD_PASSTHROUGH`/`FLOYD_STEINBERG`/`
 
 **Rust 封装建议子集**：`fbink_open/close/init/reinit/get_state`、`fbink_refresh`/`fbink_refresh_rect`、`fbink_wait_for_submission`/`fbink_wait_for_complete`（MTK 再加 `fbink_wait_for_any_complete`）、`fbink_mtk_set_swipe_data`/`fbink_mtk_toggle_auto_reagl`（仅 `is_mtk` 时启用）、`fbink_input_scan`/`fbink_input_check`、`fbink_invert_screen`/`fbink_invert_rect`。
 
+## 4.5 KinNovel 的实际做法 (截至 v1.3.0)
+
+以上是写代码前的调研。实际实现:
+
+- **机型表**: `kn-platform/src/model.rs` 的 `ModelCaps` 以 FBInk 的 deviceName 为键, 内容整理自 KOReader `device.lua` / `powerd.lua`: REAGL (Touch/PW1 关闭; 非 MTK 机型 REAGL 以 `UPDATE_MODE_FULL` 提交)、前光/暖光、PW1–PW3 的"真正关灯"档、Voyage 触摸盲区、KT Home 键 (102) 回首页、翻页键 (104/109, Oasis 系列与 Voyage 方向相反)、PW6/ColorSoft 敲边框 (KEY_F7) 翻下一页。未知机型回退到探测。
+- **输入**: `fbink_input_scan` 发现设备; 触摸轴交换/镜像取 FBInk 的 `touch_swap_axes` / `touch_mirror_x/y`。重启后用 `EVIOCGMTSLOTS` 取初始触点 (KPW5 上 MT 轴的 `EVIOCGABS` 值为 0)。
+- **方向**: Oasis/Scribe 启动时由 `bin/kinnovel.sh` 在暂停框架前读 `lipc-get-prop com.lab126.winmgr accelerometer` (避开上面说的"框架冻结时 lipc 挂起"), 运行中跟随陀螺仪事件 (ABS_PRESSURE 15–22) 做软件 180° 翻转并镜像触摸、交换翻页键。帧缓冲的 `rotate` 不能用来判断朝向 (KPW5 正放就是 3)。
+- **显示**: dpi 与位深取自 FBInk; 8 bpp 直接拷贝, 24/32 bpp (ColorSoft) 把灰度展开成 RGB, 其它位深拒绝启动。
+- **电源**: `lipc-wait-event` 子进程 + 看门狗; 电源键按下即恢复框架 (§3 第 5 条)。
+- **休眠封面**: 与 KOReader 相同, 启动脚本在暂停框架前执行 `lipc-set-prop com.lab126.blanket unload screensaver` (有广告的机型不卸载), 退出时重新加载; 进入屏保时程序自己画封面并整屏闪刷。
+- **实机验证**: 只有 KPW5 (FW 5.17.1)。其它机型的适配来自 KOReader 的机型表和主机上的模拟测试 (`KN_PREVIEW_SIZE`、`KN_TEST_GSENSOR`)。
+
 ## 5. 许可证说明
 
 - **KOReader**（AGPL-3.0）：GPLv3 第 13 条允许与 AGPLv3 代码组合，但组合后被并入的 AGPL 部分仍保留其网络条款。为保持本项目纯 GPL-3.0、避免许可混杂，**约定只参考其做法与事实**（机型按键 evdev code、lipc 属性名、流程顺序），用 Rust 重新实现，不翻译/复制 Lua 源码片段。

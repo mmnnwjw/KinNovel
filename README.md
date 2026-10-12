@@ -9,17 +9,15 @@
 [![许可](https://img.shields.io/github/license/mmnnwjw/KinNovel?label=%E8%AE%B8%E5%8F%AF)](LICENSE)
 ![平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Kindle%20%2B%20KUAL-informational)
 
-<img src="docs/images/shelf.png" width="31%" alt="书架：继续阅读卡片、云端书架与文件夹">
+<img src="docs/images/shelf.png" width="31%" alt="书架：继续阅读卡片与云端书架">
 <img src="docs/images/reader-bookmark.png" width="31%" alt="阅读菜单：刚添加了书签">
-<img src="docs/images/reader-image.png" width="31%" alt="阅读器里的整页插图">
+<img src="docs/images/reader-image.png" width="31%" alt="阅读器里插图与正文混排">
 
 </div>
 
 ## 关于
 
-KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户端。它直接运行在 Kindle 的原生系统里，通过 KUAL 启动，不需要浏览器或 KOReader。
-
-登录账号后，书架、阅读进度和历史会与网站同步；读过的内容存在本机，离线时照样能读。界面专为墨水屏设计：按钮大、翻页基本不闪，只在需要清除残影的地方局部刷新。
+KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户端。它直接运行在 Kindle 的原生系统里，通过 KUAL 启动。
 
 ## 功能
 
@@ -92,7 +90,6 @@ cd KinNovel/rust
 ## 计划
 
 - [ ] 轻书架服务器恢复后，用真实接口核对漫画、搜索、书架写入等功能（目前用模拟数据测试）。
-- [ ] 加快 WebP 漫画页的解码。
 - [ ] 在书架里新建文件夹，以及在文件夹之间移动书。
 
 ## 维护者与致谢
