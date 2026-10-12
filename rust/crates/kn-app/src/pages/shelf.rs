@@ -417,7 +417,7 @@ impl ShelfPage {
         }
         let list_bottom = tabs_top - m.pager_h() as i32;
         if cloud_mode {
-            let label = if self.saving { "我的书架 · 正在保存…" } else if in_folder { "文件夹 · 长按书籍可移出" } else { "我的书架 · 长按可移出" };
+            let label = if self.saving { "我的书架 · 正在保存…" } else if in_folder { "文件夹" } else { "我的书架" };
             ink.text(frame, side, y, label, m.small, theme.muted);
             y += (m.small * 1.6) as i32;
             frame.fill_rect(Rect::new(side, y - 2, cx.width - 2 * m.margin, 2), theme.foreground);

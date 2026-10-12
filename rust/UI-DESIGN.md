@@ -104,4 +104,5 @@ All components draw immediately into the frame and register hits; they never kee
 
 - Lists show at most one line per field; long titles end with "…".
 - Numbers: "第 3 章", "12 / 87 页", times as "3 分钟前 / 昨天 / 10-08".
+- No tutorial text on screen ("长按可移出", keyboard tips, "how to add a bookmark"): gestures and shortcuts are documented in the README's 使用 section instead.
 - Error copy in Chinese, short, with a next step ("网络不可用，点击重试").

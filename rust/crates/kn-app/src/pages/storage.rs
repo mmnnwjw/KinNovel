@@ -140,7 +140,7 @@ impl Page<KinNovel> for StoragePage {
         let comic = cx.app.config.int("comic_cache_mb", 256);
         ink.text(frame, side, y, &format!("缓存共 {}", human(total)), m.title, theme.foreground);
         y += (m.title * 1.5) as i32;
-        let note = format!("启动时自动清理到上限: 小说 {limit} MB · 漫画 {comic} MB (设置里可改)");
+        let note = format!("启动时自动清理到上限: 小说 {limit} MB · 漫画 {comic} MB");
         let note = ink.fit(&note, m.small, (cx.width as i32 - 2 * side) as f32);
         ink.text(frame, side, y, &note, m.small, theme.muted);
         y += (m.small * 1.8) as i32;

@@ -673,11 +673,9 @@ impl CatalogPage {
         let ink = &mut Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
         if self.bookmarks.is_empty() {
             let area = Rect::new(0, top, cx.width, (cx.height as i32 - top) as u32);
-            widgets::state_message(ink, frame, cx.hits, &theme, &m, area, "还没有书签\n阅读时点屏幕中间打开菜单, 再点顶栏的书签按钮", None);
+            widgets::state_message(ink, frame, cx.hits, &theme, &m, area, "还没有书签", None);
             return;
         }
-        // 留一行给 "长按删除" 提示
-        let per_page = per_page.saturating_sub(1).max(1);
         let pages = self.bookmarks.len().div_ceil(per_page).max(1);
         self.mark_page = self.mark_page.min(pages - 1);
         let row_h = m.row_h() as i32;
@@ -704,7 +702,6 @@ impl CatalogPage {
             cx.hits.add(HitId(CAT_MARK_BASE + index as u32), r);
             y += row_h;
         }
-        ink.text_centered(frame, Rect::new(0, y, cx.width, row_h as u32), "长按书签可删除", m.small, theme.muted);
         if pages > 1 {
             let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
             widgets::pager(ink, frame, cx.hits, &theme, &m, pr, self.mark_page, pages, CAT_HIT_PREV, CAT_HIT_NEXT);

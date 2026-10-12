@@ -255,16 +255,6 @@ impl Page<KinNovel> for SearchPage {
             let area = Rect::new(0, y, cx.width, (kb.y - y).max(0) as u32);
             let label_h = (m.small * 1.8) as i32;
             if history.is_empty() {
-                let tip = "拼音输入：空格上屏首选，点候选选字；\n“符号”切换标点，“中/英”切换输入语言";
-                let mut ty = area.y + gap;
-                for line in tip.lines() {
-                    let t = ink.fit(line, m.small, (cx.width - 2 * m.margin) as f32);
-                    if ty + label_h > area.bottom() {
-                        break;
-                    }
-                    ink.text(frame, side, ty, &t, m.small, theme.muted);
-                    ty += label_h;
-                }
                 return;
             }
             if area.h as i32 >= label_h + m.touch as i32 {
@@ -317,7 +307,7 @@ impl Page<KinNovel> for SearchPage {
             Results::Ready(list) => {
                 if list.items.is_empty() {
                     let what = if self.comic { "漫画" } else { "小说" };
-                    let text = format!("没有找到相关{what}\n可以换个关键词或搜索维度");
+                    let text = format!("没有找到相关{what}");
                     widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, None);
                 } else {
                     let row_h = m.row_h_cover();
