@@ -40,6 +40,8 @@ pub type RefreshHandler = Arc<dyn Fn(&Value) -> (u16, Value) + Send + Sync>;
 pub struct FakeServerConfig {
     pub invoke_handler: InvokeHandler,
     pub refresh_handler: Option<RefreshHandler>,
+    /// `POST /api/user/login`; unset = 404 like any unknown path.
+    pub login_handler: Option<RefreshHandler>,
     /// If true, the WS hub never ACKs the SignalR protocol handshake
     /// (used to make `connect` fail/time out).
     pub reject_handshake: bool,
@@ -50,6 +52,7 @@ impl Default for FakeServerConfig {
         FakeServerConfig {
             invoke_handler: Arc::new(|_, _| Action::Success(json!({"ok": true}))),
             refresh_handler: None,
+            login_handler: None,
             reject_handshake: false,
         }
     }
@@ -170,6 +173,10 @@ fn handle_connection(mut stream: TcpStream, config: Arc<FakeServerConfig>, ws_co
         } else {
             write_json_response(&mut stream, 200, &json!({"Success": true, "Response": "new-token"}));
         }
+    } else if let (true, Some(handler)) = (path.starts_with("/api/user/login") && method == "POST", &config.login_handler) {
+        let request_value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let (status, response) = handler(&request_value);
+        write_json_response(&mut stream, status, &response);
     } else {
         write_json_response(&mut stream, 404, &json!({"Success": false, "Msg": "not found"}));
     }

@@ -251,6 +251,66 @@ fn access_token_refresh_on_401_then_retries() {
     assert_eq!(seen_tokens.lock().unwrap().len(), 2, "expected one failed + one retried invocation");
 }
 
+/// Server that answers "unauthorized" until a login happened, with a dead
+/// refresh token: (server, login count, hub call count).
+fn dead_session_server(login_ok: bool) -> (FakeServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let logins = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (logins_hub, logins_http, calls_hub) = (logins.clone(), logins.clone(), calls.clone());
+    let server = FakeServer::start(FakeServerConfig {
+        invoke_handler: Arc::new(move |method, _| {
+            calls_hub.fetch_add(1, Ordering::SeqCst);
+            if logins_hub.load(Ordering::SeqCst) == 0 || !login_ok {
+                Action::RawError("Failed to invoke because user is unauthorized".to_string())
+            } else if method == "GetMyInfo" {
+                Action::Success(json!({"Id": 7}))
+            } else {
+                Action::Success(json!({"ok": true}))
+            }
+        }),
+        refresh_handler: Some(Arc::new(|_| (401, json!({"Success": false, "Status": 401, "Msg": "unauthorized"})))),
+        login_handler: Some(Arc::new(move |req| {
+            assert_eq!(req["email"], "a@b.c");
+            logins_http.fetch_add(1, Ordering::SeqCst);
+            if login_ok {
+                (200, json!({"Success": true, "Response": {"Token": "t2", "RefreshToken": "r2"}}))
+            } else {
+                (200, json!({"Success": false, "Status": 400, "Msg": "密码错误"}))
+            }
+        })),
+        ..FakeServerConfig::default()
+    });
+    (server, logins, calls)
+}
+
+#[test]
+fn dead_session_logs_in_again_with_the_configured_account() {
+    let (server, logins, _) = dead_session_server(true);
+    let seed = json!({"Token": "old", "RefreshToken": "dead", "TokenUpdatedAt": 0, "User": {"Id": 7}});
+    let client = client_with_seeded_session(&server, "relogin-ok", &seed);
+    // Without an account the 401 is returned as before.
+    assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).unwrap_err().is_unauthorized());
+    assert_eq!(logins.load(Ordering::SeqCst), 0);
+
+    client.set_account(Some(("a@b.c".into(), "pw".into())));
+    let result = client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).expect("re-login + retry");
+    assert_eq!(result, json!({"ok": true}));
+    assert_eq!(logins.load(Ordering::SeqCst), 1);
+    assert!(client.has_refresh_token());
+    assert_eq!(client.user_id(), 7);
+}
+
+#[test]
+fn failed_relogin_is_not_repeated_right_away() {
+    let (server, logins, _) = dead_session_server(false);
+    let seed = json!({"Token": "old", "RefreshToken": "dead", "TokenUpdatedAt": 0, "User": {"Id": 7}});
+    let client = client_with_seeded_session(&server, "relogin-fail", &seed);
+    client.set_account(Some(("a@b.c".into(), "wrong".into())));
+    assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).is_err());
+    assert!(client.invoke("GetBookShelf", json!({"Page": 2}), 0, Duration::ZERO).is_err());
+    assert_eq!(logins.load(Ordering::SeqCst), 1, "a failed login must back off instead of retrying on every 401");
+}
+
 #[test]
 fn login_persists_session_in_python_compatible_shape() {
     let server = FakeServer::start(FakeServerConfig {

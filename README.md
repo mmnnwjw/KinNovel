@@ -48,6 +48,8 @@ KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户
    { "account_email": "you@example.com", "account_password": "••••••" }
    ```
 
+   登录过期后，KinNovel 会用这里的账号自动重新登录。
+
 4. 在 KUAL 中选择 **KinNovel**。
 
 升级时直接覆盖安装即可，配置、进度、书签和缓存都会保留。

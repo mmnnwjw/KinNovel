@@ -89,7 +89,10 @@ impl KinNovel {
         let net_client = net::client(&paths, &config);
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
-        net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
+        let account = (!email.is_empty() && !password.is_empty()).then_some((email, password));
+        // 会话失效 (刷新令牌也被拒) 时由客户端用这个账号自动重新登录
+        net_client.set_account(account.clone());
+        net::set_account(account);
         KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default() }
     }
 

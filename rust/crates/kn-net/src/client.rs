@@ -87,6 +87,19 @@ struct CacheEntry {
     value: Value,
 }
 
+/// Re-login with the configured account after the refresh token died:
+/// at most once every 10 minutes after a success, and only every 30 minutes
+/// after a failure (a wrong password must not hammer the login endpoint --
+/// the site bans accounts that send too many requests).
+const RELOGIN_AFTER_OK: Duration = Duration::from_secs(10 * 60);
+const RELOGIN_AFTER_FAIL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Default)]
+struct Relogin {
+    last: Option<Instant>,
+    ok: bool,
+}
+
 /// The real client state, always reached through `Client`'s `Arc`. Split
 /// out so `self_weak` can hand a `TokenProvider` closure a way to call back
 /// into `get_access_token` without `Client::new` needing the hub before the
@@ -101,6 +114,10 @@ struct Inner {
     flight: Mutex<HashMap<String, Arc<Inflight>>>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     health: ServerHealth,
+    /// (email, password) from the app config; used to log in again when
+    /// both the access token and the refresh token are rejected.
+    account: Mutex<Option<(String, String)>>,
+    relogin: Mutex<Relogin>,
 }
 
 /// Blocking, thread-safe API client. Cheap to `clone()` (shares one `Arc`),
@@ -143,6 +160,8 @@ impl Client {
                 flight: Mutex::new(HashMap::new()),
                 cache: Mutex::new(HashMap::new()),
                 health: ServerHealth::default(),
+                account: Mutex::new(None),
+                relogin: Mutex::new(Relogin::default()),
             }
         });
         Client(inner)
@@ -166,6 +185,12 @@ impl Client {
 
     pub fn server(&self) -> String {
         self.0.hub.server()
+    }
+
+    /// Account to log in with again when the session is lost (refresh token
+    /// rejected); `None` disables the automatic re-login.
+    pub fn set_account(&self, account: Option<(String, String)>) {
+        *self.0.account.lock().unwrap() = account;
     }
 
     pub fn user(&self) -> Option<Value> {
@@ -312,6 +337,12 @@ impl Client {
     }
 
     pub fn login(&self, email: &str, password: &str) -> Result<Value, NetError> {
+        self.login_inner(email, password, false)
+    }
+
+    /// `nested` = called from the 401 handler: fetch the user straight from
+    /// the hub so a second 401 can't recurse into another re-login.
+    fn login_inner(&self, email: &str, password: &str, nested: bool) -> Result<Value, NetError> {
         let credentials = self.http_call(
             "/api/user/login",
             Some(json!({"email": email, "password": sha256_hex(password)})),
@@ -319,7 +350,10 @@ impl Client {
             None,
         )?;
         self.store_credentials(&credentials)?;
-        let user = match self.get_my_info() {
+        // The open hub connection (if any) was authorized with the old token.
+        self.0.hub.close();
+        let user = if nested { self.0.hub.invoke("GetMyInfo", json!({}), true, None, true, 0) } else { self.get_my_info() };
+        let user = match user {
             Ok(u) => u,
             Err(e) => {
                 let _ = self.0.session.clear_credentials();
@@ -521,16 +555,57 @@ impl Client {
                 // exactly once on a fresh connection. Mirrors api.py's
                 // `_invoke_direct`.
                 self.0.session.set_many(vec![("Token", Value::String(String::new())), ("TokenUpdatedAt", json!(0))]).ok();
-                match self.refresh_access_token() {
+                let failed = match self.refresh_access_token() {
                     Ok(Some(_)) => {
                         self.0.hub.close();
-                        self.0.hub.invoke(method, params, true, None, retry, priority)
+                        match self.0.hub.invoke(method, params.clone(), true, None, retry, priority) {
+                            Err(e) if e.is_unauthorized() => e,
+                            other => return other,
+                        }
                     }
-                    Ok(None) => Err(unauthorized_err),
-                    Err(refresh_err) => Err(refresh_err),
+                    Ok(None) => unauthorized_err,
+                    Err(e) if e.is_unauthorized() || e.is_refresh_invalid() => e,
+                    // Network trouble while refreshing: the session may be fine.
+                    Err(e) => return Err(e),
+                };
+                // The session itself is gone (refresh token rejected, or the
+                // server still says unauthorized with a fresh token): log in
+                // again with the configured account and retry once.
+                if self.relogin() {
+                    return self.0.hub.invoke(method, params, true, None, retry, priority);
                 }
+                Err(failed)
             }
         }
+    }
+
+    /// Logs in again with the configured account (rate-limited, see
+    /// `RELOGIN_AFTER_*`). Concurrent callers wait for the one doing the
+    /// login and then reuse its outcome. Returns whether a usable session
+    /// exists afterwards.
+    fn relogin(&self) -> bool {
+        let Some((email, password)) = self.0.account.lock().unwrap().clone() else {
+            return false;
+        };
+        let mut state = self.0.relogin.lock().unwrap();
+        if let Some(last) = state.last {
+            let wait = if state.ok { RELOGIN_AFTER_OK } else { RELOGIN_AFTER_FAIL };
+            if last.elapsed() < wait {
+                return state.ok;
+            }
+        }
+        state.last = Some(Instant::now());
+        state.ok = match self.login_inner(&email, &password, true) {
+            Ok(_) => {
+                eprintln!("[net] 登录已失效, 已用配置的账号重新登录");
+                true
+            }
+            Err(e) => {
+                eprintln!("[net] 自动重新登录失败: {e}");
+                false
+            }
+        };
+        state.ok
     }
 
     // ---- public catalogue methods (mirrors api.py 1:1) ----
