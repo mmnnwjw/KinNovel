@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 
 pub const DEFAULT_APP_DIR: &str = "/mnt/us/extensions/kinnovel";
 pub const DEFAULT_API_SERVER: &str = "https://api.lightnovel.life";
-/// 正文图片等相对链接的站点根 (与 Python ReaderDocument 一致)
-pub const SITE_BASE: &str = "https://www.lightnovel.app";
+/// 章节 HTML 里相对地址 (正文图片等) 的站点根。Python 版用的旧域名 www.lightnovel.app 在国内网络下 DNS 被污染 (解析到
+/// 108.160.x 一类地址, 连接超时), 网页版现在的域名是 www.lightnovel.life (Cloudflare)。
+pub const SITE_BASE: &str = "https://www.lightnovel.life";
 
 pub fn sha256_hex(text: &str) -> String {
     let digest = Sha256::digest(text.as_bytes());

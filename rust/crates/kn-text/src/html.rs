@@ -198,6 +198,18 @@ pub fn sanitize_html(content: &str) -> (RcDom, Handle) {
 struct Extractor<'a> {
     base_url: &'a str,
     blocks: Vec<Block>,
+    /// 本章已出现的注释标记数 (见 [`is_footnote_icon`])
+    footnotes: usize,
+}
+
+/// 多看格式的注释图标 `<a class="duokan-footnote"><sup><img class="footnote" src="/img/note.png"></sup></a>`:
+/// 网页版把它画成 1em 高的行内小图标 (图标是网页版自己的静态文件)。它不是插图, 当作插图会把段落从中间
+/// 切开、还要去下载; 这里改成行内文字标记「[注n]」(n = 本章第几个, 对应章末 aside 里的「注n：…」)。
+/// 标记会让同一段里它后面的字符偏移多出几个字, 阅读位置最多差几个字, 仍在同一页。
+fn is_footnote_icon(attrs: &HashMap<String, String>, raw_src: &str) -> bool {
+    let class_footnote = attrs.get("class").is_some_and(|c| c.split_ascii_whitespace().any(|c| c.eq_ignore_ascii_case("footnote")));
+    let src = raw_src.split(['?', '#']).next().unwrap_or("");
+    class_footnote || (!src.contains("://") && src.ends_with("/img/note.png"))
 }
 
 impl<'a> Extractor<'a> {
@@ -249,7 +261,6 @@ impl<'a> Extractor<'a> {
                     let child_struct = child_struct_path(struct_path, &tag, index);
 
                     if tag == "img" {
-                        offset = self.flush_text(buffer, offset, kind, level, path);
                         let attrs = element_attrs(child);
                         let raw_src = attrs
                             .get("src")
@@ -257,6 +268,13 @@ impl<'a> Extractor<'a> {
                             .or_else(|| attrs.get("data-system-image-url"))
                             .cloned()
                             .unwrap_or_default();
+                        if is_footnote_icon(&attrs, &raw_src) {
+                            // 行内标记: 不切段
+                            self.footnotes += 1;
+                            buffer.push_str(&format!("[注{}]", self.footnotes));
+                            continue;
+                        }
+                        offset = self.flush_text(buffer, offset, kind, level, path);
                         let src = absolute_url(self.base_url, &raw_src);
                         let scheme = src.split(':').next().unwrap_or("").to_ascii_lowercase();
                         let scheme_ok = if src.contains(':') {
@@ -336,6 +354,7 @@ pub fn extract_blocks(content: &str, base_url: &str) -> Vec<Block> {
     let mut extractor = Extractor {
         base_url,
         blocks: Vec::new(),
+        footnotes: 0,
     };
     let mut buffer = String::new();
     let offset = extractor.append_node(&root, BlockKind::Text, 0, ".", ".", &mut buffer, 0);
@@ -366,6 +385,26 @@ mod tests {
         assert_eq!(blocks[0].kind, BlockKind::Text);
         assert_eq!(blocks[0].text, "hello");
         assert_eq!(blocks[0].path, "./p[1]");
+    }
+
+    /// 真实章节 (书 1854 第 5 章) 的注释写法: 图标变成行内标记, 不切段、不产生插图块。
+    #[test]
+    fn footnote_icon_becomes_inline_marker() {
+        let html = concat!(
+            r##"<p>甲乙<a class="duokan-footnote no-d" epub:type="noteref" href="#n1" id="A_1"><sup><img alt="note" class="footnote" src="/img/note.png"></sup></a>丙</p>"##,
+            r##"<p>丁<img src="/img/note.png?v=2"></p>"##,
+            r##"<aside epub:type="footnote" id="n1"><ol class="duokan-footnote-content"><li class="duokan-footnote-item" id="n1" value="1">注1：说明</li></ol></aside>"##,
+        );
+        let blocks = extract_blocks(html, "https://www.lightnovel.life");
+        assert!(blocks.iter().all(|b| b.kind != BlockKind::Image));
+        assert_eq!(blocks[0].text, "甲乙[注1]丙");
+        assert_eq!(blocks[0].path, "./p[1]");
+        assert_eq!(blocks[1].text, "丁[注2]");
+        assert!(blocks.iter().any(|b| b.kind == BlockKind::Footnote && b.text.contains("注1：说明")));
+        // 普通插图不受影响
+        let img = extract_blocks(r##"<div class="illus"><img src="/images/a.jpg"></div>"##, "https://www.lightnovel.life");
+        assert_eq!(img[0].kind, BlockKind::Image);
+        assert_eq!(img[0].source_url, "https://www.lightnovel.life/images/a.jpg");
     }
 
     #[test]
