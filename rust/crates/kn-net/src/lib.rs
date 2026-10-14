@@ -13,7 +13,8 @@
 //! - [`session`] -- [`session::SessionStore`]: the on-disk session file.
 //! - [`rate_limit`], [`turn`]: the sliding-window limiter and the
 //!   interactive-vs-prefetch turn scheduler the transport uses.
-//! - [`stream`], [`http`], [`gzip`]: TLS/plain socket selection, a minimal
+//! - [`stream`], [`dns`], [`http`], [`gzip`]: TLS/plain socket selection,
+//!   name resolution (with a fallback for musl), a minimal
 //!   blocking HTTP/1.1 client, and the size-capped gzip decoder.
 //! - [`helpers`]: the list/envelope-normalizing free functions `api.py` has
 //!   at module scope.
@@ -23,6 +24,7 @@
 //! render/UI thread. `Client` is `Send + Sync` and cheap to `clone()`.
 
 pub mod client;
+pub mod dns;
 pub mod error;
 pub mod gzip;
 pub mod health;

@@ -282,7 +282,8 @@ impl Client {
             if response.status >= 400 {
                 NetError::api(format!("HTTP {}", response.status), response.status as i32)
             } else {
-                NetError::protocol("响应不是 JSON")
+                let kind = response.header("Content-Type").unwrap_or("?").split(';').next().unwrap_or("?").trim().to_string();
+                NetError::protocol(format!("响应不是 JSON (HTTP {}, {kind})", response.status))
             }
         })?;
         let Value::Object(obj) = &content else {
@@ -501,8 +502,12 @@ impl Client {
     }
 
     fn invoke_direct(&self, method: &str, params: Value, priority: i32) -> Result<Value, NetError> {
+        let dump = std::env::var_os("KN_DUMP_API").map(|p| (p, params.clone()));
         let result = self.invoke_direct_inner(method, params, priority);
         self.0.health.record(&result);
+        if let Some((path, params)) = dump {
+            dump_call(&path, method, &params, &result);
+        }
         result
     }
 
@@ -892,5 +897,18 @@ mod tests {
             sha256_hex(""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+}
+
+/// 调试: `KN_DUMP_API=<文件>` 时把每次 hub 调用 (方法、参数、结果) 追加为一行 JSON, 用来核对真实响应的字段。
+fn dump_call(path: &std::ffi::OsStr, method: &str, params: &Value, result: &Result<Value, NetError>) {
+    use std::io::Write;
+    let result = match result {
+        Ok(v) => json!({ "ok": v }),
+        Err(e) => json!({ "err": format!("{e:?}") }),
+    };
+    let line = json!({ "method": method, "params": params, "result": result });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }

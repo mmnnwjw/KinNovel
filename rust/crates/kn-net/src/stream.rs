@@ -101,12 +101,9 @@ impl NetStream {
         connect_timeout: Duration,
         tls: Arc<ClientConfig>,
     ) -> Result<Self, NetError> {
-        let addr = format!("{host}:{port}");
         let mut last_err = None;
         let mut stream = None;
-        for candidate in std::net::ToSocketAddrs::to_socket_addrs(&addr)
-            .map_err(|e| NetError::network(e.to_string()))?
-        {
+        for candidate in crate::dns::resolve(host, port).map_err(|e| NetError::network(e.to_string()))? {
             match TcpStream::connect_timeout(&candidate, connect_timeout) {
                 Ok(s) => {
                     stream = Some(s);

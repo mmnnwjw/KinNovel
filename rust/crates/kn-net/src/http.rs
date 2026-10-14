@@ -57,8 +57,8 @@ impl HttpResponse {
 }
 
 /// Minimal blocking HTTP/1.1 client: one request per connection
-/// (`Connection: close`), `Content-Length` response bodies only (fine for
-/// the small JSON bodies `negotiate`/login/refresh send), used for the
+/// (`Connection: close`), `Content-Length` or chunked response bodies (the
+/// server switched login/refresh to chunked in 2026-10), used for the
 /// handful of plain-REST calls api.py makes outside the SignalR hub.
 pub fn request(
     server: &str,
@@ -84,65 +84,8 @@ pub fn request(
     stream.write_all(body)?;
     stream.flush()?;
 
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 4096];
-    let header_end = loop {
-        let n = stream.read(&mut tmp)?;
-        if n == 0 {
-            return Err(NetError::network("连接在响应头读完前关闭"));
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
-            break pos;
-        }
-        if buf.len() > 1 << 20 {
-            return Err(NetError::protocol("HTTP 响应头过大"));
-        }
-    };
-
-    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().unwrap_or("");
-    let status: u16 = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let mut content_length: Option<usize> = None;
-    let mut headers = Vec::new();
-    for line in lines {
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.parse().ok();
-            }
-            headers.push((name, value));
-        }
-    }
-    let body_start = header_end + 4;
-    let mut response_body: Vec<u8> = buf.split_off(body_start);
-    if let Some(total) = content_length {
-        while response_body.len() < total {
-            let n = stream.read(&mut tmp)?;
-            if n == 0 {
-                break;
-            }
-            response_body.extend_from_slice(&tmp[..n]);
-        }
-        response_body.truncate(total);
-    } else {
-        loop {
-            let n = stream.read(&mut tmp)?;
-            if n == 0 {
-                break;
-            }
-            response_body.extend_from_slice(&tmp[..n]);
-            if response_body.len() > 8 * 1024 * 1024 {
-                return Err(NetError::protocol("HTTP 响应超过 8MB 上限"));
-            }
-        }
-    }
-    Ok(HttpResponse { status, body: response_body, headers })
+    let (status, headers, body) = read_response(&mut stream, 8 * 1024 * 1024)?;
+    Ok(HttpResponse { status, body, headers })
 }
 
 /// 下载任意 http(s) URL 的完整内容 (字体、封面、插图)。
@@ -312,8 +255,14 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf);
+            // Read the whole request head: closing with unread bytes makes Windows send RST.
+            let (mut req, mut buf) = (Vec::new(), [0u8; 4096]);
+            while find_subslice(&req, b"\r\n\r\n").is_none() {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
             s.write_all(&response).unwrap();
         });
         format!("http://127.0.0.1:{port}/img/a.jpg?size=10x10&height=256")
@@ -342,6 +291,19 @@ mod tests {
         assert!(download(&url, 10, Duration::from_secs(5), tls()).is_err());
         let url = serve_once(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec());
         assert!(matches!(download(&url, 10, Duration::from_secs(5), tls()), Err(NetError::Api { .. })));
+    }
+
+    /// The server answers login / refresh_token chunked since 2026-10.
+    #[test]
+    fn request_decodes_chunked_json() {
+        let json = br#"{"Response":"t","Status":200,"Success":true,"Msg":""}"#;
+        let mut raw = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n", json.len()).into_bytes();
+        raw.extend_from_slice(json);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (server, _) = split_url(&serve_once(raw)).unwrap();
+        let resp = request(&server, "/api/user/refresh_token", "GET", &[], b"", Duration::from_secs(5), tls()).unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, json);
     }
 
     #[test]
