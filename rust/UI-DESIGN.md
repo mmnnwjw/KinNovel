@@ -58,6 +58,15 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   Illustrations: only the cover (first image of the volume's first chapter, with no body text before it) fills a page;
   every other image is laid out with its real size (the CDN URL carries `size=WxH`), at most 62 % of the text area high,
   and flows with the text. Images narrower than half the text width (gaiji standing in for rare characters) keep their natural size.
+  Body typography follows the web reader (`kn_text::style`, from LightNovelShelf/Web `src/css/read.scss` plus browser defaults):
+  bold (synthetic: glyph drawn 1–2 px wider, advances unchanged), italic (sheared outline), per-run font size, sup/sub,
+  underline / strike-through, emphasis dots, ruby above the base, centre/right alignment, `<p>`-only first-line indent,
+  heading sizes and margins, blockquote (inset, grey text, left bar), `<hr>` rule, list markers, inline gaiji images.
+  The reader's own settings (font size, line spacing, paragraph spacing, indent switch) still apply; colours, floats and borders are ignored.
+  Footnotes (`.duokan-footnote`, `epub:type=noteref`, markdown-it refs): the note body is hidden like on the web and the marker
+  is a small boxed 「注」; tapping it (hit area widened by half a line on each side) opens a centred card titled 注释 with the note text
+  in the chapter font; any tap closes it (`Clean` region flash). Block paths and code-point offsets are identical to the plain
+  layout, so reading positions stay compatible.
   A bookmarked page shows a small filled ribbon hanging from the top edge in the right margin.
   目录 from the reader = "目录与书签": segmented 目录 / 书签 (n); bookmark rows = chapter title, excerpt (drawn with the
   chapter's obfuscation font, which is remembered per bookmark), relative time; long press → delete dialog.

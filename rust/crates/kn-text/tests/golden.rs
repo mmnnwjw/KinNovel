@@ -105,7 +105,7 @@ fn check_blocks(name: &str, blocks: &[Block], golden: &[Value]) {
 
 fn page_item_tuple(item: &PageItem) -> (String, i64, i64, String, usize, String, String, i64, i64) {
     match item {
-        PageItem::Text { text, x, y, size, path, offset } => (
+        PageItem::Text { text, x, y, size, path, offset, .. } => (
             "text".to_string(),
             *x,
             *y,
@@ -127,6 +127,7 @@ fn page_item_tuple(item: &PageItem) -> (String, i64, i64, String, usize, String,
             *width,
             *height,
         ),
+        other => panic!("兼容模式不应产生 {other:?}"),
     }
 }
 
@@ -211,6 +212,7 @@ fn run_golden(stem: &str, dir: &Path) {
         cover_full_page: false,
         real_image_size: false,
         strict_kinsoku: false,
+        rich: false,
     };
     let mut m = GoldenMeasure;
     let pages = paginate_all(&blocks, params, &mut m);

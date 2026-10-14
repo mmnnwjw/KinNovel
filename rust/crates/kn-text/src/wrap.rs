@@ -38,6 +38,14 @@ fn rstrip_py(chars: &[char]) -> String {
 ///   不让整串标点出现在下一行行首; 带不走 (整行只有它) 时整串悬挂在行尾。
 pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Measure) -> Vec<(String, usize)> {
     let chars: Vec<char> = text.replace('\u{a0}', " ").chars().collect();
+    let widths: Vec<f64> = chars.iter().map(|&c| m.char_width(size, c) as f64).collect();
+    wrap_widths(&chars, &widths, max_width, 0.0, strict)
+}
+
+/// [`wrap`] 的通用形式: 每个字符的宽度由调用方给出 (同一行可混排不同字号; 宽度 0 的字符不占位),
+/// 第一行另有 `first_indent` 像素的缩进。`chars` 里的不换行空格应已换成普通空格。
+pub fn wrap_widths(chars: &[char], widths: &[f64], max_width: f64, first_indent: f64, strict: bool) -> Vec<(String, usize)> {
+    debug_assert_eq!(chars.len(), widths.len());
     if chars.is_empty() {
         return vec![(String::new(), 0)];
     }
@@ -45,12 +53,10 @@ pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Me
     let mut lines: Vec<(String, usize)> = Vec::new();
     let mut current: Vec<char> = Vec::new();
     let mut current_start: usize = 0;
-    let mut current_width: f64 = 0.0;
+    let mut current_width: f64 = first_indent;
 
-    let char_width = |m: &mut dyn Measure, c: char| -> f64 { m.char_width(size, c) as f64 };
-    let measure = |m: &mut dyn Measure, value: &[char]| -> f64 {
-        value.iter().map(|&c| char_width(m, c)).sum()
-    };
+    // 与 Python 版一致: 带走若干字之后从头重新累加这一行的宽度 (求和顺序不变, 结果逐位相同)
+    let measure = |from: usize, to: usize| -> f64 { widths[from..to].iter().sum() };
 
     let n = chars.len();
     let mut index = 0usize;
@@ -70,7 +76,7 @@ pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Me
                 run_end += 1;
             }
             let run = &chars[index..run_end];
-            let run_width = measure(m, run);
+            let run_width = measure(index, run_end);
             if !current.is_empty() && current_width + run_width > max_width {
                 if run.len() == 1 {
                     // 保留单字符闭标点的悬挂语义
@@ -104,7 +110,7 @@ pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Me
                 current_start += carry_start;
                 current = carry.to_vec();
                 current.extend_from_slice(run);
-                current_width = measure(m, &current);
+                current_width = measure(current_start, run_end);
             } else {
                 if current.is_empty() {
                     current_start = index;
@@ -115,7 +121,7 @@ pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Me
             index = run_end;
             continue;
         }
-        let w = char_width(m, c);
+        let w = widths[index];
         if !current.is_empty() && current_width + w > max_width {
             let cut_full = current.clone();
             let mut carry_start = cut_full.len();
@@ -130,7 +136,7 @@ pub fn wrap(text: &str, size: u32, max_width: f64, strict: bool, m: &mut impl Me
             current_start += carry_start;
             current = carry.to_vec();
             current.push(c);
-            current_width = measure(m, &current);
+            current_width = measure(current_start, index + 1);
         } else {
             if current.is_empty() {
                 current_start = index;

@@ -13,4 +13,4 @@ mod text;
 pub use bitmap::Bitmap;
 pub use geom::{Point, Rect};
 pub use image::{decode_gray, height_bucket, ImageError, HEIGHT_BUCKETS};
-pub use text::{decode_woff2, FontId, FontStore, FxHasher, FxMap, GlyphCache, LineMetrics, TextError, TextStyle};
+pub use text::{bold_strokes, decode_woff2, FontId, FontStore, FxHasher, FxMap, GlyphCache, LineMetrics, Synth, TextError, TextStyle};

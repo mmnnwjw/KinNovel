@@ -49,6 +49,23 @@ impl std::fmt::Display for TextError {
 
 impl std::error::Error for TextError {}
 
+/// 合成字形 (字体本身没有粗体/斜体字重时模拟网页版的 `font-weight: bold` / `font-style: italic`)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Synth {
+    /// 加粗: 同一字形向右错开 1~2 像素再画一遍 (宽度不变, 不影响排版)
+    pub bold: bool,
+    /// 斜体: 光栅化时把轮廓向右倾斜 (约 12°)
+    pub italic: bool,
+}
+
+/// 斜体的倾斜系数 (x += y * k, 约 12°)。
+const ITALIC_SKEW: f32 = 0.21;
+
+/// 合成粗体的额外描画次数 (每次右移 1 像素): 48 px 正文约 2 像素。
+pub fn bold_strokes(size_px: f32) -> i32 {
+    ((size_px * 0.04).round() as i32).max(1)
+}
+
 /// 一段文字的样式: 字体回退链 + 像素字号。
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
@@ -227,22 +244,34 @@ pub fn decode_woff2(bytes: &[u8]) -> Result<Vec<u8>, TextError> {
 
 /// Collects glyph outline commands via skrifa's `OutlinePen` trait into a zeno path.
 /// Font outlines are Y-up (em space); raster images are Y-down, so flip Y here.
+/// `skew` != 0 时同时做斜体倾斜 (y 越高越往右)。
 struct PenCollector {
     cmds: Vec<Command>,
+    skew: f32,
+}
+
+impl PenCollector {
+    fn p(&self, x: f32, y: f32) -> (f32, f32) {
+        (x + y * self.skew, -y)
+    }
 }
 
 impl OutlinePen for PenCollector {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.cmds.move_to((x, -y));
+        let p = self.p(x, y);
+        self.cmds.move_to(p);
     }
     fn line_to(&mut self, x: f32, y: f32) {
-        self.cmds.line_to((x, -y));
+        let p = self.p(x, y);
+        self.cmds.line_to(p);
     }
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.cmds.quad_to((cx0, -cy0), (x, -y));
+        let (c, p) = (self.p(cx0, cy0), self.p(x, y));
+        self.cmds.quad_to(c, p);
     }
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        self.cmds.curve_to((cx0, -cy0), (cx1, -cy1), (x, -y));
+        let (c0, c1, p) = (self.p(cx0, cy0), self.p(cx1, cy1), self.p(x, y));
+        self.cmds.curve_to(c0, c1, p);
     }
     fn close(&mut self) {
         self.cmds.close();
@@ -332,14 +361,14 @@ impl GlyphCache {
         }
     }
 
-    fn rasterize(fonts: &FontStore, font_id: FontId, gid: GlyphId, size_px: f32) -> GlyphEntry {
+    fn rasterize(fonts: &FontStore, font_id: FontId, gid: GlyphId, size_px: f32, italic: bool) -> GlyphEntry {
         let font_ref = fonts.font_ref(font_id);
         let metrics = font_ref.glyph_metrics(Size::new(size_px), LocationRef::default());
         let advance = metrics.advance_width(gid).unwrap_or(size_px);
 
         let outlines = font_ref.outline_glyphs();
         if let Some(outline) = outlines.get(gid) {
-            let mut pen = PenCollector { cmds: Vec::new() };
+            let mut pen = PenCollector { cmds: Vec::new(), skew: if italic { ITALIC_SKEW } else { 0.0 } };
             let settings = DrawSettings::unhinted(Size::new(size_px), LocationRef::default());
             if outline.draw(settings, &mut pen).is_ok() && !pen.cmds.is_empty() {
                 let (pixels, placement) = Mask::new(&pen.cmds).style(Fill::NonZero).render();
@@ -396,10 +425,28 @@ impl GlyphCache {
         style: &TextStyle,
         color: u8,
     ) -> f32 {
+        self.draw_text_synth(fonts, target, x, baseline_y, text, style, color, Synth::default())
+    }
+
+    /// 同 [`Self::draw_text`], 可合成粗体/斜体 (advance 不变)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_synth(
+        &mut self,
+        fonts: &FontStore,
+        target: &mut Bitmap,
+        x: f32,
+        baseline_y: f32,
+        text: &str,
+        style: &TextStyle,
+        color: u8,
+        synth: Synth,
+    ) -> f32 {
         if style.fonts.is_empty() {
             return 0.0;
         }
-        let size_key = quantize_size(style.size_px);
+        // 斜体字形单独缓存 (最高位做标记)
+        let size_key = quantize_size(style.size_px) | if synth.italic { 1 << 31 } else { 0 };
+        let strokes = if synth.bold { bold_strokes(style.size_px) } else { 0 };
         let base_y = baseline_y.round() as i32;
         let start_x_64 = (x as f64 * 64.0).round() as i64;
         let mut pen_x_64 = start_x_64;
@@ -419,7 +466,7 @@ impl GlyphCache {
             self.tick += 1;
             let tick = self.tick;
             if !self.map.contains_key(&key) {
-                let mut entry = Self::rasterize(fonts, font_id, gid, style.size_px);
+                let mut entry = Self::rasterize(fonts, font_id, gid, style.size_px, synth.italic);
                 entry.last_used = tick; // 先标记为最新, 免得插入后立刻被淘汰
                 self.bytes_used += entry.byte_size();
                 self.map.insert(key, entry);
@@ -435,7 +482,9 @@ impl GlyphCache {
                 let px = (pen_x_64 as f64 / 64.0) as f32;
                 let origin_x = px.round() as i32 + entry.left;
                 let origin_y = base_y + entry.top;
-                target.blend_mask(&entry.pixels, entry.width, entry.height, origin_x, origin_y, color);
+                for dx in 0..=strokes {
+                    target.blend_mask(&entry.pixels, entry.width, entry.height, origin_x + dx, origin_y, color);
+                }
             }
             pen_x_64 += (entry.advance as f64 * 64.0).round() as i64;
         }

@@ -2,7 +2,7 @@
 //!
 //! 版式 (1.0 重新设计, 不沿用 Python 版):
 //! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏): 左边章节名后接页码, 右边时间 · 电量; 底边一条细进度线。
-//! - 点击: 插图 (仅图片实际绘制区域) 进入全屏预览; 其余左 30% 上一页, 右 30% 下一页, 中间呼出控件层;
+//! - 点击: 插图 (仅图片实际绘制区域) 进入全屏预览; 注释图标「注」弹出注释卡片 (点任意处关闭); 其余左 30% 上一页, 右 30% 下一页, 中间呼出控件层;
 //!   顶栏 (时间/电量那一条) 不响应点击; 左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
 //! - 控件层是覆盖在正文上的浮层 (不触发重排): 顶栏 (返回 / 书名 / 书签 / 主页) + 底部面板
 //!   (章节信息与进度条 [点按/滑动跳页]、上一章 / 目录 / 设置 / 下一章、字号 − / + 、日夜切换), 按钮 ≥ 9 mm。
@@ -14,7 +14,8 @@
 //! - 章节 JSON 解析、HTML 分块、字体读取 (WOFF2 解码只做一次, 结果旁路缓存为 TTF) 在后台线程。
 //! - 分页在 UI 线程渐进进行: 进入时只排到目标页 (有阅读进度时排完整章以便定位), 其余在空闲时每次一页。
 //! - 正文按页渲染成位图并缓存 (当前页 ± 1, 空闲时预渲染), 翻页 = 拷贝位图 + 画顶栏, 走 REAGL 整屏刷新。
-//! - 排版与 Python 版逐项一致 (kn-text), 阅读进度 (XPath + 码点偏移) 两版通用。
+//! - 正文按网页版的样式排 (kn-text 网页样式模式: 粗体、字号、对齐、引用、分隔线、注音、注释等);
+//!   块划分与码点偏移和 Python 版一致, 阅读进度 (XPath + 码点偏移) 与 Python 版、网页版通用。
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -23,8 +24,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
-use kn_render::{Bitmap, FontId, Point, Rect, TextStyle};
-use kn_text::{first_anchor_on_page, page_for_path, Block, FontMeasure, LayoutParams, Page as TextPage, PageItem, Paginator, WidthCache};
+use kn_render::{Bitmap, FontId, Point, Rect, Synth, TextStyle};
+use kn_text::{first_anchor_on_page, page_for_path, Block, FontMeasure, Inline, LayoutParams, Page as TextPage, PageItem, Paginator, RichLine, WidthCache, OBJECT_CHAR};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 
@@ -103,6 +104,7 @@ pub(super) static LAST_UPLOAD: Mutex<Option<(i64, i64, String)>> = Mutex::new(No
 struct Loaded {
     chapter: Chapter,
     blocks: Vec<Block>,
+    notes: Vec<String>,
     font_path: Option<PathBuf>,
     /// None = 不需要读 (与已加载的章节字体相同) 或没有字体
     font_bytes: Option<Result<Vec<u8>, String>>,
@@ -138,6 +140,12 @@ pub struct ReaderPage {
     status: Status,
     chapter: Chapter,
     blocks: Vec<Block>,
+    /// 本章注释内容 (点击正文里的注释标记弹出), 下标 = 序号 - 1
+    notes: Vec<String>,
+    /// 当前页注释标记的点击区域 (屏幕坐标) 与注释序号
+    note_hits: Vec<(Rect, u16)>,
+    /// 正在显示的注释 (序号)
+    footnote: Option<u16>,
     chain: Vec<FontId>,
     widths: WidthCache,
     params: Option<LayoutParams>,
@@ -177,6 +185,9 @@ impl ReaderPage {
             status: Status::Loading,
             chapter: Chapter::default(),
             blocks: Vec::new(),
+            notes: Vec::new(),
+            note_hits: Vec::new(),
+            footnote: None,
             chain: Vec::new(),
             widths: WidthCache::default(),
             params: None,
@@ -229,6 +240,8 @@ impl ReaderPage {
             real_image_size: true,
             // 」』）不放行首, 「…了。」 不会把 」 留给下一行
             strict_kinsoku: true,
+            // 粗体、字号、居中、引用、分隔线、注释弹窗等按网页版的样式排 (kn_text::style)
+            rich: true,
         }
     }
 
@@ -338,6 +351,8 @@ impl ReaderPage {
         let started = Instant::now();
         self.chapter = loaded.chapter;
         self.blocks = loaded.blocks;
+        self.notes = loaded.notes;
+        self.footnote = None;
         let system = cx.app.ui_fonts[0];
         let mut chapter_font = None;
         match (loaded.font_path, loaded.font_bytes) {
@@ -470,6 +485,18 @@ impl ReaderPage {
         let metrics_chain = [*self.chain.last().expect("chain")];
         for item in items {
             match item {
+                PageItem::Text { text, x, y, rich: Some(line), .. } => {
+                    self.draw_rich_line(cx, &mut bmp, text, *x as f32, *y as f32, line);
+                }
+                PageItem::Rule { x, y, width, height } => {
+                    bmp.fill_rect(Rect::new(*x as i32, *y as i32, *width as u32, *height as u32), theme.mid);
+                }
+                PageItem::Dot { x, y, size } => {
+                    let d = *size as u32;
+                    bmp.rounded_rect(Rect::new(*x as i32, *y as i32, d, d), d / 2, Some(theme.foreground), None, 0);
+                }
+                // 注释标记由所在的文字行画出, 这里只是点击区域
+                PageItem::Note { .. } => {}
                 PageItem::Text { text, x, y, size, .. } => {
                     let size_px = *size as f32;
                     let ascent = cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain.to_vec(), size_px }).ascent;
@@ -500,6 +527,80 @@ impl ReaderPage {
         bmp
     }
 
+    /// 一行带样式的文字 (网页样式模式)。基线按行内最大字号定, 与兼容模式的整行文字一致。
+    fn draw_rich_line(&self, cx: &mut Cx<KinNovel>, bmp: &mut Bitmap, text: &str, x: f32, y: f32, line: &RichLine) {
+        let theme = cx.theme;
+        let metrics_chain = vec![*self.chain.last().expect("chain")];
+        let ascent = |cx: &Cx<KinNovel>, size: u32| cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain.clone(), size_px: size as f32 }).ascent;
+        let baseline = (y + ascent(cx, line.max_size)).round();
+        // 最近的注音基字 (x, 宽, 字号)
+        let mut base: Option<(f32, f32, u32)> = None;
+        for r in &line.runs {
+            let s = r.style;
+            if s.hidden {
+                continue;
+            }
+            let color = if s.muted { theme.muted } else { theme.foreground };
+            let size = r.size as f32;
+            let rx = x + r.x;
+            let bl = baseline
+                + match s.shift {
+                    1 => -(line.max_size as f32 * 0.33).round(),
+                    -1 => (line.max_size as f32 * 0.15).round(),
+                    _ => 0.0,
+                };
+            match &r.object {
+                Some(Inline::Note(_)) => {
+                    // 注释图标: 圆角框里一个「注」(用系统字体: 章节字体的字形是打乱的)
+                    let h = (size * 0.95).round();
+                    let w = (r.width - size * 0.1).max(h * 0.8).round();
+                    let rect = Rect::new((rx + size * 0.05).round() as i32, (bl - size * 0.85).round() as i32, w as u32, h as u32);
+                    let lw = ((size / 24.0).round() as u32).max(1);
+                    bmp.rounded_rect(rect, (h * 0.2) as u32, None, Some(color), lw);
+                    let chain = cx.app.ui_fonts.clone();
+                    let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+                    ink.text_centered(bmp, rect, "注", size * 0.62, color);
+                }
+                Some(_) => {}
+                None if s.ruby => {
+                    let Some((bx, bw, bsize)) = base else { continue };
+                    let style = TextStyle { fonts: self.chain.clone(), size_px: size };
+                    let rt = &text[r.start..r.end];
+                    let w = cx.fonts.measure(rt, &style);
+                    let rbl = (baseline - ascent(cx, bsize) - size * 0.15).round();
+                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, (bx + (bw - w) / 2.0).round(), rbl, rt, &style, color, Synth { bold: s.bold, italic: s.italic });
+                }
+                None => {
+                    let style = TextStyle { fonts: self.chain.clone(), size_px: size };
+                    let run = &text[r.start..r.end];
+                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, rx, bl, run, &style, color, Synth { bold: s.bold, italic: s.italic });
+                    let thick = ((size / 20.0).round() as u32).max(1);
+                    if s.underline {
+                        bmp.fill_rect(Rect::new(rx.round() as i32, (bl + size * 0.12).round() as i32, r.width.round() as u32, thick), color);
+                    }
+                    if s.strike {
+                        bmp.fill_rect(Rect::new(rx.round() as i32, (bl - size * 0.32).round() as i32, r.width.round() as u32, thick), color);
+                    }
+                    if s.dots {
+                        // 着重号: 每个字下方居中一个点
+                        let mut pen = rx;
+                        let d = ((size * 0.14).round() as u32).max(2);
+                        for ch in run.chars() {
+                            let font = cx.fonts.pick_font(&self.chain, ch);
+                            let adv = cx.fonts.advance(font, ch, size);
+                            if !ch.is_whitespace() {
+                                let dx = (pen + adv / 2.0 - d as f32 / 2.0).round() as i32;
+                                bmp.rounded_rect(Rect::new(dx, (bl + size * 0.2).round() as i32, d, d), d / 2, Some(color), None, 0);
+                            }
+                            pen += adv;
+                        }
+                    }
+                    base = Some((rx, r.width, r.size));
+                }
+            }
+        }
+    }
+
     /// 已解码插图在排版框 `r` 里的实际绘制区域 (水平居中, 顶对齐, 与 Python 版一致); 未就绪返回 None。
     fn image_rect(&self, url: &str, r: Rect) -> Option<Rect> {
         let Some(ImageSlot::Ready(img)) = self.images.get(url) else { return None };
@@ -510,8 +611,15 @@ impl ReaderPage {
     /// 当前页插图的点击区域 (屏幕坐标; 正文位图画在 y = top 处)。
     fn update_image_hits(&mut self, top: i32) {
         self.image_hits.clear();
+        self.note_hits.clear();
         let Some(items) = self.pages.get(self.page) else { return };
         for item in items {
+            if let PageItem::Note { index, x, y, width, height } = item {
+                // 标记只有一个字宽: 左右各放宽半行高, 好点中
+                let pad = *height as i32 / 2;
+                self.note_hits.push((Rect::new(*x as i32 - pad, *y as i32 + top, (*width as i32 + 2 * pad) as u32, *height as u32), *index));
+                continue;
+            }
             let PageItem::Image { url, x, y, width, height, .. } = item else { continue };
             let r = Rect::new(*x as i32, *y as i32, *width as u32, *height as u32);
             if let Some(rect) = self.image_rect(url, r) {
@@ -691,6 +799,9 @@ impl ReaderPage {
         self.status = Status::Loading;
         self.chapter = Chapter::default();
         self.blocks.clear();
+        self.notes.clear();
+        self.note_hits.clear();
+        self.footnote = None;
         self.paginator = None;
         self.params = None;
         self.pages.clear();
@@ -720,8 +831,11 @@ impl ReaderPage {
     fn page_excerpt(&self) -> String {
         let mut text = String::new();
         for item in self.pages.get(self.page).into_iter().flatten() {
-            if let PageItem::Text { text: t, .. } = item {
-                text.push_str(t.trim());
+            if let PageItem::Text { text: t, path, .. } = item {
+                if path.is_empty() {
+                    continue; // 列表序号
+                }
+                text.extend(t.trim().chars().filter(|&c| c != OBJECT_CHAR));
                 if text.chars().count() >= EXCERPT_CHARS {
                     break;
                 }
@@ -793,7 +907,8 @@ impl ReaderPage {
             let started = Instant::now();
             let bytes = crate::net::chapter_bytes(&paths, net.as_ref(), book_id, sort_num, &convert)?;
             let chapter = Chapter::parse(&bytes, true).ok_or("章节数据损坏")?;
-            let blocks = kn_text::extract_blocks(&chapter.content, store::SITE_BASE);
+            let doc = kn_text::extract_document(&chapter.content, store::SITE_BASE, true);
+            let (blocks, notes) = (doc.blocks, doc.notes);
             let font_path = match &chapter.font {
                 f if f.is_empty() => None,
                 f => crate::net::ensure_font(&paths, net.as_ref(), &api, f).or_else(|| paths.font_file(&api, f)),
@@ -806,7 +921,7 @@ impl ReaderPage {
             let local = store::load_progress(&paths.progress_file(book_id, sort_num, &convert));
             let mut chapter = chapter;
             chapter.content = String::new();
-            Ok(Loaded { chapter, blocks, font_path, font_bytes, local, millis: started.elapsed().as_millis() })
+            Ok(Loaded { chapter, blocks, notes, font_path, font_bytes, local, millis: started.elapsed().as_millis() })
         });
     }
 
@@ -1101,12 +1216,23 @@ impl Page<KinNovel> for ReaderPage {
             if self.chrome {
                 self.draw_chrome(cx, frame);
             }
+            if let Some(n) = self.footnote {
+                self.draw_footnote(cx, frame, n);
+            }
         }
         super::tips::show(cx, frame, &super::tips::READER, matches!(self.status, Status::Ready));
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
         if super::tips::input(cx, event, &super::tips::READER) {
+            return Transition::None;
+        }
+        // 注释弹窗: 点任意处 (或滑动、翻页键) 关闭
+        if self.footnote.is_some() {
+            if matches!(event, InputEvent::Gesture(g) if g.kind != GestureKind::Down) || matches!(event, InputEvent::Key { pressed: true, .. }) {
+                self.footnote = None;
+                cx.request_redraw(RefreshHint::Clean);
+            }
             return Transition::None;
         }
         match event {
@@ -1133,6 +1259,14 @@ impl Page<KinNovel> for ReaderPage {
                         }
                         if matches!(self.status, Status::Failed(_)) {
                             return Transition::Back;
+                        }
+                        // 注释标记: 弹出注释 (同网页版点击注释图标)
+                        if let Some((_, n)) = self.note_hits.iter().find(|(r, _)| r.contains(p)) {
+                            if self.notes.get(*n as usize - 1).is_some() {
+                                self.footnote = Some(*n);
+                                cx.request_redraw(RefreshHint::Ui);
+                                return Transition::None;
+                            }
                         }
                         // 只认插图实际绘制区域 (不含排版框两侧留白)
                         if g.kind == GestureKind::Tap {
@@ -1218,6 +1352,52 @@ impl Page<KinNovel> for ReaderPage {
             return true;
         }
         false
+    }
+}
+
+impl ReaderPage {
+    /// 注释弹窗: 屏幕中部的卡片, 标题「注释」, 正文用章节字体 (注释文字和正文一样经过字形打乱)。
+    fn draw_footnote(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap, n: u16) {
+        let Some(note) = self.notes.get(n as usize - 1).cloned() else { return };
+        let theme = cx.theme;
+        let m = cx.app.metrics;
+        let font = self.params.as_ref().map_or(m.body, |p| p.font_size as f32 * 0.85).round().max(m.small);
+        let pad = m.margin as i32;
+        let card_w = cx.width as i32 - 2 * pad;
+        let text_w = (card_w - 2 * pad).max(100);
+        let mut lines: Vec<String> = {
+            let mut measure = FontMeasure::new(&*cx.fonts, &self.chain, &mut self.widths);
+            note.split('\n').flat_map(|para| kn_text::wrap(para, font as u32, text_w as f64, true, &mut measure)).map(|(l, _)| l).collect()
+        };
+        let line_h = (font * 1.5).round() as i32;
+        let title_h = (m.small * 1.6).round() as i32;
+        let max_lines = ((cx.height as i32 * 7 / 10 - 2 * pad - title_h) / line_h).max(1) as usize;
+        if lines.len() > max_lines {
+            lines.truncate(max_lines);
+            if let Some(last) = lines.last_mut() {
+                last.pop();
+                last.push('…');
+            }
+        }
+        let card_h = pad + title_h + lines.len() as i32 * line_h + pad / 4;
+        let card = Rect::new(pad, (cx.height as i32 - card_h) / 2, card_w as u32, card_h as u32);
+        frame.rounded_rect(card, m.radius, Some(theme.background), Some(theme.foreground), 3);
+        let chain = cx.app.ui_fonts.clone();
+        {
+            let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+            ink.text(frame, card.x + pad, card.y + pad / 2, "注释", m.small, theme.muted);
+            let hint = "轻触任意处关闭";
+            let hw = ink.width(hint, m.tiny).ceil() as i32;
+            ink.text(frame, card.x + card_w - pad - hw, card.y + pad / 2 + ((m.small - m.tiny) / 2.0) as i32, hint, m.tiny, theme.muted);
+        }
+        let metrics_chain = vec![*self.chain.last().expect("chain")];
+        let ascent = cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain, size_px: font }).ascent;
+        let style = TextStyle { fonts: self.chain.clone(), size_px: font };
+        let mut y = card.y + pad / 2 + title_h + (line_h - font as i32) / 2;
+        for line in &lines {
+            cx.glyphs.draw_text(&*cx.fonts, frame, (card.x + pad) as f32, (y as f32 + ascent).round(), line, &style, theme.foreground);
+            y += line_h;
+        }
     }
 }
 

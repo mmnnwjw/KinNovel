@@ -2,8 +2,9 @@
 
 use std::collections::VecDeque;
 
-use crate::html::{Block, BlockKind};
-use crate::wrap::{wrap, Measure};
+use crate::html::{Block, BlockKind, Inline};
+use crate::style::{Align, InlineStyle, WEB_LINE_HEIGHT};
+use crate::wrap::{wrap, wrap_widths, Measure};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageItem {
@@ -14,6 +15,8 @@ pub enum PageItem {
         size: u32,
         path: String,
         offset: usize,
+        /// 网页样式模式: 行内样式分段; None = 整行同一字号、默认样式 (兼容模式)
+        rich: Option<Box<RichLine>>,
     },
     Image {
         url: String,
@@ -24,6 +27,40 @@ pub enum PageItem {
         path: String,
         offset: usize,
     },
+    /// 注释标记的点击区域 (标记本身由所在的文字行画出); `index` = `Document::notes` 序号 (从 1 起)
+    Note { index: u16, x: i64, y: i64, width: i64, height: i64 },
+    /// 分隔线 / 引用块左侧竖线
+    Rule { x: i64, y: i64, width: i64, height: i64 },
+    /// 无序列表的圆点 (左上角与直径)
+    Dot { x: i64, y: i64, size: i64 },
+}
+
+/// 无序列表标记 (排版时画成 [`PageItem::Dot`])。
+pub const BULLET: &str = "•";
+
+/// 一行带样式的文字。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RichLine {
+    /// 行内最大字号 (基线按它定)
+    pub max_size: u32,
+    /// 行高 (像素)
+    pub height: i64,
+    pub runs: Vec<Run>,
+}
+
+/// 同一样式、同一字号的一段字符。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Run {
+    /// 在行文字里的字节区间
+    pub start: usize,
+    pub end: usize,
+    /// 相对行起点的横坐标与宽度 (像素)
+    pub x: f32,
+    pub width: f32,
+    pub size: u32,
+    pub style: InlineStyle,
+    /// 行内对象 (这段是一个 `OBJECT_CHAR`)
+    pub object: Option<Inline>,
 }
 
 impl PageItem {
@@ -31,12 +68,14 @@ impl PageItem {
         match self {
             PageItem::Text { path, .. } => path,
             PageItem::Image { path, .. } => path,
+            PageItem::Note { .. } | PageItem::Rule { .. } | PageItem::Dot { .. } => "",
         }
     }
     pub fn offset(&self) -> usize {
         match self {
             PageItem::Text { offset, .. } => *offset,
             PageItem::Image { offset, .. } => *offset,
+            PageItem::Note { .. } | PageItem::Rule { .. } | PageItem::Dot { .. } => 0,
         }
     }
 }
@@ -65,6 +104,9 @@ pub struct LayoutParams {
     /// 严格标点禁则 (见 [`crate::wrap::wrap`]): 」』）不放行首, 标点串放不下时带上前一个字换行。
     /// false = Python 规则 (金标准测试用)。
     pub strict_kinsoku: bool,
+    /// 网页样式模式 (块来自 `extract_document(.., rich: true)`): 粗体/字号/对齐/缩进/外边距/引用块/分隔线/
+    /// 行内对象按网页版排; 行距、段距、首行缩进开关仍用阅读设置。false = Python 规则 (金标准测试用)。
+    pub rich: bool,
 }
 
 impl Default for LayoutParams {
@@ -81,6 +123,7 @@ impl Default for LayoutParams {
             cover_full_page: false,
             real_image_size: false,
             strict_kinsoku: false,
+            rich: false,
         }
     }
 }
@@ -211,10 +254,186 @@ impl Paginator {
                 size,
                 path: path.to_string(),
                 offset,
+                rich: None,
             });
             self.y += actual_height;
         }
         self.y += gap_after;
+    }
+
+    /// 网页样式模式的文字块。
+    fn add_rich_block(&mut self, m: &mut impl Measure, block: &Block) {
+        let st = &block.style;
+        let body = self.body_size as f64;
+        let fs = ((body * st.scale as f64 / 100.0).round() as u32).max(8);
+        // 网页版正文行高 1.8em 对应阅读设置的行距, 其它行高按比例换算
+        let lh_factor = (self.params.line_spacing * st.line_height.map_or(1.0, |l| l as f64 / WEB_LINE_HEIGHT as f64)).max(1.05);
+        let left = st.inset_left as f64 * body;
+        let right = st.inset_right as f64 * body;
+        let avail = (self.usable_width - left - right).max(body * 4.0);
+
+        let chars: Vec<char> = block.text.chars().map(|c| if c == '\u{a0}' { ' ' } else { c }).collect();
+        let mut styles = vec![InlineStyle::default(); chars.len()];
+        for span in &block.spans {
+            for s in styles.iter_mut().take(span.end.min(chars.len())).skip(span.start) {
+                *s = span.style;
+            }
+        }
+        let mut objects: Vec<Option<&Inline>> = vec![None; chars.len()];
+        for (at, object) in &block.objects {
+            if let Some(slot) = objects.get_mut(*at) {
+                *slot = Some(object);
+            }
+        }
+        let sizes: Vec<u32> = styles.iter().map(|s| ((fs as f64 * s.scale as f64 / 100.0).round() as u32).max(6)).collect();
+        let widths: Vec<f64> = (0..chars.len())
+            .map(|i| {
+                let size = sizes[i] as f64;
+                match objects[i] {
+                    Some(Inline::Note(_)) => size * 1.1,
+                    Some(Inline::Image { width, height, .. }) => (fs as f64 * *width as f64 / (*height).max(1) as f64).min(avail),
+                    Some(Inline::Space(em)) => fs as f64 * *em as f64 / 100.0,
+                    None if styles[i].hidden || styles[i].ruby => 0.0,
+                    None => m.char_width(sizes[i], chars[i]) as f64,
+                }
+            })
+            .collect();
+        let indent = match st.indent {
+            None if self.params.first_line_indent => 2.0 * m.char_width(fs, '\u{3000}') as f64,
+            None => 0.0,
+            Some(em) => em as f64 * fs as f64,
+        };
+        let gap_before = if self.current.is_empty() { 0 } else { (st.margin_top as f64 * body) as i64 };
+        let paragraph_gap = (self.line_height as f64 * self.params.paragraph_spacing.clamp(0.0, 3.0)) as i64;
+        let gap_after = paragraph_gap.max((st.margin_bottom as f64 * body) as i64);
+
+        self.y += gap_before;
+        let lines = wrap_widths(&chars, &widths, avail, indent, self.params.strict_kinsoku);
+        let line_count = lines.len();
+        for (line_index, (line_text, start)) in lines.into_iter().enumerate() {
+            // wrap 返回的行文字 = 从 start 起连续的字符去掉行尾空白
+            let range = start..(start + line_text.chars().count()).min(chars.len());
+            let max_size = range.clone().filter(|&i| !styles[i].hidden && !styles[i].ruby).map(|i| sizes[i]).max().unwrap_or(fs).max(fs * 3 / 4);
+            let height = ((max_size as f64 * lh_factor) as i64).max(1);
+            if self.y + height > self.usable_height && !self.current.is_empty() {
+                self.new_page();
+            }
+            let line_w: f64 = widths[range.clone()].iter().sum();
+            let first_indent = if line_index == 0 { indent } else { 0.0 };
+            let x0 = left
+                + first_indent
+                + match st.align {
+                    Align::Start => 0.0,
+                    Align::Center => ((avail - first_indent - line_w) / 2.0).max(0.0),
+                    Align::End => (avail - first_indent - line_w).max(0.0),
+                };
+            let item_x = self.margin + x0 as i64;
+            let item_y = self.margin + self.y;
+            let mut text = String::new();
+            let mut runs: Vec<Run> = Vec::new();
+            let mut x = 0.0f64;
+            for i in range.clone() {
+                let byte = text.len();
+                text.push(chars[i]);
+                let object = objects[i].cloned();
+                let merge = object.is_none()
+                    && runs.last().is_some_and(|r: &Run| r.object.is_none() && r.style == styles[i] && r.size == sizes[i]);
+                if merge {
+                    let r = runs.last_mut().expect("run");
+                    r.end = text.len();
+                    r.width += widths[i] as f32;
+                } else {
+                    runs.push(Run { start: byte, end: text.len(), x: x as f32, width: widths[i] as f32, size: sizes[i], style: styles[i], object });
+                }
+                x += widths[i];
+            }
+            for r in &runs {
+                let rx = item_x + r.x as i64;
+                if r.style.note > 0 {
+                    // 点击区域: 整行高
+                    self.current.push(PageItem::Note { index: r.style.note, x: rx, y: item_y, width: r.width.ceil() as i64, height });
+                }
+                if let Some(Inline::Image { url, .. }) = &r.object {
+                    // 底边约在基线上
+                    let h = fs as i64;
+                    let top = item_y + ((max_size as f64 * 0.9) as i64 - h).max(0);
+                    self.current.push(PageItem::Image {
+                        url: url.clone(),
+                        x: rx,
+                        y: top,
+                        width: (r.width as i64).max(1),
+                        height: h,
+                        path: block.path.clone(),
+                        offset: block.logical_offset(start),
+                    });
+                }
+            }
+            if line_index == 0 && st.marker == BULLET {
+                let d = ((fs as f64 * 0.3) as i64).max(4);
+                let cx = self.margin + (left - fs as f64 * 0.9).max(0.0) as i64;
+                let cy = item_y + (max_size as f64 * 0.55) as i64 - d / 2;
+                self.current.push(PageItem::Dot { x: cx, y: cy, size: d });
+            } else if line_index == 0 && !st.marker.is_empty() {
+                let mw: f64 = st.marker.chars().map(|c| m.char_width(fs, c) as f64).sum();
+                let mx = self.margin + (left - mw - fs as f64 * 0.4).max(0.0) as i64;
+                self.current.push(PageItem::Text {
+                    text: st.marker.clone(),
+                    x: mx,
+                    y: item_y,
+                    size: fs,
+                    path: String::new(),
+                    offset: 0,
+                    rich: Some(Box::new(RichLine {
+                        max_size,
+                        height,
+                        runs: vec![Run { start: 0, end: st.marker.len(), x: 0.0, width: mw as f32, size: fs, style: styles.first().copied().unwrap_or_default(), object: None }],
+                    })),
+                });
+            }
+            let bar_h = if line_index + 1 == line_count { height + gap_after } else { height };
+            self.quote_bars(st.quote, item_y, bar_h);
+            self.current.push(PageItem::Text {
+                text,
+                x: item_x,
+                y: item_y,
+                size: fs,
+                path: block.path.clone(),
+                offset: block.logical_offset(start),
+                rich: Some(Box::new(RichLine { max_size, height, runs })),
+            });
+            self.y += height;
+        }
+        self.y += gap_after;
+    }
+
+    /// 引用块左侧竖线 (每层一条)。
+    fn quote_bars(&mut self, depth: u8, y: i64, height: i64) {
+        let body = self.body_size as f64;
+        for d in 0..depth as i64 {
+            let x = self.margin + (d as f64 * 2.0 * body) as i64;
+            let w = ((body * 0.12) as i64).max(2);
+            self.current.push(PageItem::Rule { x, y, width: w, height });
+        }
+    }
+
+    fn add_rule(&mut self, block: &Block) {
+        let body = self.body_size as f64;
+        let gap = self.line_height / 2;
+        let h = ((body / 24.0) as i64).max(2);
+        if self.y + 2 * gap + h > self.usable_height && !self.current.is_empty() {
+            self.new_page();
+        }
+        let left = (block.style.inset_left as f64 * body) as i64;
+        let right = (block.style.inset_right as f64 * body) as i64;
+        let top = self.margin + self.y;
+        self.quote_bars(block.style.quote, top, 2 * gap + h);
+        self.current.push(PageItem::Rule {
+            x: self.margin + left,
+            y: top + gap,
+            width: (self.usable_width as i64 - left - right).max(1),
+            height: h,
+        });
+        self.y += 2 * gap + h;
     }
 
     fn process_block(&mut self, block: &Block, m: &mut impl Measure) {
@@ -259,6 +478,13 @@ impl Paginator {
                     offset: block.offset,
                 });
                 self.y += image_height + (self.line_height as f64 * 0.5) as i64;
+            }
+            BlockKind::Rule => self.add_rule(block),
+            BlockKind::Text | BlockKind::Heading if self.params.rich => {
+                if !block.text.trim().is_empty() {
+                    self.seen_text = true;
+                }
+                self.add_rich_block(m, block);
             }
             BlockKind::Footnote => {
                 self.footnotes.push((block.text.clone(), path, block.offset));
