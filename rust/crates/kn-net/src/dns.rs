@@ -8,16 +8,21 @@
 //! Verified on a KPW5 (2026-10-14): getaddrinfo failed, while the same A query
 //! sent by hand to the IPv4 server answered in ~10 ms.
 //!
-//! [`resolve`] therefore asks the IPv4 (and scoped/global IPv6) servers from
-//! resolv.conf itself when getaddrinfo fails, and goes straight to that path
-//! when resolv.conf contains such an entry.
+//! [`resolve`] therefore asks the name servers itself when getaddrinfo fails,
+//! and goes straight to that path when resolv.conf contains such an entry.
+//! resolv.conf can end up listing ONLY `fe80::1` (seen 2026-10-14: every
+//! lookup failed, images and comics stopped loading), so besides its IPv4 and
+//! global IPv6 entries we also ask the default IPv4 gateway (home routers
+//! answer DNS) and the link-local servers with the interface's scope id
+//! (`fe80::1%wlan0`) -- both answered on the KPW5 where musl gave up.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
+const ROUTES: &str = "/proc/net/route";
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Set once the system resolver failed and ours succeeded: later lookups skip
@@ -29,7 +34,8 @@ pub fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
     let conf = std::fs::read_to_string(RESOLV_CONF).unwrap_or_default();
-    let servers = name_servers(&conf);
+    let routes = std::fs::read_to_string(ROUTES).unwrap_or_default();
+    let servers = name_servers(&conf, &routes, interface_index);
     let own_first = !servers.is_empty() && (PREFER_OWN.load(Ordering::Relaxed) || musl_unfriendly(&conf));
     if own_first {
         if let Ok(addrs) = query_servers(&servers, host, port) {
@@ -60,17 +66,62 @@ fn nameserver_value(line: &str) -> Option<&str> {
     words.next()
 }
 
-/// Servers we can reach with a plain socket: IPv4 and non-link-local IPv6.
-fn name_servers(conf: &str) -> Vec<SocketAddr> {
-    conf.lines()
-        .filter_map(nameserver_value)
-        .filter_map(|v| v.parse::<IpAddr>().ok())
-        .filter(|ip| match ip {
-            IpAddr::V4(_) => true,
-            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
-        })
-        .map(|ip| SocketAddr::new(ip, 53))
-        .collect()
+fn is_link_local(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Servers to ask ourselves, in order: resolv.conf's IPv4 / global IPv6
+/// entries, the default IPv4 gateway, then link-local entries with a scope
+/// id (from `%iface`, the odhcp6c comment `#odhcp6c:wlan0:`, or the default
+/// route's interface). `ifindex` maps an interface name to its index.
+fn name_servers(conf: &str, routes: &str, ifindex: impl Fn(&str) -> Option<u32>) -> Vec<SocketAddr> {
+    let gateway = default_gateway(routes);
+    let mut plain = Vec::new();
+    let mut scoped = Vec::new();
+    for line in conf.lines() {
+        let Some(value) = nameserver_value(line) else { continue };
+        let (addr, iface) = match value.split_once('%') {
+            Some((a, i)) => (a, Some(i)),
+            None => (value, None),
+        };
+        match addr.parse::<IpAddr>() {
+            Ok(IpAddr::V6(v6)) if is_link_local(&v6) => {
+                let iface = iface
+                    .or_else(|| line.split("#odhcp6c:").nth(1).and_then(|r| r.split(':').next()))
+                    .filter(|i| !i.is_empty())
+                    .or(gateway.map(|(i, _)| i));
+                if let Some(index) = iface.and_then(&ifindex) {
+                    scoped.push(SocketAddr::V6(SocketAddrV6::new(v6, 53, 0, index)));
+                }
+            }
+            Ok(ip) => plain.push(SocketAddr::new(ip, 53)),
+            Err(_) => {}
+        }
+    }
+    if let Some((_, gw)) = gateway {
+        let gw = SocketAddr::new(IpAddr::V4(gw), 53);
+        if !plain.contains(&gw) {
+            plain.push(gw);
+        }
+    }
+    plain.extend(scoped);
+    plain
+}
+
+/// (interface, gateway) of the default IPv4 route in /proc/net/route.
+fn default_gateway(routes: &str) -> Option<(&str, Ipv4Addr)> {
+    routes.lines().skip(1).find_map(|line| {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 3 || f[1] != "00000000" {
+            return None;
+        }
+        let gw = u32::from_str_radix(f[2], 16).ok().filter(|&g| g != 0)?;
+        Some((f[0], Ipv4Addr::from(gw.to_le_bytes())))
+    })
+}
+
+fn interface_index(name: &str) -> Option<u32> {
+    std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex")).ok()?.trim().parse().ok()
 }
 
 fn query_servers(servers: &[SocketAddr], host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -176,7 +227,39 @@ mod tests {
         assert!(musl_unfriendly(ODHCP6C));
         assert!(!musl_unfriendly("nameserver 192.168.1.1\nnameserver fe80::1%wlan0\n"));
         assert!(!musl_unfriendly("nameserver 2001:db8::53\n# nameserver fe80::1\n"));
-        assert_eq!(name_servers(ODHCP6C), vec!["192.168.1.1:53".parse().unwrap()]);
+        assert_eq!(name_servers(ODHCP6C, "", |_| Some(20)), vec![
+            "192.168.1.1:53".parse().unwrap(),
+            SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 53, 0, 20)),
+        ]);
+    }
+
+    const ROUTE: &str = "Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask
+                         wlan0	0001A8C0	00000000	0001	0	0	0	00FFFFFF
+                         wlan0	00000000	0101A8C0	0003	0	0	0	00000000
+";
+
+    #[test]
+    fn only_link_local_falls_back_to_gateway_and_scoped_server() {
+        // Seen on the KPW5: resolv.conf had nothing but this line.
+        let conf = "nameserver fe80::1 #odhcp6c:wlan0:
+";
+        assert_eq!(default_gateway(ROUTE), Some(("wlan0", Ipv4Addr::new(192, 168, 1, 1))));
+        let servers = name_servers(conf, ROUTE, |i| (i == "wlan0").then_some(20));
+        assert_eq!(servers, vec![
+            "192.168.1.1:53".parse().unwrap(),
+            SocketAddr::V6(SocketAddrV6::new("fe80::1".parse().unwrap(), 53, 0, 20)),
+        ]);
+        // Explicit scope wins; no comment -> the default route's interface.
+        let named = name_servers("nameserver fe80::2%eth0
+nameserver fe80::3
+", ROUTE, |i| Some(if i == "eth0" { 7 } else { 20 }));
+        assert_eq!(named[1..], [
+            SocketAddr::V6(SocketAddrV6::new("fe80::2".parse().unwrap(), 53, 0, 7)),
+            SocketAddr::V6(SocketAddrV6::new("fe80::3".parse().unwrap(), 53, 0, 20)),
+        ]);
+        // The gateway isn't listed twice.
+        assert_eq!(name_servers("nameserver 192.168.1.1
+", ROUTE, |_| None).len(), 1);
     }
 
     #[test]
