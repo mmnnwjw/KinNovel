@@ -1,7 +1,7 @@
 //! 阅读页。
 //!
 //! 版式 (1.0 重新设计, 不沿用 Python 版):
-//! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏): 左章节名、中间时间 · 电量、右页码; 底边一条细进度线。
+//! - 正文铺满全屏; 顶部细栏 (高 3.5% 屏): 左边章节名后接页码, 右边时间 · 电量; 底边一条细进度线。
 //! - 点击: 插图 (仅图片实际绘制区域) 进入全屏预览; 其余左 30% 上一页, 右 30% 下一页, 中间呼出控件层;
 //!   顶栏 (时间/电量那一条) 不响应点击; 左右滑动翻页; 下滑呼出 / 上滑收起控件层; 翻页键。
 //! - 控件层是覆盖在正文上的浮层 (不触发重排): 顶栏 (返回 / 书名 / 书签 / 主页) + 底部面板
@@ -817,18 +817,21 @@ impl ReaderPage {
         frame.fill_rect(Rect::new(0, 0, cx.width, top as u32), theme.background);
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let label = self.page_label();
-        let label_w = ink.width(&label, m.tiny).ceil() as i32;
         let style_top = (top - (m.tiny * 1.2) as i32) / 2 + 4;
-        ink.text(frame, cx.width as i32 - margin - label_w, style_top, &label, m.tiny, theme.muted);
-        // 时间 · 电量居中 (每分钟随 on_minute 重绘, 只刷顶栏这一小块)
+        // 右侧: 时间 · 电量 (与其它页面顶栏一致, 每分钟随 on_minute 重绘, 只刷顶栏这一小块)
         let status = super::status_text();
         let status_w = ink.width(&status, m.tiny).ceil() as i32;
-        let status_x = (cx.width as i32 - status_w) / 2;
+        let status_x = cx.width as i32 - margin - status_w;
         ink.text(frame, status_x, style_top, &status, m.tiny, theme.muted);
-        let title_w = (status_x - margin - margin / 2).max(0) as f32;
+        // 左侧: 章节名, 后面隔一点接章内页码
+        let label = self.page_label();
+        let label_w = ink.width(&label, m.tiny).ceil() as i32;
+        let gap = (m.tiny * 0.8) as i32;
+        let title_w = (status_x - margin - margin / 2 - gap - label_w).max(0) as f32;
         let title = ink.fit(&self.chapter.title, m.tiny, title_w);
-        ink.text(frame, margin, style_top, &title, m.tiny, theme.muted);
+        let title_end = margin + ink.text(frame, margin, style_top, &title, m.tiny, theme.muted).ceil() as i32;
+        let label_x = if title.is_empty() { margin } else { title_end + gap };
+        ink.text(frame, label_x, style_top, &label, m.tiny, theme.muted);
         // 书签角标: 右侧页边距里, 从屏幕顶边垂下
         if self.bookmark_on_page().is_some() {
             let rw = (margin as f32 * 0.42).max(10.0) as u32;

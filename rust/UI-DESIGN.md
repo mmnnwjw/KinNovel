@@ -52,7 +52,7 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   (tap the slider to jump, swipe on it to drag; only the panel region refreshes, `Ui`). Values are powerd's own
   (`flIntensity` 0..flMaxIntensity, `currentAmberLevel` 0..24 via `lipc-set-prop`), so they persist after exit;
   rows the device doesn't support are hidden (no panel at all without a frontlight).
-- Novel reader: taps on the thin status band at the top (chapter · time/battery · page) do nothing (no accidental turns).
+- Novel reader: taps on the thin status band at the top (chapter title + page on the left, time · battery right-aligned like every other header) do nothing (no accidental turns).
   Menu header = back · book title · bookmark ribbon (outline / filled = toggle a bookmark on this page) · home.
   The chapter progress bar in the bottom panel is a slider (tap or swipe → page in the chapter, whole chapter laid out first).
   Illustrations: only the cover (first image of the volume's first chapter, with no body text before it) fills a page;
