@@ -105,12 +105,44 @@ fn online(cx: &Cx<KinNovel>) -> bool {
     cx.app.net().is_some() || api::fake_mode()
 }
 
-fn per_page(cx: &Cx<KinNovel>) -> usize {
+/// 纯几何 (不需要 `Ink`): 绘制和"每页几本"都从这里取, 两边永远一致。
+/// 列表上方有一行 (最新/分类) 或两行 (排行/漫画) 分段按钮, 选中分类时还有返回按钮。
+struct Geometry {
+    seg_rect: Rect,
+    rank_rect: Option<Rect>,
+    /// 列表区 (最新 / 排行 / 漫画 / 分类目录)
+    area: Rect,
+    back_rect: Rect,
+    /// 选中分类后的书目区 (返回按钮下方)
+    books_area: Rect,
+    list_bottom: i32,
+}
+
+fn geometry(cx: &Cx<KinNovel>, sub: Sub) -> Geometry {
     let m = cx.app.metrics;
-    let top = m.header_h() as i32 + m.margin as i32;
-    let bottom = m.tab_bar_h() as i32 + m.pager_h() as i32;
-    let area = cx.height as i32 - top - bottom;
-    (area / m.row_h_cover() as i32).max(1) as usize
+    let side = m.margin as i32;
+    let seg_h = m.touch as u32;
+    let tabs_top = cx.height as i32 - m.tab_bar_h() as i32;
+    let seg_rect = Rect::new(side, m.header_h() as i32 + m.margin as i32 / 3, cx.width - 2 * m.margin, seg_h);
+    let mut y = seg_rect.bottom() + m.margin as i32 / 3;
+    let rank_rect = matches!(sub, Sub::Rank | Sub::Comic).then(|| {
+        let r = Rect::new(side, y, cx.width - 2 * m.margin, seg_h);
+        y = r.bottom() + m.margin as i32 / 3;
+        r
+    });
+    let list_bottom = tabs_top - m.pager_h() as i32;
+    let area = Rect::new(0, y, cx.width, (list_bottom - y).max(0) as u32);
+    let back_rect = Rect::new(side, area.y, cx.width - 2 * m.margin, m.touch);
+    let books_y = back_rect.bottom() + m.margin as i32 / 3;
+    let books_area = Rect::new(0, books_y, cx.width, (list_bottom - books_y).max(0) as u32);
+    Geometry { seg_rect, rank_rect, area, back_rect, books_area, list_bottom }
+}
+
+/// 每页的书数 = 列表区能放下的整行数 (分类书目在返回按钮下方)。
+fn per_page(cx: &Cx<KinNovel>, sub: Sub) -> usize {
+    let g = geometry(cx, sub);
+    let area = if sub == Sub::Category { g.books_area } else { g.area };
+    (area.h / cx.app.metrics.row_h_cover()).max(1) as usize
 }
 
 impl DiscoverPage {
@@ -122,7 +154,7 @@ impl DiscoverPage {
         self.latest = Fetch::Loading;
         self.latest_page = page;
         let net = cx.app.net();
-        let size = per_page(cx) as i64;
+        let size = per_page(cx, Sub::Latest) as i64;
         let filters = api::Filters::from_config(&cx.app.config);
         cx.spawn(move || LatestLoaded(page, api::load_book_list(net.as_ref(), page, size.max(1), None, filters)));
     }
@@ -158,7 +190,7 @@ impl DiscoverPage {
         self.category_list = Fetch::Loading;
         self.category_page = page;
         let net = cx.app.net();
-        let size = per_page(cx) as i64;
+        let size = per_page(cx, Sub::Category) as i64;
         let id = cat.id;
         let filters = api::Filters::from_config(&cx.app.config);
         cx.spawn(move || CategoryListLoaded(id, page, api::load_book_list(net.as_ref(), page, size.max(1), Some(id), filters)));
@@ -172,7 +204,7 @@ impl DiscoverPage {
         self.comic = Fetch::Loading;
         self.comic_page = page;
         let net = cx.app.net();
-        let size = per_page(cx) as i64;
+        let size = per_page(cx, Sub::Comic) as i64;
         let order = self.comic_order;
         cx.spawn(move || ComicLoaded(order, page, api::load_comic_list(net.as_ref(), page, size.max(1), order)));
     }
@@ -323,27 +355,12 @@ impl Page<KinNovel> for DiscoverPage {
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let m = cx.app.metrics;
-        let tabs_top = super::draw_tabs(cx, frame, Tab::Discover);
-        let side = m.margin as i32;
-        let seg_h = m.touch as u32;
-
-        // 纯几何 (不需要 `Ink`), 和下面实际绘制时用的完全一致: 下面不会重新推导, 直接复用这里
-        // 算好的矩形, 避免预取 (封面请求必须在创建 `Ink` 之前) 和实际绘制的分页对不上。
-        let header_bottom = m.header_h() as i32;
-        let seg_rect = Rect::new(side, header_bottom + m.margin as i32 / 3, cx.width - 2 * m.margin, seg_h);
-        let mut y = seg_rect.bottom() + m.margin as i32 / 3;
-        let rank_rect = matches!(self.sub, Sub::Rank | Sub::Comic).then(|| {
-            let r = Rect::new(side, y, cx.width - 2 * m.margin, seg_h);
-            y = r.bottom() + m.margin as i32 / 3;
-            r
-        });
-        let list_bottom = tabs_top - m.pager_h() as i32;
-        let area = Rect::new(0, y, cx.width, (list_bottom - y).max(0) as u32);
-        let back_rect = Rect::new(side, area.y, cx.width - 2 * m.margin, m.touch);
-        let books_area = Rect::new(0, back_rect.bottom() + m.margin as i32 / 3, cx.width, (list_bottom - back_rect.bottom()).max(0) as u32);
+        super::draw_tabs(cx, frame, Tab::Discover);
+        // 预取 (封面请求必须在创建 `Ink` 之前) 和绘制用同一份几何, 分页才对得上。
+        let Geometry { seg_rect, rank_rect, area, back_rect, books_area, list_bottom } = geometry(cx, self.sub);
 
         // 封面预取 (cx 整体借用, 必须在创建 `ink` 之前)。
-        let per = per_page(cx);
+        let per = per_page(cx, self.sub);
         match self.sub {
             Sub::Latest => {
                 if let Fetch::Ready(list) = &self.latest {
@@ -574,7 +591,7 @@ impl Page<KinNovel> for DiscoverPage {
                     }
                     Sub::Rank => {
                         if let Fetch::Ready(all) = &self.rank {
-                            let per = per_page(cx);
+                            let per = per_page(cx, Sub::Rank);
                             let pages = all.len().div_ceil(per).max(1) as i64;
                             self.rank_page = (self.rank_page as i64 + delta).clamp(0, pages - 1) as usize;
                         }
@@ -607,7 +624,7 @@ impl Page<KinNovel> for DiscoverPage {
                     },
                     Sub::Rank => match &self.rank {
                         Fetch::Ready(all) => {
-                            let per = per_page(cx);
+                            let per = per_page(cx, Sub::Rank);
                             match all.get(self.rank_page * per + index) {
                                 Some(b) => Self::navigate_to(b.id),
                                 None => Transition::None,

@@ -73,22 +73,6 @@ fn date_part(s: &str) -> String {
     }
 }
 
-/// 粗暴的 HTML 标签剥除 (简介文字), 对照 Python `book.py` 的 `_clean_intro`
-/// (`re.sub(r"<[^>]+>", " ", value)` + 替换 `&nbsp;`)。
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for ch in s.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.replace("&nbsp;", " ").split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 // ---------------------------------------------------------------------------
 // 类型
 // ---------------------------------------------------------------------------
@@ -274,7 +258,7 @@ impl BookInfo {
         let series_books = arr_of(v, "Series").into_iter().map(|s| BookItem { comic: is_comic, ..BookItem::parse(s) }).filter(|b| b.id > 0).collect();
         BookInfo {
             book,
-            intro: strip_html(&str_of(book_v, "Introduction")),
+            intro: html_to_paragraphs(&str_of(book_v, "Introduction")).join("\n"),
             tags,
             series_name,
             chapters,
@@ -890,9 +874,13 @@ pub struct AnnouncementDetail {
     pub paragraphs: Vec<String>,
 }
 
-/// 把 HTML 粗暴转成纯文本段落: `<br>` -> 换行, `</p>` -> 段落分隔, 其它标签去掉,
-/// 解码 `&nbsp;`/`&amp;` (对照 Python `announcements.py` `render_detail`)。
+/// HTML → 纯文本段落 (公告、简介、评论)。块级标签 (`p`/`div`/`h1`–`h6`/`li`/...) 分段,
+/// `<br>` 是段内换行 (结果里的 `\n`); 源码里的换行和缩进按 HTML 规则只算空白, 连续空白合并;
+/// `<li>` 前加 "• "; 解码常见实体。服务器的公告正文是 `<div>` + `<b>` + `<br />` 排版的。
 fn html_to_paragraphs(html: &str) -> Vec<String> {
+    const BLOCKS: &[&str] = &[
+        "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "ul", "ol", "blockquote", "tr", "table", "section", "article", "hr", "pre",
+    ];
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut tag = String::new();
@@ -902,22 +890,35 @@ fn html_to_paragraphs(html: &str) -> Vec<String> {
                 in_tag = true;
                 tag.clear();
             }
-            '>' => {
+            '>' if in_tag => {
                 in_tag = false;
-                let t = tag.to_ascii_lowercase();
-                if t.starts_with("br") {
+                let closing = tag.trim_start().starts_with('/');
+                let name: String = tag.trim_start().trim_start_matches('/').chars().take_while(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+                if name == "br" {
                     text.push('\n');
-                } else if t.starts_with("/p") || t.starts_with("p ") || t == "p" {
+                } else if BLOCKS.contains(&name.as_str()) {
                     text.push_str("\n\n");
+                    if name == "li" && !closing {
+                        text.push_str("• ");
+                    }
                 }
             }
             _ if in_tag => tag.push(ch),
+            '\r' | '\n' | '\t' => text.push(' '),
             _ => text.push(ch),
         }
     }
-    let text = text.replace("&nbsp;", " ").replace("&amp;", "&");
+    let decode = |s: &str| {
+        s.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'").replace("&amp;", "&")
+    };
     text.split("\n\n")
-        .map(|p| p.split('\n').map(str::trim).collect::<Vec<_>>().join(" ").trim().to_string())
+        .map(|para| {
+            para.split('\n')
+                .map(|line| decode(&line.split_whitespace().collect::<Vec<_>>().join(" ")))
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
         .filter(|p| !p.is_empty())
         .collect()
 }
@@ -1119,7 +1120,7 @@ fn comment_from_commentary_full(id: i64, commentary: &Value, users: &Value, comm
         .filter_map(|rid| rid.as_i64().or_else(|| rid.as_str().and_then(|s| s.parse().ok())))
         .filter_map(|rid| commentaries.get(rid.to_string().as_str()).map(|rc| comment_from_commentary_full(rid, rc, users, commentaries)))
         .collect();
-    Comment { id, user_name, content: strip_html(&str_of(commentary, "Content")), created_at: date_part(&str_of(commentary, "CreatedAt")), replies }
+    Comment { id, user_name, content: html_to_paragraphs(&str_of(commentary, "Content")).join("\n"), created_at: date_part(&str_of(commentary, "CreatedAt")), replies }
 }
 
 /// 评论列表 (对照 `GetComments`); Python 在跳转前要求已登录, 这里同样要求。
@@ -1336,7 +1337,17 @@ mod tests {
     fn html_to_paragraphs_splits_on_br_and_p() {
         let html = "<p>第一段 &nbsp;文字</p><p>第二段<br/>换行</p>";
         let paras = html_to_paragraphs(html);
-        assert_eq!(paras, vec!["第一段  文字".to_string(), "第二段 换行".to_string()]);
+        assert_eq!(paras, vec!["第一段  文字".to_string(), "第二段\n换行".to_string()]);
+    }
+
+    /// 真实公告正文的结构 (2026-10): `<div>` 分块, `<b>` 小标题 + `<br />`, 源码带缩进换行。
+    #[test]
+    fn html_to_paragraphs_handles_div_blocks() {
+        let html = "<div style=\"gap: 12px\">\r\n  <div>开头说明。</div>\r\n\r\n  <div>\r\n    <b>小标题</b><br />\r\n    正文第一行，\r\n    接着写。<br />\r\n    第二行 &amp; 更多\r\n  </div>\r\n<ul><li>甲</li><li>乙</li></ul></div>";
+        assert_eq!(
+            html_to_paragraphs(html),
+            vec!["开头说明。", "小标题\n正文第一行， 接着写。\n第二行 & 更多", "• 甲", "• 乙"].into_iter().map(String::from).collect::<Vec<_>>()
+        );
     }
 
     #[test]

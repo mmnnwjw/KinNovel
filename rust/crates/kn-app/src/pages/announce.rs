@@ -368,20 +368,22 @@ impl AnnouncementDetailPage {
 
 /// 极简折行 (同 `book.rs::wrap_plain`, 不做 kinsoku, 不限制行数)。
 pub(crate) fn wrap_all(text: &str, ink: &Ink, size: f32, max_width: f32) -> Vec<String> {
+    /// 不放在行首的标点: 放不下时悬挂在上一行末尾。
+    const NO_LINE_START: &str = "，。、；：！？）」』】》〉”’…—,.;:!?)";
     if text.is_empty() {
         return vec![String::new()];
     }
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        let mut candidate = current.clone();
-        candidate.push(ch);
-        if ink.width(&candidate, size) > max_width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
+    for segment in text.split('\n') {
+        let mut current = String::new();
+        for ch in segment.chars() {
+            let mut candidate = current.clone();
+            candidate.push(ch);
+            if ink.width(&candidate, size) > max_width && !current.is_empty() && !NO_LINE_START.contains(ch) {
+                lines.push(std::mem::take(&mut current));
+            }
+            current.push(ch);
         }
-        current.push(ch);
-    }
-    if !current.is_empty() {
         lines.push(current);
     }
     lines

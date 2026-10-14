@@ -264,19 +264,21 @@ impl Page<KinNovel> for BookDetailPage {
             y += line_h;
         }
 
-        // 简介 (限几行, 超宽截断, 不做真正的折行以保持简单可靠)
+        let btn_h = m.touch as i32;
+        let gap = m.margin as i32 / 3;
+        let bottom_y = cx.height as i32 - btn_h - m.margin as i32 / 2;
+
+        // 简介: 占满到底部按钮上方, 放不下的最后一行以 … 结尾
         let intro_y = (cover_rect.bottom() + m.margin as i32 / 2).max(y + m.margin as i32 / 2);
         ink.text(frame, side, intro_y, "简介", m.body, theme.foreground);
         let mut iy = intro_y + (m.body * 1.4) as i32;
         let intro_w = (cx.width - 2 * m.margin) as f32;
-        for line in wrap_plain(&info.intro, &ink, m.small, intro_w, 4) {
+        let intro_line_h = (m.small * 1.4) as i32;
+        let max_lines = ((bottom_y - m.margin as i32 / 2 - iy) / intro_line_h).max(1) as usize;
+        for line in wrap_plain(&info.intro, &ink, m.small, intro_w, max_lines) {
             ink.text(frame, side, iy, &line, m.small, theme.muted);
-            iy += (m.small * 1.4) as i32;
+            iy += intro_line_h;
         }
-
-        let btn_h = m.touch as i32;
-        let gap = m.margin as i32 / 3;
-        let bottom_y = cx.height as i32 - btn_h - m.margin as i32 / 2;
         let cols = if shelf_button { 4 } else { 3 };
         let col_w = (cx.width as i32 - 2 * side - gap * (cols - 1)) / cols;
         let has_chapters = !info.chapters.is_empty();
@@ -381,34 +383,20 @@ impl Page<KinNovel> for BookDetailPage {
     }
 }
 
-/// 极简折行: 按字符宽度累计换行 (不做真正的 kinsoku/标点规则, 够用于简介这种短文本)。
+/// 简介折行 (同公告: 段内换行保留, 句末标点不放行首); 超过 `max_lines` 时最后一行以 … 结尾。
 fn wrap_plain(text: &str, ink: &Ink, size: f32, max_width: f32, max_lines: usize) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        let mut candidate = current.clone();
-        candidate.push(ch);
-        if ink.width(&candidate, size) > max_width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            if lines.len() == max_lines {
-                return lines;
-            }
-        }
-        current.push(ch);
-    }
-    if !current.is_empty() && lines.len() < max_lines {
-        lines.push(current);
-    }
-    if lines.len() == max_lines {
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .flat_map(|l| super::announce::wrap_all(l, ink, size, max_width))
+        .collect();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
         if let Some(last) = lines.last_mut() {
+            last.push('…');
             if ink.width(last, size) > max_width {
                 *last = ink.fit(last, size, max_width);
-            } else {
-                last.push('…');
             }
         }
     }
