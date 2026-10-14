@@ -9,9 +9,10 @@
 [![许可](https://img.shields.io/github/license/mmnnwjw/KinNovel?label=%E8%AE%B8%E5%8F%AF)](LICENSE)
 ![平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Kindle%20%2B%20KUAL-informational)
 
-<img src="docs/images/shelf.png" width="31%" alt="书架：继续阅读卡片与云端书架">
-<img src="docs/images/reader-bookmark.png" width="31%" alt="阅读菜单：刚添加了书签">
-<img src="docs/images/reader-image.png" width="31%" alt="阅读器里插图与正文混排">
+<img src="docs/images/shelf.png" width="23%" alt="书架：继续阅读卡片与云端书架">
+<img src="docs/images/reader-note.png" width="23%" alt="正文按网页版样式排版：粗体，点「注」图标弹出注释">
+<img src="docs/images/reader-image.png" width="23%" alt="阅读器里插图与正文混排，章节标题加粗">
+<img src="docs/images/reader-bookmark.png" width="23%" alt="阅读菜单：刚添加了书签">
 
 </div>
 
