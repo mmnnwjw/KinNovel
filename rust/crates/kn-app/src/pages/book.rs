@@ -48,11 +48,20 @@ fn resume_sort_num(cx: &Cx<KinNovel>, info: &BookInfo) -> Option<i64> {
             return Some(last.sort_num);
         }
     }
+    // 有进度文件的章节里取最近写过的那一章 (不是第一个: 读到第 8 章时第 1 章也有进度)
     let convert = cx.app.config.convert();
-    for ch in &info.chapters {
-        if store::load_progress(&cx.app.paths.progress_file(info.book.id, ch.sort_num, &convert)).is_some() {
-            return Some(ch.sort_num);
-        }
+    let newest = info
+        .chapters
+        .iter()
+        .filter_map(|ch| {
+            let file = cx.app.paths.progress_file(info.book.id, ch.sort_num, &convert);
+            store::load_progress(&file)?;
+            let modified = std::fs::metadata(&file).and_then(|m| m.modified()).ok()?;
+            Some((modified, ch.sort_num))
+        })
+        .max();
+    if let Some((_, sort_num)) = newest {
+        return Some(sort_num);
     }
     if info.read_position_chapter_id > 0 {
         if let Some(ch) = info.chapters.iter().find(|c| c.id == info.read_position_chapter_id) {

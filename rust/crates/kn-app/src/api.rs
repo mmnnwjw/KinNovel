@@ -66,10 +66,9 @@ fn arr_of<'a>(v: &'a Value, key: &str) -> Vec<&'a Value> {
 /// 之外的部分一并显示用不到, 列表行里只需要日期。空输入原样返回空串。
 fn date_part(s: &str) -> String {
     let s = s.trim();
-    if s.len() >= 10 && s.as_bytes()[4] == b'-' {
-        s[..10].to_string()
-    } else {
-        s.to_string()
+    match s.get(..10) {
+        Some(date) if s.as_bytes()[4] == b'-' => date.to_string(),
+        _ => s.to_string(),
     }
 }
 
