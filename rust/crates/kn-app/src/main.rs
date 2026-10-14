@@ -118,8 +118,21 @@ impl KinNovel {
     }
 }
 
-/// 界面字体: KN_FONT 环境变量 > 配置 font_path (与 Python 版同键) > 系统黑体。
+/// 黑白 emoji 字体 (Noto Emoji, OFL-1.1, 由 tools/gen_emoji_font.py 精简), 编进程序, 放在界面字体链最后:
+/// 界面字体没有的 emoji 用它画; 两者都没有的字符画成空白 (它的 .notdef 是空的), 不再是方框。
+static EMOJI_FONT: &[u8] = include_bytes!("../data/NotoEmoji-subset.ttf");
+
+/// 界面字体: KN_FONT 环境变量 > 配置 font_path (与 Python 版同键) > 系统黑体; 后接 emoji 字体。
 fn load_ui_fonts(fonts: &mut FontStore, config: &Config) -> Vec<FontId> {
+    let mut chain = vec![load_ui_font(fonts, config)];
+    match fonts.load_bytes(EMOJI_FONT.to_vec()) {
+        Ok(id) => chain.push(id),
+        Err(e) => eprintln!("[font] emoji: {e:?}"),
+    }
+    chain
+}
+
+fn load_ui_font(fonts: &mut FontStore, config: &Config) -> FontId {
     let mut candidates: Vec<PathBuf> = std::env::var("KN_FONT").ok().map(PathBuf::from).into_iter().collect();
     let configured = config.string("font_path", "");
     if !configured.trim().is_empty() {
@@ -129,7 +142,7 @@ fn load_ui_fonts(fonts: &mut FontStore, config: &Config) -> Vec<FontId> {
     for path in candidates {
         if Path::new(&path).exists() {
             match fonts.load_file(&path) {
-                Ok(id) => return vec![id],
+                Ok(id) => return id,
                 Err(e) => eprintln!("[font] {}: {:?}", path.display(), e),
             }
         }

@@ -161,6 +161,9 @@ impl FontStore {
 
     /// 单字符 advance (像素)。
     pub fn advance(&self, font: FontId, ch: char, size_px: f32) -> f32 {
+        if is_invisible(ch) {
+            return 0.0;
+        }
         let font_ref = self.font_ref(font);
         let gid = font_ref.charmap().map(ch);
         match gid {
@@ -211,6 +214,12 @@ pub struct LineMetrics {
 }
 
 /// WOFF2 → TTF 字节, 供调用方落盘缓存。
+/// 不占位、不绘制的字符: 不做字形组合 (shaping), emoji 序列里的这些单独画只会是方框或色块。
+/// 零宽连接符、变体选择符 (FE0E/FE0F 等)、标签字符 (旗帜子区域)、肤色修饰符、组合键帽符。
+pub fn is_invisible(ch: char) -> bool {
+    matches!(ch, '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0020}'..='\u{E007F}' | '\u{1F3FB}'..='\u{1F3FF}' | '\u{20E3}')
+}
+
 pub fn decode_woff2(bytes: &[u8]) -> Result<Vec<u8>, TextError> {
     woff2_patched::convert_woff2_to_ttf(&mut std::io::Cursor::new(bytes))
         .map_err(|e| TextError::BadFont(format!("{e:?}")))
@@ -398,6 +407,9 @@ impl GlyphCache {
         let ck = chain_key(&style.fonts);
 
         for ch in text.chars() {
+            if is_invisible(ch) {
+                continue;
+            }
             let (font_id, gid) = *self.chars.entry((ck, ch)).or_insert_with(|| {
                 let font_id = fonts.pick_font(&style.fonts, ch);
                 (font_id, fonts.glyph_id(font_id, ch))
@@ -453,5 +465,20 @@ impl GlyphCache {
 
     pub fn bytes_used(&self) -> usize {
         self.bytes_used
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_invisible;
+
+    #[test]
+    fn emoji_joiners_and_modifiers_are_invisible() {
+        for ch in ['\u{200D}', '\u{FE0F}', '\u{FE0E}', '\u{1F3FD}', '\u{E0067}', '\u{20E3}'] {
+            assert!(is_invisible(ch), "{:X}", ch as u32);
+        }
+        for ch in ['a', '中', '\u{1F44D}', '\u{2764}', ' '] {
+            assert!(!is_invisible(ch), "{:X}", ch as u32);
+        }
     }
 }

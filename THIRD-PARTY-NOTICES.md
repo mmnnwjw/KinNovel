@@ -197,9 +197,17 @@ to verify the TLS certificates of the LightNovelShelf servers.
 
 ## Fonts
 
-KinNovel does not ship fonts. It uses the Kindle's system font
-(`/usr/java/lib/fonts/STHeitiMedium.ttf`) for the interface and the per-chapter fonts
-served by LightNovelShelf for chapter text; both stay on the device.
+The interface uses the Kindle's system font (`/usr/java/lib/fonts/STHeitiMedium.ttf`) and
+chapter text uses the per-chapter fonts served by LightNovelShelf; neither is shipped.
+
+### Noto Emoji (monochrome)
+
+- URL: https://github.com/google/fonts/tree/main/ofl/notoemoji (`NotoEmoji[wght].ttf`)
+- Used for: emoji in the interface (comments, announcements, titles), as the last font of the
+  interface font chain. Instanced at weight 500, reduced to its emoji code points and stripped of
+  layout tables and hinting by `tools/gen_emoji_font.py`; embedded in `bin/kinnovel`.
+- License: SIL Open Font License 1.1 (no Reserved Font Name). The license text is in
+  `LICENSE-NotoEmoji` (release zip) / `rust/crates/kn-app/data/LICENSE-NotoEmoji` (source).
 
 ## Content notice
 
