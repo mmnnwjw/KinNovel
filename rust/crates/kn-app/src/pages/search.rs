@@ -219,118 +219,124 @@ impl Page<KinNovel> for SearchPage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
-        let theme = cx.theme;
-        let m = cx.app.metrics;
-        let side = m.margin as i32;
-        let gap = m.margin as i32 / 3;
+        'body: {
+            let theme = cx.theme;
+            let m = cx.app.metrics;
+            let side = m.margin as i32;
+            let gap = m.margin as i32 / 3;
 
-        // 封面预取 (cx 整体借用, 必须在创建 `ink` 之前)
-        let items = match (&self.results, self.editing) {
-            (Results::Ready(list), false) => list.items.clone(),
-            _ => Vec::new(),
-        };
-        let cover_slot = widgets::cover_slot(&m, Rect::new(0, 0, cx.width, m.row_h_cover()));
-        for book in &items {
-            self.covers.request(cx, &book.cover, cover_slot.w, cover_slot.h);
-        }
-        let history = cx.app.config.strings(HISTORY_KEY);
-
-        let chain = cx.app.ui_fonts.clone();
-        let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let bar = widgets::header(&mut ink, frame, &theme, &m, "搜索", &super::status_text(), true, false);
-        cx.hits.add(HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
-
-        if self.editing {
-            let y = self.draw_options(&mut ink, frame, cx.hits, &theme, &m, cx.width, bar.bottom() + gap);
-            let kb_h = TextEditor::height(&m);
-            let kb = Rect::new(0, cx.height as i32 - kb_h as i32, cx.width, kb_h);
-            let placeholder = match (self.mode, self.comic) {
-                (SearchMode::Tags, _) => "多个标签用逗号分隔",
-                (_, true) => "搜索漫画",
-                (_, false) => "搜索小说",
+            // 封面预取 (cx 整体借用, 必须在创建 `ink` 之前)
+            let items = match (&self.results, self.editing) {
+                (Results::Ready(list), false) => list.items.clone(),
+                _ => Vec::new(),
             };
-            self.editor.render(&mut ink, frame, cx.hits, &theme, &m, kb, placeholder, "搜索");
-
-            // 最近搜索: 一行一行排的标签, 放不下的不画
-            let area = Rect::new(0, y, cx.width, (kb.y - y).max(0) as u32);
-            let label_h = (m.small * 1.8) as i32;
-            if history.is_empty() {
-                return;
+            let cover_slot = widgets::cover_slot(&m, Rect::new(0, 0, cx.width, m.row_h_cover()));
+            for book in &items {
+                self.covers.request(cx, &book.cover, cover_slot.w, cover_slot.h);
             }
-            if area.h as i32 >= label_h + m.touch as i32 {
-                ink.text(frame, side, area.y + gap, "最近搜索", m.small, theme.muted);
-                let clear_w = (ink.width("清除", m.small) as i32 + side).max(m.touch as i32);
-                let clear = Rect::new(cx.width as i32 - side - clear_w, area.y, clear_w as u32, label_h as u32 + gap as u32);
-                ink.text_centered(frame, clear, "清除", m.small, theme.foreground);
-                cx.hits.add(HIT_HISTORY_CLEAR, clear);
-                let chip_h = (m.touch as f32 * 0.8) as i32;
-                let (mut x, mut y) = (side, area.y + gap + label_h);
-                for (i, h) in history.iter().enumerate() {
-                    let text = ink.fit(h, m.small, (cx.width as i32 - 2 * side - 2 * side / 2) as f32);
-                    let w = ink.width(&text, m.small).ceil() as i32 + side;
-                    if x + w > cx.width as i32 - side {
-                        x = side;
-                        y += chip_h + gap;
-                    }
-                    if y + chip_h > area.bottom() - gap {
-                        break;
-                    }
-                    let r = Rect::new(x, y, w as u32, chip_h as u32);
-                    widgets::button(&mut ink, frame, &theme, &m, r, &text, ButtonStyle::Secondary);
-                    cx.hits.add(HitId(HISTORY_BASE + i as u32), r).rounded(m.radius);
-                    x += w + gap;
+            let history = cx.app.config.strings(HISTORY_KEY);
+
+            let chain = cx.app.ui_fonts.clone();
+            let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+            let bar = widgets::header(&mut ink, frame, &theme, &m, "搜索", &super::status_text(), true, false);
+            cx.hits.add(HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
+
+            if self.editing {
+                let y = self.draw_options(&mut ink, frame, cx.hits, &theme, &m, cx.width, bar.bottom() + gap);
+                let kb_h = TextEditor::height(&m);
+                let kb = Rect::new(0, cx.height as i32 - kb_h as i32, cx.width, kb_h);
+                let placeholder = match (self.mode, self.comic) {
+                    (SearchMode::Tags, _) => "多个标签用逗号分隔",
+                    (_, true) => "搜索漫画",
+                    (_, false) => "搜索小说",
+                };
+                self.editor.render(&mut ink, frame, cx.hits, &theme, &m, kb, placeholder, "搜索");
+
+                // 最近搜索: 一行一行排的标签, 放不下的不画
+                let area = Rect::new(0, y, cx.width, (kb.y - y).max(0) as u32);
+                let label_h = (m.small * 1.8) as i32;
+                if history.is_empty() {
+                    break 'body;
                 }
-            }
-            return;
-        }
-
-        // 结果模式: 搜索框 (点了回到输入)
-        let field = Rect::new(side, bar.bottom() + gap, cx.width - 2 * m.margin, m.touch);
-        frame.rounded_rect(field, m.radius, Some(theme.background), Some(theme.foreground), 2);
-        let (text, color) = if self.query.is_empty() { ("点此输入关键词".to_string(), theme.muted) } else { (self.query.clone(), theme.foreground) };
-        let label = ink.fit(&text, m.body, (field.w - m.margin) as f32);
-        let line_h = (m.body * 1.25) as i32;
-        ink.text(frame, field.x + side / 2, field.y + (field.h as i32 - line_h) / 2, &label, m.body, color);
-        cx.hits.add(HIT_FIELD, field).rounded(m.radius);
-        let y = self.draw_options(&mut ink, frame, cx.hits, &theme, &m, cx.width, field.bottom() + gap);
-
-        let list_bottom = cx.height as i32 - m.pager_h() as i32;
-        let area = Rect::new(0, y, cx.width, (list_bottom - y).max(0) as u32);
-        match &self.results {
-            Results::Idle => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "输入关键词开始搜索", None),
-            Results::Loading => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "搜索中…", None),
-            Results::Offline => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "离线，无法搜索", Some(("重试", HIT_RETRY))),
-            Results::Error(e) => {
-                let text = format!("搜索失败\n{}", ink.fit(e, m.small, (cx.width - 2 * m.margin) as f32));
-                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, Some(("重试", HIT_RETRY)));
-            }
-            Results::Ready(list) => {
-                if list.items.is_empty() {
-                    let what = if self.comic { "漫画" } else { "小说" };
-                    let text = format!("没有找到相关{what}");
-                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, None);
-                } else {
-                    let row_h = m.row_h_cover();
-                    for (row, book) in list.items.iter().enumerate() {
-                        let r = Rect::new(0, area.y + row as i32 * row_h as i32, cx.width, row_h);
-                        if r.bottom() > area.bottom() {
+                if area.h as i32 >= label_h + m.touch as i32 {
+                    ink.text(frame, side, area.y + gap, "最近搜索", m.small, theme.muted);
+                    let clear_w = (ink.width("清除", m.small) as i32 + side).max(m.touch as i32);
+                    let clear = Rect::new(cx.width as i32 - side - clear_w, area.y, clear_w as u32, label_h as u32 + gap as u32);
+                    ink.text_centered(frame, clear, "清除", m.small, theme.foreground);
+                    cx.hits.add(HIT_HISTORY_CLEAR, clear);
+                    let chip_h = (m.touch as f32 * 0.8) as i32;
+                    let (mut x, mut y) = (side, area.y + gap + label_h);
+                    for (i, h) in history.iter().enumerate() {
+                        let text = ink.fit(h, m.small, (cx.width as i32 - 2 * side - 2 * side / 2) as f32);
+                        let w = ink.width(&text, m.small).ceil() as i32 + side;
+                        if x + w > cx.width as i32 - side {
+                            x = side;
+                            y += chip_h + gap;
+                        }
+                        if y + chip_h > area.bottom() - gap {
                             break;
                         }
-                        let slot = widgets::cover_slot(&m, r);
-                        let img = self.covers.get(&book.cover, slot.w, slot.h);
-                        widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
-                        cx.hits.add(HitId(ROW_BASE + row as u32), r);
+                        let r = Rect::new(x, y, w as u32, chip_h as u32);
+                        widgets::button(&mut ink, frame, &theme, &m, r, &text, ButtonStyle::Secondary);
+                        cx.hits.add(HitId(HISTORY_BASE + i as u32), r).rounded(m.radius);
+                        x += w + gap;
                     }
                 }
-                if list.total_pages > 1 {
-                    let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
-                    widgets::pager(&mut ink, frame, cx.hits, &theme, &m, pr, (self.page - 1).max(0) as usize, list.total_pages as usize, HIT_PREV, HIT_NEXT);
+                break 'body;
+            }
+
+            // 结果模式: 搜索框 (点了回到输入)
+            let field = Rect::new(side, bar.bottom() + gap, cx.width - 2 * m.margin, m.touch);
+            frame.rounded_rect(field, m.radius, Some(theme.background), Some(theme.foreground), 2);
+            let (text, color) = if self.query.is_empty() { ("点此输入关键词".to_string(), theme.muted) } else { (self.query.clone(), theme.foreground) };
+            let label = ink.fit(&text, m.body, (field.w - m.margin) as f32);
+            let line_h = (m.body * 1.25) as i32;
+            ink.text(frame, field.x + side / 2, field.y + (field.h as i32 - line_h) / 2, &label, m.body, color);
+            cx.hits.add(HIT_FIELD, field).rounded(m.radius);
+            let y = self.draw_options(&mut ink, frame, cx.hits, &theme, &m, cx.width, field.bottom() + gap);
+
+            let list_bottom = cx.height as i32 - m.pager_h() as i32;
+            let area = Rect::new(0, y, cx.width, (list_bottom - y).max(0) as u32);
+            match &self.results {
+                Results::Idle => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "输入关键词开始搜索", None),
+                Results::Loading => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "搜索中…", None),
+                Results::Offline => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "离线，无法搜索", Some(("重试", HIT_RETRY))),
+                Results::Error(e) => {
+                    let text = format!("搜索失败\n{}", ink.fit(e, m.small, (cx.width - 2 * m.margin) as f32));
+                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, Some(("重试", HIT_RETRY)));
+                }
+                Results::Ready(list) => {
+                    if list.items.is_empty() {
+                        let what = if self.comic { "漫画" } else { "小说" };
+                        let text = format!("没有找到相关{what}");
+                        widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, &text, None);
+                    } else {
+                        let row_h = m.row_h_cover();
+                        for (row, book) in list.items.iter().enumerate() {
+                            let r = Rect::new(0, area.y + row as i32 * row_h as i32, cx.width, row_h);
+                            if r.bottom() > area.bottom() {
+                                break;
+                            }
+                            let slot = widgets::cover_slot(&m, r);
+                            let img = self.covers.get(&book.cover, slot.w, slot.h);
+                            widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
+                            cx.hits.add(HitId(ROW_BASE + row as u32), r);
+                        }
+                    }
+                    if list.total_pages > 1 {
+                        let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
+                        widgets::pager(&mut ink, frame, cx.hits, &theme, &m, pr, (self.page - 1).max(0) as usize, list.total_pages as usize, HIT_PREV, HIT_NEXT);
+                    }
                 }
             }
         }
+        super::tips::show(cx, frame, &super::tips::KEYBOARD, self.editing);
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::KEYBOARD) {
+            return Transition::None;
+        }
         let InputEvent::Gesture(g) = event else { return Transition::None };
         if g.kind == GestureKind::Down {
             return Transition::None;

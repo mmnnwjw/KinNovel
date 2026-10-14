@@ -799,9 +799,13 @@ impl Page<KinNovel> for ComicReaderPage {
         if self.chrome {
             self.draw_chrome(cx, frame);
         }
+        super::tips::show(cx, frame, &super::tips::COMIC, matches!(self.status, Status::Ready));
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::COMIC) {
+            return Transition::None;
+        }
         match event {
             InputEvent::Key { code: KeyCode::PageForward, pressed: true } => self.turn(cx, 1),
             InputEvent::Key { code: KeyCode::PageBack, pressed: true } => self.turn(cx, -1),

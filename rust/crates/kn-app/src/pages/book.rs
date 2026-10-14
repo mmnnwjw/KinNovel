@@ -517,63 +517,69 @@ impl Page<KinNovel> for CatalogPage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
-        let theme = cx.theme;
-        let m = cx.app.metrics;
-        let chain = cx.app.ui_fonts.clone();
-        let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let title = if self.from_reader { "目录与书签" } else { "目录" };
-        let bar = widgets::header(&mut ink, frame, &theme, &m, title, &super::status_text(), true, false);
-        cx.hits.add(CAT_HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
-        let mut top = bar.bottom();
-        if self.from_reader {
-            let side = m.margin as i32;
-            let gap = side / 3;
-            let seg = Rect::new(side, top + gap, cx.width - 2 * m.margin, m.touch);
-            let marks = if self.bookmarks.is_empty() { "书签".to_string() } else { format!("书签 ({})", self.bookmarks.len()) };
-            widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, seg, &["目录", &marks], self.tab, CAT_SEG_BASE);
-            top = seg.bottom() + gap;
-            frame.fill_rect(Rect::new(0, top - 1, cx.width, 1), theme.mid);
-        }
-        let row_h = m.row_h();
-        let list_bottom = cx.height as i32 - m.pager_h() as i32;
-        let per_page = ((list_bottom - top) / row_h as i32).max(1) as usize;
-        if self.tab == 1 {
-            self.render_bookmarks(cx, frame, top, per_page, list_bottom);
-            return;
-        }
-        if self.chapters.is_empty() {
-            let area = Rect::new(0, top, cx.width, (cx.height as i32 - top) as u32);
-            widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "暂无章节", None);
-            return;
-        }
-        let pages = self.chapters.len().div_ceil(per_page).max(1);
-        if !self.jumped {
-            self.jumped = true;
-            if let Some(i) = self.chapters.iter().position(|ch| self.is_current(ch)) {
-                self.page = i / per_page;
+        'body: {
+            let theme = cx.theme;
+            let m = cx.app.metrics;
+            let chain = cx.app.ui_fonts.clone();
+            let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+            let title = if self.from_reader { "目录与书签" } else { "目录" };
+            let bar = widgets::header(&mut ink, frame, &theme, &m, title, &super::status_text(), true, false);
+            cx.hits.add(CAT_HIT_BACK, Rect::new(0, 0, bar.h, bar.h));
+            let mut top = bar.bottom();
+            if self.from_reader {
+                let side = m.margin as i32;
+                let gap = side / 3;
+                let seg = Rect::new(side, top + gap, cx.width - 2 * m.margin, m.touch);
+                let marks = if self.bookmarks.is_empty() { "书签".to_string() } else { format!("书签 ({})", self.bookmarks.len()) };
+                widgets::segmented(&mut ink, frame, cx.hits, &theme, &m, seg, &["目录", &marks], self.tab, CAT_SEG_BASE);
+                top = seg.bottom() + gap;
+                frame.fill_rect(Rect::new(0, top - 1, cx.width, 1), theme.mid);
+            }
+            let row_h = m.row_h();
+            let list_bottom = cx.height as i32 - m.pager_h() as i32;
+            let per_page = ((list_bottom - top) / row_h as i32).max(1) as usize;
+            if self.tab == 1 {
+                self.render_bookmarks(cx, frame, top, per_page, list_bottom);
+                break 'body;
+            }
+            if self.chapters.is_empty() {
+                let area = Rect::new(0, top, cx.width, (cx.height as i32 - top) as u32);
+                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "暂无章节", None);
+                break 'body;
+            }
+            let pages = self.chapters.len().div_ceil(per_page).max(1);
+            if !self.jumped {
+                self.jumped = true;
+                if let Some(i) = self.chapters.iter().position(|ch| self.is_current(ch)) {
+                    self.page = i / per_page;
+                }
+            }
+            self.page = self.page.min(pages - 1);
+            for (row, (index, ch)) in self.chapters.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
+                let r = Rect::new(0, top + row as i32 * row_h as i32, cx.width, row_h);
+                let unit = if self.comic { "话" } else { "章" };
+                let title = if ch.title.is_empty() { format!("第 {} {unit}", ch.sort_num) } else { ch.title.clone() };
+                let meta = match (self.is_current(ch), self.comic && ch.page_count > 0) {
+                    (true, true) => format!("当前 · {}P", ch.page_count),
+                    (true, false) => "当前".to_string(),
+                    (false, true) => format!("{}P", ch.page_count),
+                    (false, false) => String::new(),
+                };
+                widgets::list_row(&mut ink, frame, &theme, &m, r, &title, "", &meta);
+                cx.hits.add(HitId(CAT_ROW_BASE + index as u32), r);
+            }
+            if pages > 1 {
+                let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
+                widgets::pager(&mut ink, frame, cx.hits, &theme, &m, pr, self.page, pages, CAT_HIT_PREV, CAT_HIT_NEXT);
             }
         }
-        self.page = self.page.min(pages - 1);
-        for (row, (index, ch)) in self.chapters.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
-            let r = Rect::new(0, top + row as i32 * row_h as i32, cx.width, row_h);
-            let unit = if self.comic { "话" } else { "章" };
-            let title = if ch.title.is_empty() { format!("第 {} {unit}", ch.sort_num) } else { ch.title.clone() };
-            let meta = match (self.is_current(ch), self.comic && ch.page_count > 0) {
-                (true, true) => format!("当前 · {}P", ch.page_count),
-                (true, false) => "当前".to_string(),
-                (false, true) => format!("{}P", ch.page_count),
-                (false, false) => String::new(),
-            };
-            widgets::list_row(&mut ink, frame, &theme, &m, r, &title, "", &meta);
-            cx.hits.add(HitId(CAT_ROW_BASE + index as u32), r);
-        }
-        if pages > 1 {
-            let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
-            widgets::pager(&mut ink, frame, cx.hits, &theme, &m, pr, self.page, pages, CAT_HIT_PREV, CAT_HIT_NEXT);
-        }
+        super::tips::show(cx, frame, &super::tips::BOOKMARKS, self.from_reader);
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::BOOKMARKS) {
+            return Transition::None;
+        }
         let InputEvent::Gesture(g) = event else { return Transition::None };
         let hit = cx.hits.at(Point { x: g.start.0, y: g.start.1 });
         if let Some(index) = self.confirm_delete {

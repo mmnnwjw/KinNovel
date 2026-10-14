@@ -22,6 +22,7 @@ pub mod shelf_edit;
 pub mod shop;
 pub mod stats;
 pub mod storage;
+pub mod tips;
 
 use kn_render::Bitmap;
 use kn_ui::widgets::{self, Ink};

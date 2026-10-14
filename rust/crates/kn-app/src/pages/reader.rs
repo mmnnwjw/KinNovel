@@ -1062,44 +1062,50 @@ impl Page<KinNovel> for ReaderPage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
-        let theme = cx.theme;
-        let m = cx.app.metrics;
-        let (top, _) = Self::geometry(cx.width, cx.height);
-        match &self.status {
-            Status::Loading | Status::Failed(_) => {
-                let text = match &self.status {
-                    Status::Failed(e) => format!("章节打开失败
+        'body: {
+            let theme = cx.theme;
+            let m = cx.app.metrics;
+            let (top, _) = Self::geometry(cx.width, cx.height);
+            match &self.status {
+                Status::Loading | Status::Failed(_) => {
+                    let text = match &self.status {
+                        Status::Failed(e) => format!("章节打开失败
 {e}
 
 轻触屏幕返回"),
-                    _ => "正在打开章节…".to_string(),
-                };
-                let chain = cx.app.ui_fonts.clone();
-                let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-                let mut y = cx.height as i32 / 2 - m.body as i32;
-                for line in text.lines() {
-                    ink.text_centered(frame, Rect::new(m.margin as i32, y, cx.width - 2 * m.margin, (m.body * 1.5) as u32), line, m.body, theme.foreground);
-                    y += (m.body * 1.6) as i32;
+                        _ => "正在打开章节…".to_string(),
+                    };
+                    let chain = cx.app.ui_fonts.clone();
+                    let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+                    let mut y = cx.height as i32 / 2 - m.body as i32;
+                    for line in text.lines() {
+                        ink.text_centered(frame, Rect::new(m.margin as i32, y, cx.width - 2 * m.margin, (m.body * 1.5) as u32), line, m.body, theme.foreground);
+                        y += (m.body * 1.6) as i32;
+                    }
+                    if self.chrome {
+                        self.draw_chrome(cx, frame);
+                    }
+                    break 'body;
                 }
-                if self.chrome {
-                    self.draw_chrome(cx, frame);
-                }
-                return;
+                Status::Ready => {}
             }
-            Status::Ready => {}
+            self.request_images(cx, self.page);
+            self.update_image_hits(top);
+            let slot = self.content_bitmap(cx, self.page);
+            let bmp = &self.cache[slot].1;
+            frame.blit(bmp, bmp.bounds(), 0, top);
+            self.draw_header(cx, frame, top);
+            if self.chrome {
+                self.draw_chrome(cx, frame);
+            }
         }
-        self.request_images(cx, self.page);
-        self.update_image_hits(top);
-        let slot = self.content_bitmap(cx, self.page);
-        let bmp = &self.cache[slot].1;
-        frame.blit(bmp, bmp.bounds(), 0, top);
-        self.draw_header(cx, frame, top);
-        if self.chrome {
-            self.draw_chrome(cx, frame);
-        }
+        super::tips::show(cx, frame, &super::tips::READER, matches!(self.status, Status::Ready));
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::READER) {
+            return Transition::None;
+        }
         match event {
             InputEvent::Key { code: KeyCode::PageForward, pressed: true } => self.turn(cx, 1),
             InputEvent::Key { code: KeyCode::PageBack, pressed: true } => self.turn(cx, -1),

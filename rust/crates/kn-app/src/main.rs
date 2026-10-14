@@ -62,6 +62,10 @@ pub struct KinNovel {
     pub reader_jump: Option<pages::reader::ReaderJump>,
     /// 启动时的一次性提示 (上次异常退出), 书架页显示
     pub startup_notice: Option<String>,
+    /// 正在弹出的操作提示 (`pages::tips`)
+    pub tip_open: Option<&'static str>,
+    /// 本次运行里点了「感觉会忘记」的提示: 下次启动再提示
+    pub tips_later: std::collections::HashSet<&'static str>,
 }
 
 impl App for KinNovel {
@@ -86,7 +90,7 @@ impl KinNovel {
         let email = config.string("account_email", "").trim().to_string();
         let password = config.string("account_password", "");
         net::set_account((!email.is_empty() && !password.is_empty()).then_some((email, password)));
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default() }
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。

@@ -104,5 +104,5 @@ All components draw immediately into the frame and register hits; they never kee
 
 - Lists show at most one line per field; long titles end with "…".
 - Numbers: "第 3 章", "12 / 87 页", times as "3 分钟前 / 昨天 / 10-08".
-- No tutorial text on screen ("长按可移出", keyboard tips, "how to add a bookmark"): gestures and shortcuts are documented in the README's 使用 section instead.
+- No permanent tutorial text in page layouts. Gestures are explained once per page in a tutorial dialog (`pages/tips.rs`: shelf, reader, comic reader, keyboard, catalog with bookmarks, image viewer) with two buttons: 「感觉会忘记」 (show again after the next launch) and 「我知道了」 (never again, stored in config `tips_seen`). Settings → 显示 → 操作提示 turns them off; turning it back on clears `tips_seen`. The README's 使用 section lists the same gestures.
 - Error copy in Chinese, short, with a next step ("网络不可用，点击重试").

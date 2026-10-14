@@ -62,6 +62,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
             toggle("page_flash", "翻页全屏刷新", "重启后生效", false),
             step("full_refresh_every", "残影清理间隔 (屏)", "重启后生效", 2.0, 12.0, 1.0, 0, 6.0),
             toggle("sleep_cover", "休眠显示封面", "重启后生效", false),
+            toggle(super::tips::CONFIG_ENABLED, "操作提示", "第一次进入页面时弹出", true),
         ],
     ),
     (
@@ -130,6 +131,11 @@ impl SettingsPage {
             Kind::Toggle { .. } => {
                 let on = v == 0.0;
                 cx.app.config.set(s.key, Value::from(on));
+                if s.key == super::tips::CONFIG_ENABLED && on {
+                    // 重新打开: 之前点过「我知道了」的提示也再显示一次
+                    cx.app.config.set(super::tips::CONFIG_SEEN, Value::Array(Vec::new()));
+                    cx.app.tips_later.clear();
+                }
                 if s.key == "night_mode" {
                     cx.app.night = on;
                     cx.request_redraw(RefreshHint::Flash);

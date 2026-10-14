@@ -274,6 +274,7 @@ impl Page<KinNovel> for ShelfPage {
             let bottom = cx.height as i32 - m.tab_bar_h() as i32 - m.margin as i32 / 2;
             widgets::toast(&mut ink, frame, &theme, &m, text, bottom);
         }
+        super::tips::show(cx, frame, &super::tips::SHELF, self.showing_cloud(cx) && matches!(self.cloud, Some(Ok(_))) && self.menu.is_none() && self.confirm.is_none());
     }
 
     fn on_timer(&mut self, cx: &mut Cx<KinNovel>, token: u32) {
@@ -283,6 +284,9 @@ impl Page<KinNovel> for ShelfPage {
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::SHELF) {
+            return Transition::None;
+        }
         let InputEvent::Gesture(g) = event else { return Transition::None };
         if let Some(entry) = self.menu.clone() {
             if g.kind != GestureKind::Tap {

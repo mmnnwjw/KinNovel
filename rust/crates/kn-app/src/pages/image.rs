@@ -251,47 +251,53 @@ impl Page<KinNovel> for ImagePage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
-        let theme = cx.theme;
-        let m = cx.app.metrics;
-        let (w, h) = (cx.width, cx.height);
-        match &self.status {
-            Status::Loading | Status::Failed(_) => {
-                let text = match &self.status {
-                    Status::Failed(e) => format!("插图无法显示: {e}"),
-                    _ => "正在加载插图…".to_string(),
-                };
-                let chain = cx.app.ui_fonts.clone();
-                let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-                let r = Rect::new(m.margin as i32, h as i32 / 2 - m.body as i32, w - 2 * m.margin, (m.body * 1.5) as u32);
-                ink.text_centered(frame, r, &text, m.body, theme.foreground);
+        'body: {
+            let theme = cx.theme;
+            let m = cx.app.metrics;
+            let (w, h) = (cx.width, cx.height);
+            match &self.status {
+                Status::Loading | Status::Failed(_) => {
+                    let text = match &self.status {
+                        Status::Failed(e) => format!("插图无法显示: {e}"),
+                        _ => "正在加载插图…".to_string(),
+                    };
+                    let chain = cx.app.ui_fonts.clone();
+                    let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+                    let r = Rect::new(m.margin as i32, h as i32 / 2 - m.body as i32, w - 2 * m.margin, (m.body * 1.5) as u32);
+                    ink.text_centered(frame, r, &text, m.body, theme.foreground);
+                    self.draw_toolbar(cx, frame);
+                    break 'body;
+                }
+                Status::Ready => {}
+            }
+            let scale = self.fit_scale(w, h) * ZOOMS[self.zoom];
+            let Some(src) = &self.src else { return };
+            if self.zoom == 0 {
+                if self.fit.is_none() {
+                    let fw = ((src.width() as f32 * scale).round() as u32).max(1);
+                    let fh = ((src.height() as f32 * scale).round() as u32).max(1);
+                    self.fit = Some(src.resize(fw, fh));
+                }
+                let fit = self.fit.as_ref().expect("fit");
+                let x = (w as i32 - fit.width() as i32) / 2;
+                let y = (h as i32 - fit.height() as i32) / 2;
+                frame.blit(fit, fit.bounds(), x, y);
+            } else {
+                let src_x = self.center.0 - w as f32 / 2.0 / scale;
+                let src_y = self.center.1 - h as f32 / 2.0 / scale;
+                src.sample_into(frame, Rect::new(0, 0, w, h), scale, src_x, src_y);
+            }
+            if self.toolbar {
                 self.draw_toolbar(cx, frame);
-                return;
             }
-            Status::Ready => {}
         }
-        let scale = self.fit_scale(w, h) * ZOOMS[self.zoom];
-        let Some(src) = &self.src else { return };
-        if self.zoom == 0 {
-            if self.fit.is_none() {
-                let fw = ((src.width() as f32 * scale).round() as u32).max(1);
-                let fh = ((src.height() as f32 * scale).round() as u32).max(1);
-                self.fit = Some(src.resize(fw, fh));
-            }
-            let fit = self.fit.as_ref().expect("fit");
-            let x = (w as i32 - fit.width() as i32) / 2;
-            let y = (h as i32 - fit.height() as i32) / 2;
-            frame.blit(fit, fit.bounds(), x, y);
-        } else {
-            let src_x = self.center.0 - w as f32 / 2.0 / scale;
-            let src_y = self.center.1 - h as f32 / 2.0 / scale;
-            src.sample_into(frame, Rect::new(0, 0, w, h), scale, src_x, src_y);
-        }
-        if self.toolbar {
-            self.draw_toolbar(cx, frame);
-        }
+        super::tips::show(cx, frame, &super::tips::IMAGE, matches!(self.status, Status::Ready));
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::IMAGE) {
+            return Transition::None;
+        }
         let InputEvent::Gesture(g) = event else {
             return match event {
                 InputEvent::Key { code: KeyCode::PageForward, pressed: true } => {

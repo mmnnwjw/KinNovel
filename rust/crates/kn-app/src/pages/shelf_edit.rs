@@ -123,9 +123,13 @@ impl Page<KinNovel> for FolderNamePage {
         let kb_h = TextEditor::height(&m);
         let kb = Rect::new(0, cx.height as i32 - kb_h as i32, cx.width, kb_h);
         self.editor.render(&mut ink, frame, cx.hits, &theme, &m, kb, &format!("文件夹名 (最多 {MAX_NAME} 字)"), "保存");
+        super::tips::show(cx, frame, &super::tips::KEYBOARD, true);
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        if super::tips::input(cx, event, &super::tips::KEYBOARD) {
+            return Transition::None;
+        }
         let InputEvent::Gesture(g) = event else { return Transition::None };
         if g.kind == GestureKind::Down || self.saving {
             return Transition::None;
