@@ -227,6 +227,8 @@ impl ReaderPage {
             image_max_ratio: kn_text::PYTHON_IMAGE_MAX_RATIO,
             cover_full_page: sort_num == 1,
             real_image_size: true,
+            // 」』）不放行首, 「…了。」 不会把 」 留给下一行
+            strict_kinsoku: true,
         }
     }
 

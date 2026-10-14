@@ -210,6 +210,7 @@ fn run_golden(stem: &str, dir: &Path) {
         image_max_ratio: kn_text::PYTHON_IMAGE_MAX_RATIO,
         cover_full_page: false,
         real_image_size: false,
+        strict_kinsoku: false,
     };
     let mut m = GoldenMeasure;
     let pages = paginate_all(&blocks, params, &mut m);

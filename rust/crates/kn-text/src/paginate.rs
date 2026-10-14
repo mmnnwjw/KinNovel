@@ -62,6 +62,9 @@ pub struct LayoutParams {
     /// 宽度不到可用宽度一半的小图 (替代生僻字的"外字"等) 按原始像素大小显示, 不放大到整行宽。
     /// false = Python 规则 (金标准测试用)。
     pub real_image_size: bool,
+    /// 严格标点禁则 (见 [`crate::wrap::wrap`]): 」』）不放行首, 标点串放不下时带上前一个字换行。
+    /// false = Python 规则 (金标准测试用)。
+    pub strict_kinsoku: bool,
 }
 
 impl Default for LayoutParams {
@@ -77,6 +80,7 @@ impl Default for LayoutParams {
             image_max_ratio: PYTHON_IMAGE_MAX_RATIO,
             cover_full_page: false,
             real_image_size: false,
+            strict_kinsoku: false,
         }
     }
 }
@@ -195,7 +199,7 @@ impl Paginator {
         let prefix = if indent { FIRST_LINE_INDENT_PREFIX } else { "" };
         let prefix_len = prefix.chars().count();
         let full = format!("{}{}", prefix, text);
-        for (line, line_start) in wrap(&full, size, self.usable_width, m) {
+        for (line, line_start) in wrap(&full, size, self.usable_width, self.params.strict_kinsoku, m) {
             if self.y + actual_height > self.usable_height && !self.current.is_empty() {
                 self.new_page();
             }
