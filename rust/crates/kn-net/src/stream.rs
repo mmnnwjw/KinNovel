@@ -112,6 +112,9 @@ impl NetStream {
                 Err(e) => last_err = Some(e),
             }
         }
+        if stream.is_none() {
+            crate::dns::forget(host);
+        }
         let tcp = stream.ok_or_else(|| {
             NetError::network(
                 last_err.map(|e| e.to_string()).unwrap_or_else(|| "连接失败".into()),

@@ -15,11 +15,17 @@
 //! global IPv6 entries we also ask the default IPv4 gateway (home routers
 //! answer DNS) and the link-local servers with the interface's scope id
 //! (`fe80::1%wlan0`) -- both answered on the KPW5 where musl gave up.
+//!
+//! Answers are cached per host for [`CACHE_FRESH`] (every comic page and cover
+//! is a new connection), and a failed lookup falls back to the last answer of
+//! any age: a DNS hiccup then doesn't fail the download. [`forget`] drops an
+//! entry whose addresses no longer accept connections.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 const ROUTES: &str = "/proc/net/route";
@@ -29,10 +35,45 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// the system resolver's 5 s timeout.
 static PREFER_OWN: AtomicBool = AtomicBool::new(false);
 
+/// How long a successful lookup is reused without asking again.
+const CACHE_FRESH: Duration = Duration::from_secs(600);
+/// (host, looked up at, addresses); a handful of hosts at most.
+static CACHE: Mutex<Vec<(String, Instant, Vec<IpAddr>)>> = Mutex::new(Vec::new());
+
 pub fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
+    let with_port = |ips: &[IpAddr]| ips.iter().map(|&ip| SocketAddr::new(ip, port)).collect::<Vec<_>>();
+    let cached = cache().iter().find(|(h, _, _)| h == host).map(|(_, at, ips)| (*at, ips.clone()));
+    if let Some((at, ips)) = &cached {
+        if at.elapsed() < CACHE_FRESH {
+            return Ok(with_port(ips));
+        }
+    }
+    match lookup(host, port) {
+        Ok(addrs) => {
+            let ips: Vec<IpAddr> = addrs.iter().map(|a| a.ip()).collect();
+            let mut cache = cache();
+            cache.retain(|(h, _, _)| h != host);
+            cache.push((host.to_string(), Instant::now(), ips));
+            Ok(addrs)
+        }
+        // Stale beats nothing: the CDN's addresses rarely change.
+        Err(e) => cached.map(|(_, ips)| with_port(&ips)).ok_or(e),
+    }
+}
+
+/// Drop the cached answer for `host` (none of its addresses accepted a connection).
+pub fn forget(host: &str) {
+    cache().retain(|(h, _, _)| h != host);
+}
+
+fn cache() -> std::sync::MutexGuard<'static, Vec<(String, Instant, Vec<IpAddr>)>> {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lookup(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     let conf = std::fs::read_to_string(RESOLV_CONF).unwrap_or_default();
     let routes = std::fs::read_to_string(ROUTES).unwrap_or_default();
     let servers = name_servers(&conf, &routes, interface_index);
@@ -275,6 +316,22 @@ nameserver fe80::3
         let ips = parse_response(&msg, 0x1234).unwrap().unwrap();
         assert_eq!(ips, vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)]);
         assert!(parse_response(&msg, 0x4321).is_none());
+    }
+
+    #[test]
+    fn cached_answer_is_reused_and_survives_a_failed_lookup() {
+        // ".invalid" never resolves (RFC 2606), so any answer comes from the cache.
+        let host = "kn-cache-test.invalid";
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        cache().push((host.to_string(), Instant::now(), vec![ip]));
+        assert_eq!(resolve(host, 443).unwrap(), vec![SocketAddr::new(ip, 443)]);
+        // Expired: the lookup fails, the stale answer is still used.
+        if let Some(stale) = Instant::now().checked_sub(CACHE_FRESH * 2) {
+            cache().iter_mut().find(|(h, _, _)| h == host).unwrap().1 = stale;
+            assert_eq!(resolve(host, 80).unwrap(), vec![SocketAddr::new(ip, 80)]);
+        }
+        forget(host);
+        assert!(cache().iter().all(|(h, _, _)| h != host));
     }
 
     #[test]
