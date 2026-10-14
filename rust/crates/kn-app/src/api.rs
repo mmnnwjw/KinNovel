@@ -501,30 +501,45 @@ fn iso_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", s / 3600, s / 60 % 60, s % 60)
 }
 
+/// 移出一本书 (网页版 removeFromShelf: 之后每层重新编号)。
 fn without_book(items: Vec<Value>, book_id: i64) -> Vec<Value> {
-    items.into_iter().filter(|it| shelf_book_id(it) != Some(book_id)).collect()
+    squeezed(items.into_iter().filter(|it| shelf_book_id(it) != Some(book_id)).collect())
 }
 
+/// 加入一本书 (网页版 addToShelf: 排在最外层第一个, 最外层其余条目的 index 都加 1)。
 fn with_book(mut items: Vec<Value>, book_id: i64, comic: bool, now: &str) -> Vec<Value> {
     if !items.iter().any(|it| shelf_book_id(it) == Some(book_id)) {
+        for it in &mut items {
+            if parents_of(it).is_empty() {
+                let i = index_key(it);
+                set_index(it, i + 1);
+            }
+        }
         let kind = if comic { "COMIC" } else { "NOVEL" };
         items.insert(0, json!({"id": book_id, "type": kind, "parents": [], "index": 0, "updateAt": now}));
     }
     items
 }
 
-/// 删除文件夹: 去掉文件夹条目, 并把它从其余条目的 parents 里拿掉 (里面的书移到上一层)。
+/// 删除文件夹 (网页版 deleteFolder): 去掉文件夹条目, 并把它从其余条目的 parents 里拿掉;
+/// 直接放在里面的条目接到上一层末尾, 更深的层级关系不变; 之后每层重新编号。
 fn without_folder(items: Vec<Value>, id: &str) -> Vec<Value> {
-    items
-        .into_iter()
-        .filter(|it| folder_id(it).as_deref() != Some(id))
-        .map(|mut it| {
-            if let Some(Value::Array(parents)) = it.get_mut("parents") {
-                parents.retain(|p| p.as_str() != Some(id) && p.to_string() != id);
-            }
-            it
-        })
-        .collect()
+    let Some(parent) = items.iter().find(|it| folder_id(it).as_deref() == Some(id)).map(parents_of) else { return items };
+    let parent_last = parent.last().cloned();
+    let mut next = items.iter().filter(|it| last_parent(it) == parent_last).map(index_key).max().unwrap_or(-1) + 1;
+    let mut items: Vec<Value> = items.into_iter().filter(|it| folder_id(it).as_deref() != Some(id)).collect();
+    for it in &mut items {
+        let parents = parents_of(it);
+        let Some(depth) = parents.iter().position(|p| p == id) else { continue };
+        let direct = depth == parents.len() - 1;
+        let rest: Vec<String> = parents.iter().enumerate().filter(|(i, _)| *i != depth).map(|(_, p)| p.clone()).collect();
+        set_parents(it, &rest);
+        if direct {
+            set_index(it, next);
+            next += 1;
+        }
+    }
+    squeezed(items)
 }
 
 /// 这本书是否在书架上 (书籍详情页的按钮状态)。
@@ -1441,13 +1456,20 @@ mod tests {
         assert!(removed.iter().any(|it| it["id"] == 7));
         let added = with_book(removed.clone(), 11, true, "T");
         assert_eq!(added[0], json!({"id": 11, "type": "COMIC", "parents": [], "index": 0, "updateAt": "T"}));
-        assert_eq!(&added[1..], &removed[..]);
+        // 最外层其余条目往后挪一位, 文件夹里的不动
+        let root_index = |v: &[Value], id: Value| v.iter().find(|it| it["id"] == id).unwrap()["index"].as_i64().unwrap();
+        assert_eq!(root_index(&added, json!("f1")), root_index(&removed, json!("f1")) + 1);
         assert_eq!(with_book(raw.clone(), 9, false, "T"), raw);
+        // 加入再移出: 每层编号回到 0..n
+        let back = without_book(added, 11);
+        assert_eq!(back.iter().filter(|it| parents_of(it).is_empty()).map(index_key).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
         let unfoldered = without_folder(raw, "f1");
         assert_eq!(unfoldered.len(), 4);
         let nine = unfoldered.iter().find(|it| it["id"] == 9).unwrap();
         assert_eq!(nine["parents"], json!([]));
         assert_eq!(nine["extra"], "keep");
+        // 文件夹里的书接到上一层末尾
+        assert_eq!(nine["index"], 3);
         assert!(iso_now().ends_with(".000Z") && iso_now().len() == 24);
     }
 
