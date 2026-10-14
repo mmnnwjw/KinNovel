@@ -118,7 +118,8 @@ enum ImageSlot {
     Ready(Bitmap),
     /// 本地没有缓存 (下载要等 kn-net)
     Missing,
-    Failed,
+    /// 失败的时刻: 过了 `crate::net::RETRY_AFTER` 再显示到这页时重试
+    Failed(Instant),
 }
 
 /// 后台解码结果。
@@ -513,7 +514,7 @@ impl ReaderPage {
                     }
                     let label = match self.images.get(url) {
                         Some(ImageSlot::Missing) => "插图未缓存",
-                        Some(ImageSlot::Failed) => "插图无法显示",
+                        Some(ImageSlot::Failed(_)) => "插图无法显示",
                         _ => "插图加载中…",
                     };
                     let m = cx.app.metrics;
@@ -633,8 +634,10 @@ impl ReaderPage {
         let Some(items) = self.pages.get(index) else { return };
         for item in items {
             let PageItem::Image { url, width, height, .. } = item else { continue };
-            if self.images.contains_key(url) {
-                continue;
+            match self.images.get(url) {
+                Some(ImageSlot::Failed(at)) if at.elapsed() >= crate::net::RETRY_AFTER => {}
+                Some(_) => continue,
+                None => {}
             }
             self.images.insert(url.clone(), ImageSlot::Pending);
             let paths = cx.app.paths.clone();
@@ -658,7 +661,7 @@ impl ReaderPage {
             Ok(None) => ImageSlot::Missing,
             Err(e) => {
                 eprintln!("[reader] 插图 {}: {e}", loaded.url);
-                ImageSlot::Failed
+                ImageSlot::Failed(Instant::now())
             }
         };
         self.images.insert(loaded.url.clone(), slot);

@@ -438,6 +438,10 @@ impl ComicReaderPage {
         self.focus.store(page, Ordering::Relaxed);
         let keep = Self::keep_radius(cx);
         self.slots.retain(|i, s| (*i as i64 - page).abs() <= keep || matches!(s, Slot::Pending));
+        // 翻回失败的页: 重试 (网络可能已经恢复)
+        if matches!(self.slots.get(&self.page), Some(Slot::Failed(_))) {
+            self.slots.remove(&self.page);
+        }
         self.request_page(cx, self.page, 0);
         self.save_progress(cx, false);
         if matches!(self.slots.get(&self.page), Some(Slot::Ready(_))) {
@@ -448,6 +452,14 @@ impl ComicReaderPage {
             cx.request_redraw(RefreshHint::Ui);
         }
         Transition::None
+    }
+
+    /// 当前页加载失败后重试。
+    fn retry_page(&mut self, cx: &mut Cx<KinNovel>) {
+        self.slots.remove(&self.page);
+        self.request_page(cx, self.page, 0);
+        self.pending_present.get_or_insert(0);
+        cx.request_redraw(RefreshHint::Ui);
     }
 
     fn change_chapter(&mut self, cx: &mut Cx<KinNovel>, delta: i64) -> Transition<KinNovel> {
@@ -789,7 +801,7 @@ impl Page<KinNovel> for ComicReaderPage {
                     }
                     Some(Slot::Missing) => Self::draw_message(cx, frame, &format!("第 {n} 页尚未缓存 (离线)")),
                     Some(Slot::Failed(e)) => {
-                        let text = format!("第 {n} 页无法显示\n{e}");
+                        let text = format!("第 {n} 页无法显示\n{e}\n\n轻触屏幕中间重试");
                         Self::draw_message(cx, frame, &text);
                     }
                     Some(Slot::Pending) | None => Self::draw_message(cx, frame, &format!("第 {n} 页加载中…")),
@@ -836,6 +848,9 @@ impl Page<KinNovel> for ComicReaderPage {
                             self.turn(cx, -forward)
                         } else if p.x > w * 7 / 10 {
                             self.turn(cx, forward)
+                        } else if matches!(self.slots.get(&self.page), Some(Slot::Failed(_))) {
+                            self.retry_page(cx);
+                            Transition::None
                         } else {
                             self.set_chrome(cx, true);
                             Transition::None

@@ -13,6 +13,8 @@ use crate::store::{self, Paths};
 const CHAPTER_TTL: Duration = Duration::from_secs(12 * 3600);
 const FONT_LIMIT: usize = 20 * 1024 * 1024;
 const IMAGE_LIMIT: usize = 16 * 1024 * 1024;
+/// 封面/插图下载失败后, 再次显示时隔多久重试 (网络可能已经恢复)。
+pub const RETRY_AFTER: Duration = Duration::from_secs(20);
 
 /// 配置里的账号 (邮箱, 密码); 启动时设置一次。
 static ACCOUNT: Mutex<Option<(String, String)>> = Mutex::new(None);

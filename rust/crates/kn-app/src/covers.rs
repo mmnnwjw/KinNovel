@@ -5,6 +5,7 @@
 //! 见 `crate::net::image_bytes`), 结果通过 `cx.spawn` 投递回同一页面实例的 `on_message`。
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use kn_net::Client;
 use kn_render::Bitmap;
@@ -18,7 +19,8 @@ enum Slot {
     Ready(Bitmap),
     /// 本地没有缓存且离线 (或 fixture 模式), 不尝试下载
     Missing,
-    Failed,
+    /// 下载或解码失败的时刻: 过了 `crate::net::RETRY_AFTER` 再画到时重试 (网络可能已恢复)
+    Failed(Instant),
 }
 
 #[derive(Default)]
@@ -33,14 +35,16 @@ pub struct CoverLoaded {
 }
 
 impl CoverCache {
-    /// 没有已请求过就发起后台加载; 已有结果 (含失败/缺失) 不重复请求。
+    /// 没有已请求过就发起后台加载; 已有结果 (含缺失) 不重复请求, 失败的过一段时间再试。
     pub fn request(&mut self, cx: &Cx<KinNovel>, url: &str, w: u32, h: u32) {
         if url.is_empty() {
             return;
         }
         let key = (url.to_string(), w, h);
-        if self.entries.contains_key(&key) {
-            return;
+        match self.entries.get(&key) {
+            Some(Slot::Failed(at)) if at.elapsed() >= crate::net::RETRY_AFTER => {}
+            Some(_) => return,
+            None => {}
         }
         self.entries.insert(key.clone(), Slot::Pending);
         let paths: Paths = cx.app.paths.clone();
@@ -61,7 +65,7 @@ impl CoverCache {
             Ok(None) => Slot::Missing,
             Err(e) => {
                 eprintln!("[cover] {}: {e}", loaded.key.0);
-                Slot::Failed
+                Slot::Failed(Instant::now())
             }
         };
         self.entries.insert(loaded.key, slot);
