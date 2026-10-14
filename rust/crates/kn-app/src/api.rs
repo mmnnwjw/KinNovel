@@ -427,6 +427,34 @@ impl ShelfData {
     pub fn has_folder(&self, id: &str) -> bool {
         self.raw.iter().any(|it| folder_id(it).as_deref() == Some(id))
     }
+
+    /// 全部文件夹, 深度优先 (同层按 index), 选择"移动到"的目标用。
+    pub fn folder_tree(&self) -> Vec<FolderNode> {
+        fn walk(raw: &[Value], parent: Option<&str>, out: &mut Vec<FolderNode>, depth: usize) {
+            let mut level: Vec<&Value> = raw.iter().filter(|it| folder_id(it).is_some() && last_parent(it).as_deref() == parent).collect();
+            level.sort_by_key(|it| index_key(it));
+            for it in level {
+                let id = folder_id(it).unwrap_or_default();
+                // 防御性: 数据里的环或过深的层级
+                if depth > 16 || out.iter().any(|n| n.id == id) {
+                    continue;
+                }
+                let mut path = parents_of(it);
+                path.push(id.clone());
+                let title = str_of(it, "title");
+                out.push(FolderNode { id: id.clone(), title: if title.is_empty() { "文件夹".into() } else { title }, path });
+                walk(raw, Some(&id), out, depth + 1);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.raw, None, &mut out, 0);
+        out
+    }
+
+    /// 某一项现在所在的文件夹路径。
+    pub fn parents_of(&self, what: &ShelfRef) -> Vec<String> {
+        self.raw.iter().find(|it| what.matches(it)).map(parents_of).unwrap_or_default()
+    }
 }
 
 /// fixture 模式下的书架写回 (只在内存里, 预览用)。
@@ -515,6 +543,177 @@ pub fn shelf_set_book(net: Option<&Client>, book_id: i64, comic: bool, on_shelf:
 pub fn shelf_delete_folder(net: Option<&Client>, folder: &str) -> Result<(), String> {
     let items = shelf_items(&fetch_shelf(net)?);
     save_shelf(net, without_folder(items, folder))
+}
+
+// 新建 / 重命名文件夹、移动条目: 规则照网页版 `stores/shelf.ts` (createFolder / renameFolder / moveItems),
+// 写回前和网页版一样把每层的 index 挤压成 0, 1, 2, ...
+
+/// 书架上的一项 (书的 id 是数字, 文件夹的是字符串)。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShelfRef {
+    Book(i64),
+    Folder(String),
+}
+
+impl ShelfRef {
+    fn matches(&self, item: &Value) -> bool {
+        match self {
+            ShelfRef::Book(id) => shelf_book_id(item) == Some(*id),
+            ShelfRef::Folder(id) => folder_id(item).as_deref() == Some(id.as_str()),
+        }
+    }
+}
+
+/// 网页版根文件夹的显示名, 不能用作文件夹名。
+const ROOT_FOLDER_NAME: &str = "根文件夹";
+
+/// 选择移动目标时列出的一个文件夹。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FolderNode {
+    pub id: String,
+    pub title: String,
+    /// 从根到它自己的完整路径 (= 移进去之后条目的 parents)
+    pub path: Vec<String>,
+}
+
+fn parents_of(item: &Value) -> Vec<String> {
+    arr_of(item, "parents")
+        .into_iter()
+        .map(|p| match p {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+fn set_parents(item: &mut Value, parents: &[String]) {
+    if let Some(obj) = item.as_object_mut() {
+        obj.insert("parents".into(), json!(parents));
+    }
+}
+
+fn set_index(item: &mut Value, index: i64) {
+    if let Some(obj) = item.as_object_mut() {
+        obj.insert("index".into(), json!(index));
+    }
+}
+
+/// 网页版 `squeezeShelfItemIndex`: 按 (index, 层深) 稳定排序后, 每层从 0 重新编号。
+fn squeezed(mut items: Vec<Value>) -> Vec<Value> {
+    items.sort_by_key(|it| (index_key(it), parents_of(it).len()));
+    let mut next: std::collections::HashMap<Option<String>, i64> = std::collections::HashMap::new();
+    for it in &mut items {
+        let n = next.entry(last_parent(it)).or_insert(0);
+        set_index(it, *n);
+        *n += 1;
+    }
+    items
+}
+
+/// 文件夹名的校验: 非空、不是 "根文件夹"、同一层没有同名的 (`except` = 重命名时的它自己)。
+fn check_folder_name(items: &[Value], name: &str, parents: &[String], except: Option<&str>) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name == ROOT_FOLDER_NAME {
+        return Err("这个文件夹名不能用".into());
+    }
+    let clash = items.iter().any(|it| {
+        folder_id(it).is_some_and(|id| Some(id.as_str()) != except) && str_of(it, "title") == name && parents_of(it) == parents
+    });
+    if clash {
+        return Err("这一层已有同名文件夹".into());
+    }
+    Ok(name.to_string())
+}
+
+/// 21 位 nanoid 风格的文件夹 id (字母表同 nanoid)。
+fn new_folder_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    const ALPHABET: &[u8] = b"useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+    let state = std::collections::hash_map::RandomState::new();
+    let mut seed = 0u64;
+    (0..21)
+        .map(|i| {
+            let mut h = state.build_hasher();
+            h.write_u64(seed ^ i);
+            h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+            seed = h.finish();
+            ALPHABET[(seed % 64) as usize] as char
+        })
+        .collect()
+}
+
+/// 在 `parents` 这一层最前面新建文件夹。
+fn with_new_folder(mut items: Vec<Value>, parents: &[String], name: &str, id: &str, now: &str) -> Result<Vec<Value>, String> {
+    let name = check_folder_name(&items, name, parents, None)?;
+    for it in &mut items {
+        if parents_of(it) == parents {
+            let i = index_key(it);
+            set_index(it, i + 1);
+        }
+    }
+    items.insert(0, json!({"index": 0, "type": "FOLDER", "parents": parents, "id": id, "title": name, "updateAt": now}));
+    Ok(squeezed(items))
+}
+
+fn renamed_folder(mut items: Vec<Value>, id: &str, name: &str) -> Result<Vec<Value>, String> {
+    let target = ShelfRef::Folder(id.to_string());
+    let parents = items.iter().find(|it| target.matches(it)).map(parents_of).ok_or("文件夹已不存在")?;
+    let name = check_folder_name(&items, name, &parents, Some(id))?;
+    if let Some(obj) = items.iter_mut().find(|it| target.matches(it)).and_then(Value::as_object_mut) {
+        obj.insert("title".into(), json!(name));
+    }
+    Ok(items)
+}
+
+/// 把一项移到 `to` (目标文件夹的完整路径, 空 = 最外层), 排在那一层最前面;
+/// 移动文件夹时, 它下面所有条目的路径前缀一起改写。
+fn moved(mut items: Vec<Value>, what: &ShelfRef, to: &[String]) -> Result<Vec<Value>, String> {
+    let from = items.iter().find(|it| what.matches(it)).map(parents_of).ok_or("条目已不在书架上")?;
+    if from == to {
+        return Ok(items);
+    }
+    if let ShelfRef::Folder(id) = what {
+        if to.contains(id) {
+            return Err("不能把文件夹移到它自己或它的下级里".into());
+        }
+    }
+    for it in &mut items {
+        if what.matches(it) {
+            set_parents(it, to);
+            set_index(it, -1);
+        } else if parents_of(it) == to {
+            let i = index_key(it);
+            set_index(it, i + 1);
+        }
+    }
+    if let ShelfRef::Folder(id) = what {
+        for it in &mut items {
+            let parents = parents_of(it);
+            if let Some(anchor) = parents.iter().position(|p| p == id) {
+                let rewritten: Vec<String> = to.iter().cloned().chain(parents[anchor..].iter().cloned()).collect();
+                set_parents(it, &rewritten);
+            }
+        }
+    }
+    Ok(squeezed(items))
+}
+
+/// 新建文件夹, 返回它的 id。
+pub fn shelf_create_folder(net: Option<&Client>, parents: &[String], name: &str) -> Result<String, String> {
+    let items = shelf_items(&fetch_shelf(net)?);
+    let id = new_folder_id();
+    save_shelf(net, with_new_folder(items, parents, name, &id, &iso_now())?)?;
+    Ok(id)
+}
+
+pub fn shelf_rename_folder(net: Option<&Client>, id: &str, name: &str) -> Result<(), String> {
+    let items = shelf_items(&fetch_shelf(net)?);
+    save_shelf(net, renamed_folder(items, id, name)?)
+}
+
+pub fn shelf_move(net: Option<&Client>, what: &ShelfRef, to: &[String]) -> Result<(), String> {
+    let items = shelf_items(&fetch_shelf(net)?);
+    save_shelf(net, moved(items, what, to)?)
 }
 
 /// 阅读历史的全部 id (最新在前, 对照 `GetReadHistory()`): 小说是书 id, 漫画是分卷 (书) id。
@@ -1250,6 +1449,44 @@ mod tests {
         assert_eq!(nine["parents"], json!([]));
         assert_eq!(nine["extra"], "keep");
         assert!(iso_now().ends_with(".000Z") && iso_now().len() == 24);
+    }
+
+    #[test]
+    fn shelf_folder_create_rename_move_follow_the_web_client() {
+        let raw = shelf_fixture().raw;
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // 新建: 排在这一层最前, 其余挤后; 同层重名 / 根文件夹 被拒绝
+        let created = with_new_folder(raw.clone(), &[], "新的", "f2", "T").unwrap();
+        let root: Vec<_> = created.iter().filter(|it| parents_of(it).is_empty()).map(|it| (it["id"].clone(), it["index"].as_i64().unwrap())).collect();
+        assert_eq!(root[0], (json!("f2"), 0));
+        assert_eq!(root.iter().map(|r| r.1).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        assert!(with_new_folder(raw.clone(), &[], " 存档 ", "x", "T").is_err());
+        assert!(with_new_folder(raw.clone(), &[], "根文件夹", "x", "T").is_err());
+        assert!(with_new_folder(raw.clone(), &p(&["f1"]), "存档", "x", "T").is_ok());
+        // 重命名
+        let renamed = renamed_folder(raw.clone(), "f1", "旧书").unwrap();
+        assert_eq!(renamed.iter().find(|it| it["id"] == "f1").unwrap()["title"], "旧书");
+        assert!(renamed_folder(raw.clone(), "f1", "存档").is_ok());
+        // 移动书: 进入文件夹排第一, 原来的挤后
+        let moved_book = moved(raw.clone(), &ShelfRef::Book(3), &p(&["f1"])).unwrap();
+        let three = moved_book.iter().find(|it| it["id"] == 3).unwrap();
+        assert_eq!((parents_of(three), three["index"].as_i64()), (p(&["f1"]), Some(0)));
+        assert_eq!(moved_book.iter().find(|it| it["id"] == 9).unwrap()["index"], 1);
+        // 移动文件夹: 下级路径一起改写; 不能移进自己
+        let nested = with_new_folder(raw.clone(), &[], "外层", "f0", "T").unwrap();
+        let moved_folder = moved(nested.clone(), &ShelfRef::Folder("f1".into()), &p(&["f0"])).unwrap();
+        assert_eq!(parents_of(moved_folder.iter().find(|it| it["id"] == "f1").unwrap()), p(&["f0"]));
+        assert_eq!(parents_of(moved_folder.iter().find(|it| it["id"] == 9).unwrap()), p(&["f0", "f1"]));
+        assert!(moved(moved_folder.clone(), &ShelfRef::Folder("f0".into()), &p(&["f0", "f1"])).is_err());
+        let data = ShelfData { raw: moved_folder, books: Default::default() };
+        let tree: Vec<_> = data.folder_tree().into_iter().map(|n| n.path).collect();
+        assert_eq!(tree, vec![p(&["f0"]), p(&["f0", "f1"])]);
+        assert_eq!(data.parents_of(&ShelfRef::Book(9)), p(&["f0", "f1"]));
+        // 不认识的字段原样保留
+        assert_eq!(data.raw.iter().find(|it| it["id"] == 9).unwrap()["extra"], "keep");
+        let id = new_folder_id();
+        assert_eq!(id.len(), 21);
+        assert_ne!(id, new_folder_id());
     }
 
     #[test]

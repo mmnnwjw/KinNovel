@@ -1,8 +1,10 @@
 //! 书架 (首页)。
 //!
 //! 顶部 "继续阅读" 卡片 (一点即回到上次的页), 下面是书目列表: 在线且登录时显示云端书架
-//! (对照 Python `shelf.py`): 文件夹可以点进去 (顶栏返回箭头回上一层), 长按书 = 移出书架,
-//! 长按文件夹 = 删除文件夹 (里面的书移到上一层), 都先确认; 写回见 `crate::api::shelf_set_book`。
+//! (对照 Python `shelf.py`): 文件夹可以点进去 (顶栏返回箭头回上一层)。长按书或文件夹弹出操作:
+//! 移动到别的文件夹、移出书架 / 重命名、删除文件夹 (里面的书移到上一层); 删除类操作先确认。
+//! 列表上方的「新建文件夹」在当前这一层新建。写回见 `crate::api::shelf_set_book` 等,
+//! 命名与移动在 `super::shelf_edit`。
 //! 否则列出本地缓存里有章节的书, 点进去是该书已缓存的章节。
 
 use std::any::Any;
@@ -16,8 +18,9 @@ use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
 use super::book::BookDetailPage;
 use super::comic::ComicReaderPage;
 use super::reader::{Entry, ReaderPage};
+use super::shelf_edit::{FolderNamePage, MovePickerPage};
 use super::Tab;
-use crate::api::{self, ShelfData, ShelfEntry};
+use crate::api::{self, ShelfData, ShelfEntry, ShelfRef};
 use crate::covers::CoverCache;
 use crate::store::{self, Chapter, LastRead};
 use crate::KinNovel;
@@ -29,6 +32,11 @@ const HIT_BACK: HitId = HitId(4);
 const HIT_FOLDER_UP: HitId = HitId(5);
 const HIT_CONFIRM: HitId = HitId(6);
 const HIT_CANCEL: HitId = HitId(7);
+const HIT_NEW_FOLDER: HitId = HitId(8);
+const HIT_ACT_MOVE: HitId = HitId(9);
+const HIT_ACT_REMOVE: HitId = HitId(10);
+const HIT_ACT_RENAME: HitId = HitId(11);
+const HIT_ACT_CLOSE: HitId = HitId(12);
 /// 列表行: ROW_BASE + 序号
 const ROW_BASE: u32 = 1000;
 
@@ -103,6 +111,8 @@ pub struct ShelfPage {
     covers: CoverCache,
     /// 当前所在的文件夹路径 (空 = 根)
     folder: Vec<String>,
+    /// 长按弹出的操作菜单
+    menu: Option<ShelfEntry>,
     confirm: Option<Confirm>,
     /// 正在写回书架
     saving: bool,
@@ -274,6 +284,39 @@ impl Page<KinNovel> for ShelfPage {
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
         let InputEvent::Gesture(g) = event else { return Transition::None };
+        if let Some(entry) = self.menu.clone() {
+            if g.kind != GestureKind::Tap {
+                return Transition::None;
+            }
+            let hit = cx.hits.at(Point { x: g.start.0, y: g.start.1 });
+            if hit.is_some_and(|h| [HIT_ACT_MOVE, HIT_ACT_REMOVE, HIT_ACT_RENAME, HIT_ACT_CLOSE].contains(&h)) {
+                self.menu = None;
+                cx.request_redraw(RefreshHint::Clean);
+            }
+            let (what, title) = match &entry {
+                ShelfEntry::Book(b) => (ShelfRef::Book(b.id), b.title.clone()),
+                ShelfEntry::Folder { id, title, .. } => (ShelfRef::Folder(id.clone()), title.clone()),
+            };
+            return match hit {
+                Some(HIT_ACT_MOVE) => match &self.cloud {
+                    Some(Ok(data)) => Transition::Push(Box::new(MovePickerPage::new(data, what, title))),
+                    _ => Transition::None,
+                },
+                Some(HIT_ACT_RENAME) => match what {
+                    ShelfRef::Folder(id) => Transition::Push(Box::new(FolderNamePage::rename(id, &title))),
+                    ShelfRef::Book(_) => Transition::None,
+                },
+                Some(HIT_ACT_REMOVE) => {
+                    self.confirm = Some(match what {
+                        ShelfRef::Book(id) => Confirm::RemoveBook { id, title },
+                        ShelfRef::Folder(id) => Confirm::DeleteFolder { id, title },
+                    });
+                    cx.request_redraw(RefreshHint::Ui);
+                    Transition::None
+                }
+                _ => Transition::None,
+            };
+        }
         if self.confirm.is_some() {
             if g.kind == GestureKind::Tap {
                 match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
@@ -297,12 +340,8 @@ impl Page<KinNovel> for ShelfPage {
                     Some(HitId(id)) if id >= ROW_BASE => self.entries().into_iter().nth((id - ROW_BASE) as usize),
                     _ => None,
                 };
-                self.confirm = match entry {
-                    Some(ShelfEntry::Book(b)) => Some(Confirm::RemoveBook { id: b.id, title: b.title }),
-                    Some(ShelfEntry::Folder { id, title, .. }) => Some(Confirm::DeleteFolder { id, title }),
-                    None => None,
-                };
-                if self.confirm.is_some() {
+                if entry.is_some() {
+                    self.menu = entry;
                     cx.request_redraw(RefreshHint::Ui);
                 }
                 Transition::None
@@ -311,6 +350,9 @@ impl Page<KinNovel> for ShelfPage {
                 let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
                 if let Some(t) = super::tab_transition(hit, Tab::Shelf) {
                     return t;
+                }
+                if hit == HIT_NEW_FOLDER {
+                    return Transition::Push(Box::new(FolderNamePage::create(self.folder.clone())));
                 }
                 if hit == HIT_FOLDER_UP {
                     self.folder.pop();
@@ -419,6 +461,16 @@ impl ShelfPage {
         if cloud_mode {
             let label = if self.saving { "我的书架 · 正在保存…" } else if in_folder { "文件夹" } else { "我的书架" };
             ink.text(frame, side, y, label, m.small, theme.muted);
+            if matches!(self.cloud, Some(Ok(_))) && !self.saving {
+                // 右侧「＋ 新建文件夹」: 字小, 命中区域按触摸尺寸放大
+                let text = "＋ 新建文件夹";
+                let w = ink.width(text, m.small).ceil() as i32;
+                let x = cx.width as i32 - side - w;
+                ink.text(frame, x, y, text, m.small, theme.foreground);
+                let text_h = (m.small * 1.6) as i32;
+                let hit_h = (m.touch as i32).max(text_h);
+                cx.hits.add(HIT_NEW_FOLDER, Rect::new(x - side / 2, y + text_h / 2 - hit_h / 2, (w + side) as u32, hit_h as u32)).rounded(m.radius);
+            }
             y += (m.small * 1.6) as i32;
             frame.fill_rect(Rect::new(side, y - 2, cx.width - 2 * m.margin, 2), theme.foreground);
             let entries = self.entries();
@@ -459,6 +511,19 @@ impl ShelfPage {
                     }
                 }
                 Some(Err(_)) | None => {}
+            }
+            if let Some(entry) = &self.menu {
+                let (title, info, remove) = match entry {
+                    ShelfEntry::Book(b) => (b.title.clone(), b.subtitle(), "移出书架"),
+                    ShelfEntry::Folder { title, count, .. } => (title.clone(), format!("文件夹 · {count} 项"), "删除"),
+                };
+                let mut buttons = vec![("移动到…", HIT_ACT_MOVE, widgets::ButtonStyle::Secondary)];
+                if matches!(entry, ShelfEntry::Folder { .. }) {
+                    buttons.push(("重命名", HIT_ACT_RENAME, widgets::ButtonStyle::Secondary));
+                }
+                buttons.push((remove, HIT_ACT_REMOVE, widgets::ButtonStyle::Secondary));
+                buttons.push(("取消", HIT_ACT_CLOSE, widgets::ButtonStyle::Primary));
+                widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, &title, &[&info], &buttons);
             }
             if let Some(confirm) = &self.confirm {
                 let (title, line) = match confirm {

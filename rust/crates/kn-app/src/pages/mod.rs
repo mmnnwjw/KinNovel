@@ -18,6 +18,7 @@ pub mod search;
 pub mod series;
 pub mod settings;
 pub mod shelf;
+pub mod shelf_edit;
 pub mod shop;
 pub mod stats;
 pub mod storage;

@@ -230,6 +230,12 @@ pub trait Page<A: App> {
         true
     }
 
+    /// 后台结果 (`on_message`) 处理完后, 页面想做的导航 (例如保存成功后返回)。
+    /// 只在本页面位于栈顶时取; 不支持 `Transition::Exit`。
+    fn take_transition(&mut self) -> Transition<A> {
+        Transition::None
+    }
+
     /// 空闲时调用 (无输入、无手指按下); 返回 true 表示还有空闲工作要做。
     /// 每次调用应在 ~50 ms 内返回 (例如只预渲染一页)。
     fn on_idle(&mut self, _cx: &mut Cx<A>) -> bool {
@@ -386,6 +392,14 @@ impl<A: App> Stack<A> {
             Delivery::Page { instance, msg } => {
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.instance == instance) {
                     entry.page.on_message(&mut rt.cx(instance), msg);
+                }
+                if self.top().instance == instance {
+                    match self.top().page.take_transition() {
+                        Transition::None | Transition::Exit => {}
+                        transition => {
+                            self.apply(rt, transition);
+                        }
+                    }
                 }
             }
         }
