@@ -36,7 +36,8 @@ KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户
 
 ### 需要
 
-- 已越狱、装有 [KUAL](https://www.mobileread.com/forums/showthread.php?t=203326) 的 Kindle，固件 5.x。
+- 已越狱、装有 [KUAL](https://www.mobileread.com/forums/showthread.php?t=203326) 的 Kindle，固件 5.x。程序是静态链接的，新旧固件（5.16.3 起的硬浮点、之前的软浮点）都能用，不需要装 Python 等运行环境。
+- 机型：Paperwhite 2 及之后的触屏 Kindle。Kindle Touch 和 Paperwhite 1 的系统内核太老，可能无法运行。
 - 目前只在 Kindle Paperwhite 5 上实机测试过。其他机型按 KOReader 的机型表做了适配，欢迎反馈使用情况。
 
 ### 步骤
@@ -46,6 +47,8 @@ KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户
 3. 在 KUAL 中选择 **KinNovel**。第一次打开是欢迎页，用屏幕键盘输入轻书架的邮箱和密码登录，就能同步云端书架和阅读进度；也可以点「先逛逛」，以后在「我的」里登录。
 
 登录过期后，KinNovel 会用保存的账号自动重新登录；如果服务器说账号或密码不对（比如在网站上改了密码），就删掉保存的账号并回到登录页。本机只保存密码的哈希值，不保存明文。
+
+卸载时删除 `extensions/kinnovel/` 文件夹即可（设置、账号和缓存都在里面）。
 
 升级时直接覆盖安装即可，设置、账号、进度、书签和缓存都会保留。从 1.4 及更早的版本升级时，`bin/config.json` 里的设置和账号会自动迁移到 `data/`，旧文件随后删除。
 

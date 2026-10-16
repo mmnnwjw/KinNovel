@@ -7,12 +7,12 @@
 2. Collects the KUAL extension layout under `KinNovel/` inside the zip:
        KinNovel/bin/kinnovel        static armv7 binary (0755)
        KinNovel/bin/kinnovel.sh     launcher (0755)
-       KinNovel/{config.xml,menu.json,manifest.json,launch.sh,install.sh,uninstall.sh,
-                 LICENSE,LICENSE-rime-pinyin-simp,LICENSE-NotoEmoji,README.md,THIRD-PARTY-NOTICES.md}
+       KinNovel/{config.xml,menu.json}  what KUAL reads
+       KinNovel/{LICENSE,LICENSE-rime-pinyin-simp,LICENSE-NotoEmoji,README.md,THIRD-PARTY-NOTICES.md}
+   Installing = copying the folder's contents to extensions/kinnovel/ (no install scripts).
 3. Refuses to package anything that looks like a credential.
 """
 
-import json
 import re
 import subprocess
 import sys
@@ -28,10 +28,6 @@ FILES = [
     ("bin/kinnovel.sh", ROOT / "bin" / "kinnovel.sh"),
     ("config.xml", ROOT / "config.xml"),
     ("menu.json", ROOT / "menu.json"),
-    ("manifest.json", ROOT / "manifest.json"),
-    ("launch.sh", ROOT / "launch.sh"),
-    ("install.sh", ROOT / "install.sh"),
-    ("uninstall.sh", ROOT / "uninstall.sh"),
     ("LICENSE", ROOT / "LICENSE"),
     ("README.md", ROOT / "README.md"),
     ("THIRD-PARTY-NOTICES.md", ROOT / "THIRD-PARTY-NOTICES.md"),
@@ -40,7 +36,7 @@ FILES = [
     # OFL-1.1 requires the license with the embedded emoji font
     ("LICENSE-NotoEmoji", ROOT / "rust" / "crates" / "kn-app" / "data" / "LICENSE-NotoEmoji"),
 ]
-EXECUTABLE = {"bin/kinnovel", "bin/kinnovel.sh", "launch.sh", "install.sh", "uninstall.sh"}
+EXECUTABLE = {"bin/kinnovel", "bin/kinnovel.sh"}
 
 SECRET_CONTENT_PATTERNS = (
     re.compile(rb"ghp_[A-Za-z0-9]{20,}"),
@@ -58,9 +54,6 @@ def version():
 
 
 def check_versions(v):
-    manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
-    if ".".join(str(n) for n in manifest["version"]) != v.split("-")[0]:
-        sys.exit("manifest.json version %s != %s" % (manifest["version"], v))
     if "<version>%s</version>" % v not in (ROOT / "config.xml").read_text(encoding="utf-8"):
         sys.exit("config.xml version != %s" % v)
 

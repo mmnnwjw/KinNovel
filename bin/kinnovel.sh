@@ -39,6 +39,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCK_DIR/pid"
 
+# 旧版本留下的文件 (安装就是复制文件夹, 没有安装脚本来清理): 0.8.x 的 Python 运行时 (~40 MB),
+# 1.5 及以前随包的 KPM 描述与安装脚本
+rm -rf "$SCRIPT_DIR/src" "$SCRIPT_DIR/lib" "$SCRIPT_DIR/vendor" 2>/dev/null
+rm -f "$SCRIPT_DIR/app.py" "$SCRIPT_DIR/start.sh" "$SCRIPT_DIR/image_worker.py" "$SCRIPT_DIR/fb_snapshot.py"   "$APP_DIR/manifest.json" "$APP_DIR/launch.sh" "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh" 2>/dev/null
+
 # 一次 ls 列出所有进程的 fd 链接 (KPW5 上 0.15 s; 以前每个 fd 调一次 readlink 要 ~7 s)
 find_fb_users() {
   ls -l /proc/[0-9]*/fd/ 2>/dev/null | awk -v dev="$FB_DEV" '
