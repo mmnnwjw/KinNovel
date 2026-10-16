@@ -74,6 +74,14 @@ impl LoginPage {
         Self::build(false)
     }
 
+    /// 保存的账号被服务器拒绝 (密码改了等) 后弹出: 邮箱已填好。
+    pub fn rejected(email: &str) -> Self {
+        let mut page = Self::build(false);
+        page.email.set_text(email);
+        page.message = Some("保存的账号无法登录（密码可能已修改），请重新登录".into());
+        page
+    }
+
     fn editor(&mut self, field: Field) -> &mut TextEditor {
         match field {
             Field::Email => &mut self.email,

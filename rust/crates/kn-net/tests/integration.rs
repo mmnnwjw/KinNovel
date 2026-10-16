@@ -254,6 +254,11 @@ fn access_token_refresh_on_401_then_retries() {
 /// Server that answers "unauthorized" until a login happened, with a dead
 /// refresh token: (server, login count, hub call count).
 fn dead_session_server(login_ok: bool) -> (FakeServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    dead_session_server_with(login_ok, 200, json!({"Success": false, "Status": 400, "Msg": "密码错误"}))
+}
+
+/// Like [`dead_session_server`]; a failed login answers `(status, body)`.
+fn dead_session_server_with(login_ok: bool, fail_status: u16, fail_body: serde_json::Value) -> (FakeServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let logins = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let (logins_hub, logins_http, calls_hub) = (logins.clone(), logins.clone(), calls.clone());
@@ -275,7 +280,7 @@ fn dead_session_server(login_ok: bool) -> (FakeServer, Arc<AtomicUsize>, Arc<Ato
             if login_ok {
                 (200, json!({"Success": true, "Response": {"Token": "t2", "RefreshToken": "r2"}}))
             } else {
-                (200, json!({"Success": false, "Status": 400, "Msg": "密码错误"}))
+                (fail_status, fail_body.clone())
             }
         })),
         ..FakeServerConfig::default()
@@ -309,6 +314,21 @@ fn failed_relogin_is_not_repeated_right_away() {
     assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).is_err());
     assert!(client.invoke("GetBookShelf", json!({"Page": 2}), 0, Duration::ZERO).is_err());
     assert_eq!(logins.load(Ordering::SeqCst), 1, "a failed login must back off instead of retrying on every 401");
+    // Wrong password: the account and the session are dropped and the app is told once.
+    assert!(client.take_account_rejected());
+    assert!(!client.take_account_rejected());
+    assert!(!client.has_refresh_token());
+}
+
+#[test]
+fn server_error_during_relogin_keeps_the_account() {
+    let (server, logins, _) = dead_session_server_with(false, 502, json!({"Success": false, "Msg": "Bad Gateway"}));
+    let seed = json!({"Token": "old", "RefreshToken": "dead", "TokenUpdatedAt": 0, "User": {"Id": 7}});
+    let client = client_with_seeded_session(&server, "relogin-502", &seed);
+    client.set_account(Some(("a@b.c".into(), "pw".into())));
+    assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).is_err());
+    assert_eq!(logins.load(Ordering::SeqCst), 1);
+    assert!(!client.take_account_rejected(), "a 5xx says nothing about the password");
 }
 
 #[test]

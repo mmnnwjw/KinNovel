@@ -85,6 +85,33 @@ impl App for KinNovel {
         Theme::new(self.night)
     }
 
+    /// 有令牌就不动; 没有令牌但保存了账号时, 后台登录。走任务池: 账号被拒时结果送回 UI 线程,
+    /// 随后的 `take_transition` 弹出登录页。
+    fn on_start(cx: &mut kn_ui::Cx<Self>) {
+        let Some(net) = cx.app.net() else { return };
+        if net.user().is_some() || !net.has_account() {
+            return;
+        }
+        cx.spawn_app(move || {
+            match net::ensure_login(&net) {
+                Ok(()) => eprintln!("[net] 已登录"),
+                Err(e) => eprintln!("[net] {e}"),
+            }
+            Box::new(|_: &mut KinNovel| {})
+        });
+    }
+
+    fn take_transition(&mut self) -> kn_ui::Transition<Self> {
+        if !self.net_client.take_account_rejected() {
+            return kn_ui::Transition::None;
+        }
+        // 保存的账号登录被拒 (密码改了等): 删掉它, 带着邮箱回登录页
+        let email = account::load(&self.paths).map(|a| a.email).unwrap_or_default();
+        account::clear(&self.paths);
+        eprintln!("[account] 保存的账号登录被拒, 已删除");
+        kn_ui::Transition::Push(Box::new(pages::login::LoginPage::rejected(&email)))
+    }
+
     fn sleep_screen(&mut self) -> Option<Box<dyn Page<Self>>> {
         sleep::enabled().then(|| Box::new(sleep::SleepPage) as Box<dyn Page<Self>>)
     }
@@ -97,8 +124,7 @@ impl KinNovel {
         let net_client = net::client(&paths, &config);
         let account = account::load(&paths).map(|a| (a.email, a.password_hash));
         // 会话失效 (刷新令牌也被拒) 时由客户端用这个账号自动重新登录
-        net_client.set_account(account.clone());
-        net::set_account(account);
+        net_client.set_account(account);
         KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default(), welcome_shown: false }
     }
 
@@ -112,33 +138,18 @@ impl KinNovel {
         self.online.then(|| self.net_client.clone())
     }
 
-    /// 有令牌就不动; 没有令牌但配置里有账号密码时, 后台登录 (与 Python 版账号页的做法一致)。
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn login_in_background(&self) {
-        let Some(net) = self.net() else { return };
-        if net.user().is_some() || !net::has_account() {
-            return;
-        }
-        std::thread::spawn(move || match net::ensure_login(&net) {
-            Ok(()) => eprintln!("[net] 已登录"),
-            Err(e) => eprintln!("[net] {e}"),
-        });
-    }
 
     /// 登录成功: 保存账号 (密码只存哈希), 之后会话失效时用它自动重新登录。
     pub fn remember_account(&mut self, account: account::Account) {
         if let Err(e) = account::save(&self.paths, &account) {
             eprintln!("[account] 保存失败: {e}");
         }
-        let pair = Some((account.email, account.password_hash));
-        self.net_client.set_account(pair.clone());
-        net::set_account(pair);
+        self.net_client.set_account(Some((account.email, account.password_hash)));
     }
 
     /// 退出登录: 删掉保存的账号和会话令牌。
     pub fn forget_account(&mut self) {
         account::clear(&self.paths);
-        net::set_account(None);
         if let Err(e) = self.net_client.logout() {
             eprintln!("[account] 清除会话失败: {e}");
         }
@@ -151,7 +162,7 @@ impl KinNovel {
 
     /// 已登录, 或保存了账号 (需要时自动登录); fixture 预览模式也算。
     pub fn signed_in(&self) -> bool {
-        api::fake_mode() || self.net().is_some_and(|n| n.user().is_some() || n.has_refresh_token() || net::has_account())
+        api::fake_mode() || self.net().is_some_and(|n| n.user().is_some() || n.has_refresh_token() || n.has_account())
     }
 }
 
@@ -335,7 +346,6 @@ fn run_device() {
     let light = kn_platform::Frontlight::detect(info.caps);
     let mut app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.startup_notice = crash_notice;
-    app.login_in_background();
     update::start(&app.paths, app.net(), app.config.bool("check_update", true));
     // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
     if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {

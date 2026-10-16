@@ -59,6 +59,12 @@ pub trait App: Sized + 'static {
     fn sleep_screen(&mut self) -> Option<Box<dyn Page<Self>>> {
         None
     }
+    /// 启动后、首页进入之后调用一次 (例如用 `cx.spawn_app` 开始后台登录, 结果经任务池送回)。
+    fn on_start(_cx: &mut Cx<Self>) {}
+    /// 每个后台结果处理完后调用: 应用全局想做的导航 (例如保存的账号失效 → 登录页)。不支持 `Exit`。
+    fn take_transition(&mut self) -> Transition<Self> {
+        Transition::None
+    }
 }
 
 /// 后台结果的投递目标。
@@ -403,6 +409,12 @@ impl<A: App> Stack<A> {
                 }
             }
         }
+        match rt.app.take_transition() {
+            Transition::None | Transition::Exit => {}
+            transition => {
+                self.apply(rt, transition);
+            }
+        }
     }
 }
 
@@ -526,6 +538,8 @@ impl<A: App> Headless<A> {
         let entry = rt.new_entry(home);
         let mut stack = Stack { entries: vec![entry] };
         stack.enter_top(&mut rt, false);
+        let top = stack.top().instance;
+        A::on_start(&mut rt.cx(top));
         Ok(Headless { rt, stack, waker })
     }
 
@@ -628,6 +642,8 @@ pub fn run<A: App>(
     let entry = rt.new_entry(home);
     let mut stack = Stack { entries: vec![entry] };
     stack.enter_top(&mut rt, false);
+    let top = stack.top().instance;
+    A::on_start(&mut rt.cx(top));
 
     let mut frame = Bitmap::new(width, height, rt.app.theme().background);
     let mut events: Vec<InputEvent> = Vec::new();

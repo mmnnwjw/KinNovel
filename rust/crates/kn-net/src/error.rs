@@ -12,9 +12,9 @@ pub enum NetError {
     /// The server answered with `success: false` (or an HTTP error status).
     /// Mirrors Python's `ApiError(message, status)`.
     Api { status: i32, message: String },
-    /// Login / refresh-token specific failure that is not a generic `Api`
-    /// (kept distinct so callers can tell "no credentials" apart from a
-    /// transient network error without inspecting a status code).
+    /// The login endpoint rejected the account (wrong email/password,
+    /// account disabled ...): saved credentials are useless, unlike after a
+    /// network error or a 5xx. Carries the server's message.
     Auth(String),
     /// Malformed SignalR/WebSocket framing, unexpected handshake response,
     /// oversized record, etc.
@@ -27,7 +27,7 @@ impl fmt::Display for NetError {
             NetError::Network(msg) => write!(f, "网络错误: {msg}"),
             NetError::Timeout => write!(f, "请求超时"),
             NetError::Api { status, message } => write!(f, "{message} (status {status})"),
-            NetError::Auth(msg) => write!(f, "认证错误: {msg}"),
+            NetError::Auth(msg) => write!(f, "{msg}"),
             NetError::Protocol(msg) => write!(f, "协议错误: {msg}"),
         }
     }
@@ -53,6 +53,15 @@ impl NetError {
     /// `get_access_token` / `refresh_access_token`: -100 or 404).
     pub fn is_refresh_invalid(&self) -> bool {
         matches!(self, NetError::Api { status, .. } if *status == -100 || *status == 404)
+    }
+
+    /// The server answered the login request itself with a rejection: any
+    /// API error that is not a server fault (5xx), a missing endpoint (404),
+    /// a timeout (408) or rate limiting (429). The site returns
+    /// `Success: false` + a message for a wrong password; its status code is
+    /// not documented.
+    pub fn is_login_rejected(&self) -> bool {
+        matches!(self, NetError::Api { status, .. } if *status < 500 && ![404, 408, 429].contains(status))
     }
 
     /// True for the "access token expired" status api.py's `_invoke_direct`

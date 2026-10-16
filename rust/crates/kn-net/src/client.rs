@@ -118,6 +118,9 @@ struct Inner {
     /// again when both the access token and the refresh token are rejected.
     account: Mutex<Option<(String, String)>>,
     relogin: Mutex<Relogin>,
+    /// The saved account was rejected by the login endpoint (see
+    /// [`Client::take_account_rejected`]).
+    account_rejected: std::sync::atomic::AtomicBool,
 }
 
 /// Blocking, thread-safe API client. Cheap to `clone()` (shares one `Arc`),
@@ -162,6 +165,7 @@ impl Client {
                 health: ServerHealth::default(),
                 account: Mutex::new(None),
                 relogin: Mutex::new(Relogin::default()),
+                account_rejected: std::sync::atomic::AtomicBool::new(false),
             }
         });
         Client(inner)
@@ -348,6 +352,28 @@ impl Client {
         self.login_inner(email, hash, false)
     }
 
+    /// The account set with [`Client::set_account`], as (email, hash).
+    pub fn account(&self) -> Option<(String, String)> {
+        self.0.account.lock().unwrap().clone()
+    }
+
+    pub fn has_account(&self) -> bool {
+        self.0.account.lock().unwrap().is_some()
+    }
+
+    /// The saved account was refused by the server (wrong password ...):
+    /// forget it and the session, and raise the flag the app polls with
+    /// [`Client::take_account_rejected`] to bring up its login page.
+    pub fn reject_account(&self) {
+        let _ = self.logout();
+        self.0.account_rejected.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// True once after [`Client::reject_account`].
+    pub fn take_account_rejected(&self) -> bool {
+        self.0.account_rejected.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Forgets the session (tokens + user) and the re-login account.
     pub fn logout(&self) -> Result<(), NetError> {
         self.set_account(None);
@@ -359,12 +385,12 @@ impl Client {
     /// `nested` = called from the 401 handler: fetch the user straight from
     /// the hub so a second 401 can't recurse into another re-login.
     fn login_inner(&self, email: &str, hash: &str, nested: bool) -> Result<Value, NetError> {
-        let credentials = self.http_call(
-            "/api/user/login",
-            Some(json!({"email": email, "password": hash})),
-            "POST",
-            None,
-        )?;
+        let credentials = self
+            .http_call("/api/user/login", Some(json!({"email": email, "password": hash})), "POST", None)
+            .map_err(|e| match e {
+                NetError::Api { message, .. } if e.is_login_rejected() => NetError::Auth(message),
+                other => other,
+            })?;
         self.store_credentials(&credentials)?;
         // The open hub connection (if any) was authorized with the old token.
         self.0.hub.close();
@@ -611,17 +637,25 @@ impl Client {
             }
         }
         state.last = Some(Instant::now());
+        let mut rejected = false;
         state.ok = match self.login_inner(&email, &hash, true) {
             Ok(_) => {
-                eprintln!("[net] 登录已失效, 已用配置的账号重新登录");
+                eprintln!("[net] 登录已失效, 已用保存的账号重新登录");
                 true
             }
             Err(e) => {
                 eprintln!("[net] 自动重新登录失败: {e}");
+                // 账号或密码不对了 (例如在网站上改了密码): 再试也没用
+                rejected = matches!(e, NetError::Auth(_));
                 false
             }
         };
-        state.ok
+        let ok = state.ok;
+        drop(state);
+        if rejected {
+            self.reject_account();
+        }
+        ok
     }
 
     // ---- public catalogue methods (mirrors api.py 1:1) ----
