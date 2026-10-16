@@ -137,6 +137,13 @@ impl RefreshScheduler {
         self.screen_valid = false;
     }
 
+    /// 逻辑画面尺寸变了 (横竖屏切换): 之后按新尺寸规划, 下一次刷新走整屏。
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.screen = Bitmap::new(width, height, 255);
+        self.screen_valid = false;
+        self.feedback = None;
+    }
+
     fn full(&self) -> Rect {
         self.screen.bounds()
     }

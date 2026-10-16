@@ -5,6 +5,7 @@
 //! - `light`: 前光亮度/色温 (powerd LIPC 属性)。
 //! - `model`: 按机型的能力表 (照搬 KOReader 的 Kindle 机型定义)。
 //! - `power`: LIPC 电源事件 (`lipc-wait-event` 子进程) 与框架进程暂停/恢复。
+//! - `rotation`: 软件旋转 (横屏阅读、倒拿) 的坐标与像素换算。
 //!
 //! 所有会阻塞的东西都暴露 fd, 由 kn-ui 的主循环统一 `poll()`。
 
@@ -17,6 +18,7 @@ pub mod input;
 pub mod light;
 pub mod model;
 pub mod power;
+pub mod rotation;
 
 #[cfg(target_os = "linux")]
 mod ffi;
@@ -27,6 +29,7 @@ pub use input::{InputEvent, InputReader, KeyCode};
 pub use light::{Frontlight, LightLevel, LightProp};
 pub use model::ModelCaps;
 pub use power::{PowerEvent, PowerMonitor};
+pub use rotation::Rotation;
 
 #[cfg(target_os = "linux")]
 pub use display::FbinkDisplay;

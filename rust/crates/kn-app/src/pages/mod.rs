@@ -27,7 +27,7 @@ pub mod tips;
 
 use kn_render::Bitmap;
 use kn_ui::widgets::{self, Ink};
-use kn_ui::{Cx, HitId, Page, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, Transition};
 
 use crate::KinNovel;
 
@@ -69,6 +69,39 @@ pub fn tab_transition(hit: HitId, active: Tab) -> Option<Transition<KinNovel>> {
     let i = hit.0.checked_sub(TAB_HIT_BASE)? as usize;
     let (tab, _) = *TABS.get(i)?;
     Some(if tab == active { Transition::None } else { Transition::Root(tab_page(tab)) })
+}
+
+/// 小说阅读页的屏幕方向配置键 (漫画是 [`COMIC_ORIENTATION`]); 值 "landscape" = 横屏。
+pub const READER_ORIENTATION: &str = "reader_orientation";
+pub const COMIC_ORIENTATION: &str = "comic_orientation";
+/// 横屏时设备往哪边转: "left" (逆时针, 默认) / "right"
+pub const LANDSCAPE_SIDE: &str = "landscape_side";
+
+/// 阅读页 (`key` = READER_ORIENTATION / COMIC_ORIENTATION) 的屏幕方向。
+pub fn reader_orientation(app: &KinNovel, key: &str) -> Orientation {
+    if app.config.string(key, "portrait") != "landscape" {
+        Orientation::Portrait
+    } else if app.config.string(LANDSCAPE_SIDE, "left") == "right" {
+        Orientation::LandscapeRight
+    } else {
+        Orientation::LandscapeLeft
+    }
+}
+
+/// 阅读页菜单里的横屏/竖屏切换 (运行时在下一次重绘前转屏并整屏闪刷)。
+pub fn toggle_orientation(cx: &mut Cx<KinNovel>, key: &str) {
+    let landscape = reader_orientation(cx.app, key).is_landscape();
+    cx.app.config.set(key, serde_json::Value::from(if landscape { "portrait" } else { "landscape" }));
+    cx.request_redraw(kn_ui::RefreshHint::Flash);
+}
+
+/// 切换按钮上的字: 现在是竖屏就写「横屏」。
+pub fn orientation_label(app: &KinNovel, key: &str) -> &'static str {
+    if reader_orientation(app, key).is_landscape() {
+        "竖屏"
+    } else {
+        "横屏"
+    }
 }
 
 /// 状态栏文字: 时间 · 电量。

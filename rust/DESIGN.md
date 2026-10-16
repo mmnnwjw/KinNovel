@@ -45,6 +45,10 @@ crates/
 - 按钮按下立即反相反馈, 再执行动作 —— 解决"点了没反应"的墨水屏通病。
 - 进入新页面、切换主题、唤醒时整屏闪刷; 阅读页在章节排好后自己闪刷一次。
 - 帧缓冲写入: 直接写 FBInk 映射的 framebuffer (考虑 line_length 填充); 24/32 bpp (ColorSoft) 展开灰度。
+- 横屏 / 倒拿: 帧缓冲不转 (KOReader 在 Kindle 上同样软件旋转), 页面按逻辑画面画 (横屏时宽高互换),
+  `FbinkDisplay::present` 用 `kn_platform::Rotation::copy_region` 把区域转好再写入, `InputReader` 把识别出的手势转回逻辑坐标
+  (滑动方向一起转), MTK 翻页动画方向按帧缓冲换算。页面用 `Page::orientation` 声明方向, 运行时在进入页面和每次重绘前同步。
+  KPW5 整屏横屏写入 ~32–37 ms (竖屏 ~5 ms): 8x8 字节块转置, 顺序读源图; Cortex-A53 上跨行跳着读很慢 (整屏只读 ~14 ms)。
 
 ## 文字渲染
 

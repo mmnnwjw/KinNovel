@@ -27,7 +27,7 @@ use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
 use kn_render::{Bitmap, FontId, Point, Rect, Synth, TextStyle};
 use kn_text::{first_anchor_on_page, page_for_path, Block, FontMeasure, Inline, LayoutParams, Page as TextPage, PageItem, Paginator, RichLine, WidthCache, OBJECT_CHAR};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
 
 use crate::store::{self, Chapter, Progress};
 use crate::userdata::{self, Bookmark};
@@ -71,6 +71,7 @@ const HIT_PANEL: HitId = HitId(9);
 const HIT_SETTINGS: HitId = HitId(10);
 const HIT_BOOKMARK: HitId = HitId(11);
 const HIT_TRACK: HitId = HitId(12);
+const HIT_ORIENTATION: HitId = HitId(13);
 
 /// 书签摘录的字数
 const EXCERPT_CHARS: usize = 40;
@@ -124,6 +125,8 @@ enum ImageSlot {
 
 /// 后台解码结果。
 struct ImageLoaded {
+    /// 请求的排版框尺寸 (横竖屏切换后旧尺寸的结果作废)
+    size: (u32, u32),
     url: String,
     result: Result<Option<Bitmap>, String>,
 }
@@ -433,7 +436,7 @@ impl ReaderPage {
         self.save_progress(cx, true);
         self.prefetch_neighbors(cx);
         self.tracker.start();
-        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.height);
+        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.width.max(cx.height));
         // 进入阅读器/换章: 正文第一屏闪刷, 清掉上一页面与 "正在打开章节" 的残影
         cx.request_redraw(RefreshHint::Flash);
     }
@@ -650,12 +653,19 @@ impl ReaderPage {
                         .map(|img| Some(img.fit_within(w, h)))
                         .map_err(|e| e.to_string()),
                 });
-                ImageLoaded { url, result }
+                ImageLoaded { url, size: (w, h), result }
             });
         }
     }
 
     fn on_image(&mut self, cx: &mut Cx<KinNovel>, loaded: ImageLoaded) {
+        // 按切换方向之前的排版框解码的: 丢掉, 显示到时按新尺寸重新请求
+        let (w, h) = loaded.size;
+        let current = self.pages.iter().flatten().any(|it| matches!(it, PageItem::Image { url, width, height, .. } if *url == loaded.url && *width as u32 == w && *height as u32 == h));
+        if !current {
+            self.images.remove(&loaded.url);
+            return;
+        }
         let slot = match loaded.result {
             Ok(Some(img)) => ImageSlot::Ready(img),
             Ok(None) => ImageSlot::Missing,
@@ -1039,10 +1049,10 @@ impl ReaderPage {
         }
         y += btn_h + gap;
 
-        // 字号 − 当前 + / 日夜
+        // 字号 − 当前 + / 横竖屏 / 日夜
         let (min_font, max_font, default_font, _) = font_range(cx.app);
         let size = cx.app.config.int("font_size", default_font).clamp(min_font, max_font);
-        let cols = 4;
+        let cols = 5;
         let col_w = (inner_w - gap * (cols - 1)) / cols;
         let cell = |i: i32| Rect::new(side + i * (col_w + gap), y, col_w as u32, btn_h as u32);
         let down = cell(0);
@@ -1052,7 +1062,10 @@ impl ReaderPage {
         let up = cell(2);
         widgets::button(&mut ink, frame, &theme, &m, up, "A＋", if size < max_font { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
         cx.hits.add(HIT_FONT_UP, up).rounded(m.radius).enabled(size < max_font);
-        let night = cell(3);
+        let rotate = cell(3);
+        widgets::button(&mut ink, frame, &theme, &m, rotate, super::orientation_label(cx.app, super::READER_ORIENTATION), ButtonStyle::Secondary);
+        cx.hits.add(HIT_ORIENTATION, rotate).rounded(m.radius);
+        let night = cell(4);
         widgets::button(&mut ink, frame, &theme, &m, night, if theme.night { "日间" } else { "夜间" }, ButtonStyle::Secondary);
         cx.hits.add(HIT_NIGHT, night).rounded(m.radius);
 
@@ -1113,6 +1126,11 @@ impl ReaderPage {
                 self.change_font_size(cx, 1);
                 Transition::None
             }
+            HIT_ORIENTATION => {
+                // 新方向的宽高在下一次重绘时生效, render 发现尺寸变了就重排 (保持阅读位置)
+                super::toggle_orientation(cx, super::READER_ORIENTATION);
+                Transition::None
+            }
             HIT_NIGHT => {
                 cx.app.night = !cx.app.night;
                 cx.app.config.set("night_mode", serde_json::Value::from(cx.app.night));
@@ -1128,6 +1146,10 @@ impl ReaderPage {
 impl Page<KinNovel> for ReaderPage {
     fn id(&self) -> PageId {
         PageId(10)
+    }
+
+    fn orientation(&self, app: &KinNovel) -> Option<Orientation> {
+        Some(super::reader_orientation(app, super::READER_ORIENTATION))
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
@@ -1209,6 +1231,14 @@ impl Page<KinNovel> for ReaderPage {
                     break 'body;
                 }
                 Status::Ready => {}
+            }
+            if self.params.as_ref().is_some_and(|p| (p.width, p.height) != (cx.width as i64, Self::geometry(cx.width, cx.height).1 as i64)) {
+                // 横竖屏切换了: 按新尺寸重排, 停在原来第一行所在的页; 插图按新排版框重新解码
+                let started = Instant::now();
+                self.images.clear();
+                self.relayout_keep_position(cx);
+                self.save_progress(cx, true);
+                eprintln!("[reader] 换方向重排 {} ms, {} 页", started.elapsed().as_millis(), self.pages.len());
             }
             self.request_images(cx, self.page);
             self.update_image_hits(top);

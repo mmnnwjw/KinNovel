@@ -3,7 +3,8 @@
 //! - 设备发现: Linux 上用 FBInk `fbink_input_scan` (触摸屏 / 翻页键 / Home / 电源键),
 //!   失败时回退为扫描 `/dev/input/event*` 的能力位 (EVIOCGBIT)。
 //! - 读取: 非阻塞 `read()` 原始 `input_event`; 注意 armv7 上 `timeval` 是两个 32 位 long (16 字节/事件)。
-//! - 坐标: 用 EVIOCGABS 取范围, 映射到屏幕像素后按 DeviceInfo 的 swap/mirror 变换, 再交给 GestureRecognizer。
+//! - 坐标: 用 EVIOCGABS 取范围, 映射到屏幕像素后按 DeviceInfo 的 swap/mirror 变换, 再交给 GestureRecognizer;
+//!   识别出的手势最后按 `set_rotation` 转到逻辑画面 (横屏/倒拿)。
 //! - 独占: `grab()` / `ungrab()` (EVIOCGRAB), 休眠时释放给系统锁屏。
 //! - 机型差异照搬 KOReader (`frontend/device/kindle/device.lua`, `device/input.lua`):
 //!   翻页键方向 (Oasis 与 Voyage 相反)、倒拿时翻页键互换、Oasis/Scribe 重力感应事件、
@@ -32,7 +33,7 @@ pub enum KeyCode {
 pub enum InputEvent {
     Gesture(Gesture),
     Key { code: KeyCode, pressed: bool },
-    /// 重力感应: 设备转到竖屏正向 (false) / 倒置 (true)。横屏事件不上报 (界面只有竖屏)。
+    /// 重力感应: 设备转到竖屏正向 (false) / 倒置 (true)。横屏事件不上报 (横屏由用户在阅读页里选)。
     Rotation { upside_down: bool },
 }
 
@@ -148,6 +149,7 @@ fn to_screen(info: &DeviceInfo, raw: (i32, i32), xr: (i32, i32), yr: (i32, i32))
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use super::evcodes::*;
+    use crate::rotation::Rotation;
     use super::{axis_sample, in_voyage_cold_spot, map_key_code, orientation_from_gyro, to_screen, InputEvent, KeyCode};
     use crate::display::DeviceInfo;
     use crate::ffi;
@@ -249,11 +251,11 @@ mod linux_impl {
 
     pub struct InputReader {
         devices: Vec<Device>,
-        /// 坐标变换用的设备信息 (倒拿时在 FBInk 的 mirror 上再叠加两轴镜像)
+        /// 坐标变换用的设备信息 (FBInk 的 swap/mirror, 面板竖屏坐标)
         info: DeviceInfo,
-        base_info: DeviceInfo,
         key_reversed: bool,
-        upside_down: bool,
+        /// 逻辑画面的旋转: 手势识别完后从面板坐标转过去
+        rotation: Rotation,
         voyage: bool,
     }
 
@@ -321,19 +323,16 @@ mod linux_impl {
             Ok(InputReader {
                 devices,
                 info: info.clone(),
-                base_info: info.clone(),
                 key_reversed,
-                upside_down: false,
+                rotation: Rotation::UPRIGHT,
                 voyage: info.caps.is_some_and(|c| c.voyage),
             })
         }
 
-        /// 用户倒拿 (竖屏 180°): 触摸两轴镜像, 翻页键互换 (KOReader `rotation_map` 的 UPSIDE_DOWN)。
-        pub fn set_upside_down(&mut self, upside_down: bool) {
-            self.upside_down = upside_down;
-            self.info = self.base_info.clone();
-            self.info.touch_mirror_x ^= upside_down;
-            self.info.touch_mirror_y ^= upside_down;
+        /// 逻辑画面的旋转 (横屏阅读、倒拿): 手势坐标与滑动方向随之换算;
+        /// 倒拿时翻页键互换 (KOReader `rotation_map` 的 UPSIDE_DOWN)。
+        pub fn set_rotation(&mut self, rotation: Rotation) {
+            self.rotation = rotation;
             for dev in self.devices.iter_mut() {
                 if let Kind::Touch { recognizer, .. } = &mut dev.kind {
                     recognizer.reset();
@@ -550,9 +549,10 @@ mod linux_impl {
                         }
                         Kind::Key => {
                             if ev.type_ == EV_KEY {
+                                let upside_down = self.rotation.quarter_turns() == 2;
                                 let code = match map_key_code(ev.code, self.key_reversed) {
-                                    KeyCode::PageForward if self.upside_down => KeyCode::PageBack,
-                                    KeyCode::PageBack if self.upside_down => KeyCode::PageForward,
+                                    KeyCode::PageForward if upside_down => KeyCode::PageBack,
+                                    KeyCode::PageBack if upside_down => KeyCode::PageForward,
                                     c => c,
                                 };
                                 out.push(InputEvent::Key {
@@ -572,13 +572,21 @@ mod linux_impl {
                 }
             }
             if self.voyage {
-                // 起点落在压感键冷区的手势整个丢掉 (KOReader 把它们改写成 "none")
+                // 起点落在压感键冷区的手势整个丢掉 (KOReader 把它们改写成 "none"; 面板坐标)
                 let mut i = start;
                 while i < out.len() {
                     if matches!(&out[i], InputEvent::Gesture(g) if in_voyage_cold_spot(g.start.0, g.start.1)) {
                         out.remove(i);
                     } else {
                         i += 1;
+                    }
+                }
+            }
+            if self.rotation != Rotation::UPRIGHT {
+                let panel = (self.info.width, self.info.height);
+                for event in &mut out[start..] {
+                    if let InputEvent::Gesture(g) = event {
+                        *g = self.rotation.from_panel_gesture(*g, panel);
                     }
                 }
             }
@@ -704,7 +712,7 @@ impl InputReader {
         Ok(())
     }
 
-    pub fn set_upside_down(&mut self, _upside_down: bool) {}
+    pub fn set_rotation(&mut self, _rotation: crate::rotation::Rotation) {}
 
     pub fn ungrab(&mut self) -> std::io::Result<()> {
         Ok(())

@@ -3,6 +3,7 @@
 use kn_render::{Bitmap, Rect};
 
 use crate::model::ModelCaps;
+use crate::rotation::Rotation;
 
 /// 波形。FbinkDisplay 负责映射到 FBInk 的 `WFM_*`; 平台不支持时降级:
 /// Reagl → Gl16 → Gc16, A2 → Du → Gc16 (见 rust/research-kindle-devices.md 波形表)。
@@ -78,7 +79,8 @@ pub trait Display {
     fn info(&self) -> &DeviceInfo;
 
     /// 把 `frame` 中 `req.rect` 区域写入帧缓冲并提交刷新; 返回刷新 marker。
-    /// `frame` 尺寸必须等于屏幕尺寸。只拷贝 rect 内的行段 (按行 memcpy, 考虑 stride)。
+    /// `frame` 与 `req.rect` 都是逻辑画面 (见 `set_rotation`; 横屏时宽高与 `info()` 互换)。
+    /// 只拷贝 rect 内的行段 (按行 memcpy, 考虑 stride; 旋转时先在内存里转好)。
     fn present(&mut self, frame: &Bitmap, req: &RefreshRequest) -> std::io::Result<u32>;
 
     /// 等待某个 marker 完成 (闪刷后再做下一步时用); 超时由实现内部处理。
@@ -89,16 +91,25 @@ pub trait Display {
         Ok(())
     }
 
-    /// 用户把设备倒过来拿 (Oasis / Scribe 的重力感应, 只区分竖屏的正/倒)。
-    /// 实现保证上层画的帧在用户看来是正的 (必要时软件旋转 180°)。
-    fn set_upside_down(&mut self, _upside_down: bool) {}
+    /// 逻辑画面相对用户正拿的竖屏转了多少 (横屏阅读、Oasis / Scribe 倒拿)。实现保证上层画的帧在用户看来
+    /// 是正的 (软件旋转); 之后 `present` 收到的帧是 `rotation.logical_size(info 宽高)`。
+    fn set_rotation(&mut self, _rotation: Rotation) {}
+
+    /// 当前的 `set_rotation`。
+    fn rotation(&self) -> Rotation {
+        Rotation::UPRIGHT
+    }
 }
 
 /// 主机测试用显示: 内存帧 + 记录所有刷新请求。
 pub struct MemoryDisplay {
     info: DeviceInfo,
+    /// 面板方向的画面 (旋转后)
     pub screen: Bitmap,
+    /// 逻辑坐标的刷新请求
     pub requests: Vec<RefreshRequest>,
+    rotation: Rotation,
+    row: Vec<u8>,
 }
 
 impl MemoryDisplay {
@@ -127,6 +138,8 @@ impl MemoryDisplay {
             info,
             screen,
             requests: Vec::new(),
+            rotation: Rotation::UPRIGHT,
+            row: Vec::new(),
         }
     }
 }
@@ -137,12 +150,32 @@ impl Display for MemoryDisplay {
     }
 
     fn present(&mut self, frame: &Bitmap, req: &RefreshRequest) -> std::io::Result<u32> {
-        copy_rect_rows(frame, &mut self.screen, req.rect);
+        if self.rotation == Rotation::UPRIGHT {
+            copy_rect_rows(frame, &mut self.screen, req.rect);
+        } else if let Some(rect) = req.rect.intersect(&frame.bounds()).filter(|r| !r.is_empty()) {
+            let panel = (self.info.width, self.info.height);
+            self.rotation.copy_region(frame, rect, &mut self.row);
+            let pr = self.rotation.to_panel_rect(rect, panel);
+            let stride = self.screen.stride();
+            let dst = self.screen.data_mut();
+            for (y, src) in self.row.chunks_exact(pr.w as usize).enumerate() {
+                let off = (pr.y as usize + y) * stride + pr.x as usize;
+                dst[off..off + src.len()].copy_from_slice(src);
+            }
+        }
         self.requests.push(*req);
         Ok(self.requests.len() as u32)
     }
 
     fn wait_complete(&mut self, _marker: u32) {}
+
+    fn set_rotation(&mut self, rotation: Rotation) {
+        self.rotation = rotation;
+    }
+
+    fn rotation(&self) -> Rotation {
+        self.rotation
+    }
 }
 
 /// 把 `frame` 中 `rect` 区域的每一行拷贝到 `dst` 的同一位置, 按各自 stride 寻址,
@@ -186,10 +219,11 @@ pub struct FbinkDisplay {
     next_marker: u32,
     /// 帧缓冲内容此刻是按哪个朝向摆的 (启动时框架已按重力感应转好, 见 `assume_fb_upside_down`)
     fb_upside_down: bool,
-    /// 用户此刻的朝向; 与 fb_upside_down 不同时软件旋转 180°
-    upside_down: bool,
-    sw_rotate: bool,
-    /// 软件旋转时的行缓冲
+    /// 逻辑画面相对用户正拿的竖屏的旋转 (`set_rotation`)
+    rotation: Rotation,
+    /// 逻辑画面相对帧缓冲的旋转 (= rotation 再扣掉帧缓冲本身的倒置)
+    sw: Rotation,
+    /// 软件旋转时的缓冲 (转好的区域)
     row: Vec<u8>,
 }
 
@@ -271,8 +305,8 @@ impl FbinkDisplay {
             fb_stride: state.scanline_stride as usize,
             next_marker: 1,
             fb_upside_down: false,
-            upside_down: false,
-            sw_rotate: false,
+            rotation: Rotation::UPRIGHT,
+            sw: Rotation::UPRIGHT,
             row: Vec::new(),
         })
     }
@@ -311,7 +345,7 @@ impl FbinkDisplay {
     /// 才需要旋转画面。帧缓冲的 rotate 值不能用来判断 (各机型的 "正" 不同, KPW5 竖屏是 3)。
     pub fn assume_fb_upside_down(&mut self, upside_down: bool) {
         self.fb_upside_down = upside_down;
-        self.set_upside_down(self.upside_down);
+        self.set_rotation(self.rotation);
     }
 }
 
@@ -319,9 +353,7 @@ impl FbinkDisplay {
 // RIGHT=3 (matches Python `framebuffer.py`'s `SWIPE_MTK` table). Duplicated
 // as plain constants here (rather than only in the linux-only `ffi` module)
 // so `swipe_direction_code` is host-testable without an open `FbinkDisplay`.
-#[allow(dead_code)]
 const MTK_SWIPE_DIR_DOWN: u8 = 0;
-#[allow(dead_code)]
 const MTK_SWIPE_DIR_UP: u8 = 1;
 const MTK_SWIPE_DIR_LEFT: u8 = 2;
 const MTK_SWIPE_DIR_RIGHT: u8 = 3;
@@ -329,11 +361,14 @@ const MTK_SWIPE_DIR_RIGHT: u8 = 3;
 /// `SwipeDir` → FBInk `MTK_SWIPE_DIRECTION_INDEX_E`. Only `Left`/`Right` are
 /// exposed on `SwipeDir` today (page-turn direction); kept as a free function
 /// so it's unit-testable without needing an open `FbinkDisplay`.
-fn swipe_direction_code(dir: SwipeDir) -> u8 {
-    match dir {
-        SwipeDir::Left => MTK_SWIPE_DIR_LEFT,
-        SwipeDir::Right => MTK_SWIPE_DIR_RIGHT,
-    }
+/// `rotation` = 逻辑画面相对帧缓冲的旋转: 逻辑的 -x 方向在帧缓冲里依次是 -x, -y, +x, +y。
+fn swipe_direction_code(dir: SwipeDir, rotation: Rotation) -> u8 {
+    const TABLE: [u8; 4] = [MTK_SWIPE_DIR_LEFT, MTK_SWIPE_DIR_UP, MTK_SWIPE_DIR_RIGHT, MTK_SWIPE_DIR_DOWN];
+    let base = match dir {
+        SwipeDir::Left => 0,
+        SwipeDir::Right => 2,
+    };
+    TABLE[(base + rotation.quarter_turns() as usize) % 4]
 }
 
 #[cfg(target_os = "linux")]
@@ -345,42 +380,40 @@ impl Display for FbinkDisplay {
     fn present(&mut self, frame: &Bitmap, req: &RefreshRequest) -> std::io::Result<u32> {
         use crate::ffi;
 
-        let screen_bounds = Rect::new(0, 0, self.info.width, self.info.height);
-        let Some(rect) = req.rect.intersect(&screen_bounds) else {
+        let panel = (self.info.width, self.info.height);
+        let (lw, lh) = self.sw.logical_size(panel);
+        let Some(rect) = req.rect.intersect(&Rect::new(0, 0, lw, lh)) else {
             return Ok(0);
         };
-        if rect.is_empty() {
+        if rect.is_empty() || frame.width() != lw || frame.height() != lh {
             return Ok(0);
         }
-        let (sw, sh) = (self.info.width as i32, self.info.height as i32);
-        let rot = self.sw_rotate;
-        // 软件旋转 180°: 帧缓冲里的区域是 rect 的中心对称位置, 每行倒序写入
-        let fb_rect = if rot { Rect::new(sw - rect.right(), sh - rect.bottom(), rect.w, rect.h) } else { rect };
+        let rot = self.sw;
+        let fb_rect = rot.to_panel_rect(rect, panel);
 
-        // 只拷贝 rect 内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
+        // 只拷贝区域内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
+        // 旋转时先在内存里把区域转好 (帧缓冲不宜逐像素跳着写)。
         // 8 位直接 memcpy; RGB 帧缓冲 (ColorSoft) 把灰度展开成 R=G=B。
-        let x0 = rect.x as usize;
-        let w = rect.w as usize;
+        let w = fb_rect.w as usize;
         let bpp = self.info.bytes_per_pixel;
-        let src_stride = frame.stride();
-        let src_data = frame.data();
         let mut row = std::mem::take(&mut self.row);
-        for y in rect.y..rect.bottom() {
-            let src_off = y as usize * src_stride + x0;
+        let upright = rot == Rotation::UPRIGHT;
+        let (src_data, src_stride, src_x, src_y0) = if upright {
+            (frame.data(), frame.stride(), rect.x as usize, rect.y as usize)
+        } else {
+            rot.copy_region(frame, rect, &mut row);
+            (&row[..], w, 0, 0)
+        };
+        for i in 0..fb_rect.h as usize {
+            let src_off = (src_y0 + i) * src_stride + src_x;
             if src_off + w > src_data.len() {
                 continue;
             }
-            let fy = if rot { (sh - 1 - y) as usize } else { y as usize };
-            let dst_off = fy * self.fb_stride + fb_rect.x as usize * bpp;
+            let dst_off = (fb_rect.y as usize + i) * self.fb_stride + fb_rect.x as usize * bpp;
             if dst_off + w * bpp > self.fb_size {
                 continue;
             }
-            let mut src = &src_data[src_off..src_off + w];
-            if rot {
-                row.clear();
-                row.extend(src.iter().rev());
-                src = &row;
-            }
+            let src = &src_data[src_off..src_off + w];
             // SAFETY: dst_off + w*bpp <= fb_size (检查见上), fb_ptr 映射在 Drop 前一直有效
             let dst = unsafe { std::slice::from_raw_parts_mut(self.fb_ptr.add(dst_off), w * bpp) };
             match bpp {
@@ -404,13 +437,8 @@ impl Display for FbinkDisplay {
         let mut is_animated = 0;
         if self.info.supports_swipe {
             if let Some(dir) = req.swipe {
-                // 软件旋转时屏幕上的左右与帧缓冲相反
-                let dir = match (rot, dir) {
-                    (true, SwipeDir::Left) => SwipeDir::Right,
-                    (true, SwipeDir::Right) => SwipeDir::Left,
-                    (false, d) => d,
-                };
-                let direction = swipe_direction_code(dir);
+                // 软件旋转时按帧缓冲的方向换算 (横屏时逻辑上的左右是帧缓冲的上下)
+                let direction = swipe_direction_code(dir, rot);
                 let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, 12u8) };
                 if rc == 0 {
                     is_animated = 1;
@@ -472,9 +500,14 @@ impl Display for FbinkDisplay {
         Ok(())
     }
 
-    fn set_upside_down(&mut self, upside_down: bool) {
-        self.upside_down = upside_down;
-        self.sw_rotate = self.fb_upside_down != upside_down;
+    fn set_rotation(&mut self, rotation: Rotation) {
+        self.rotation = rotation;
+        // 帧缓冲本身已倒置时少转 180°
+        self.sw = rotation.then(Rotation::new(if self.fb_upside_down { 2 } else { 0 }));
+    }
+
+    fn rotation(&self) -> Rotation {
+        self.rotation
     }
 }
 
@@ -514,7 +547,24 @@ mod tests {
     #[test]
     fn swipe_direction_maps_to_mtk_indices() {
         // MTK_SWIPE_DIRECTION_INDEX_E (fbink.h): DOWN=0, UP=1, LEFT=2, RIGHT=3.
-        assert_eq!(swipe_direction_code(SwipeDir::Left), 2);
-        assert_eq!(swipe_direction_code(SwipeDir::Right), 3);
+        assert_eq!(swipe_direction_code(SwipeDir::Left, Rotation::UPRIGHT), 2);
+        assert_eq!(swipe_direction_code(SwipeDir::Right, Rotation::UPRIGHT), 3);
+        // 倒置: 左右互换; 向左转横拿 (q=1, 逻辑 x = 帧缓冲 y): 内容左移 = 帧缓冲里上移
+        assert_eq!(swipe_direction_code(SwipeDir::Left, Rotation::new(2)), 3);
+        assert_eq!(swipe_direction_code(SwipeDir::Left, Rotation::new(1)), 1);
+        assert_eq!(swipe_direction_code(SwipeDir::Right, Rotation::new(1)), 0);
+        assert_eq!(swipe_direction_code(SwipeDir::Left, Rotation::new(3)), 0);
+    }
+
+    #[test]
+    fn memory_display_rotates_into_the_panel() {
+        // 面板 4x6, 向左转横拿: 逻辑画面 6x4, 逻辑左上角的点落在面板右上角
+        let mut d = MemoryDisplay::new(4, 6);
+        d.set_rotation(Rotation::new(1));
+        let mut frame = Bitmap::new(6, 4, 0xFF);
+        frame.fill_rect(Rect::new(0, 0, 1, 1), 0);
+        d.present(&frame, &RefreshRequest { rect: frame.bounds(), waveform: Waveform::Gc16, flash: false, swipe: None }).unwrap();
+        assert_eq!(d.screen.get(3, 0), 0);
+        assert_eq!(d.screen.get(0, 0), 0xFF);
     }
 }

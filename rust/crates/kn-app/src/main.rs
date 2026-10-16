@@ -349,7 +349,7 @@ fn run_device() {
         let fb_upside_down = upside_down && test_gsensor.as_deref() != Some("flip");
         eprintln!("[device] gsensor: upside_down={upside_down} fb_upside_down={fb_upside_down} (fb rota {})", info.fb_rota);
         display.assume_fb_upside_down(fb_upside_down);
-        display.set_upside_down(upside_down);
+        display.set_rotation(kn_platform::Rotation::new(if upside_down { 2 } else { 0 }));
     }
     // 启动画面: 先于字体/配置加载, 首页第一帧整屏闪刷时换掉
     let started = std::time::Instant::now();
@@ -393,7 +393,7 @@ fn run_device() {
     }
     let mut input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
     if gsensor {
-        input.set_upside_down(upside_down);
+        input.set_rotation(kn_platform::Rotation::new(if upside_down { 2 } else { 0 }));
     }
     let power = PowerMonitor::start();
     let scheduler = RefreshScheduler::new(info.width, info.height, policy);

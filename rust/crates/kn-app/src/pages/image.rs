@@ -11,7 +11,7 @@ use std::any::Any;
 use kn_platform::{GestureKind, InputEvent, KeyCode};
 use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
 
 use crate::KinNovel;
 
@@ -204,6 +204,11 @@ impl ImagePage {
 impl Page<KinNovel> for ImagePage {
     fn id(&self) -> PageId {
         PageId(11)
+    }
+
+    /// 沿用打开它的阅读页的方向 (横屏阅读时预览也是横屏)
+    fn orientation(&self, _app: &KinNovel) -> Option<Orientation> {
+        None
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {

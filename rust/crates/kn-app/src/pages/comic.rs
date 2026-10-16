@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
 use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
 
 use super::reader::{Entry, LAST_UPLOAD};
 use crate::api;
@@ -49,6 +49,7 @@ const HIT_DIRECTION: HitId = HitId(7);
 const HIT_FLASH: HitId = HitId(8);
 const HIT_SETTINGS: HitId = HitId(9);
 const HIT_PANEL: HitId = HitId(10);
+const HIT_ORIENTATION: HitId = HitId(11);
 
 /// 离开阅读页的原因 (决定是否上传阅读进度, 与小说阅读页相同)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +88,8 @@ struct BatchLoaded {
 struct PageLoaded {
     chapter_id: i64,
     index: usize,
+    /// 按多大的屏幕缩放的 (横竖屏切换后旧尺寸的结果作废)
+    size: (u32, u32),
     /// 任务开始时这页已离当前页太远, 没有下载/解码
     cancelled: bool,
     result: Result<Option<Bitmap>, String>,
@@ -95,6 +98,8 @@ struct PageLoaded {
 /// 下一话的预取结果 (换话时交给新页面)。
 struct NextPrefetched {
     chapter_id: i64,
+    /// 第一页按多大的屏幕缩放的
+    size: (u32, u32),
     manifest: Option<Manifest>,
     first: Option<Bitmap>,
 }
@@ -123,6 +128,8 @@ pub struct ComicReaderPage {
     last_saved: Option<Instant>,
     /// 阅读统计计时
     tracker: crate::stats::Tracker,
+    /// 上一次绘制时的屏幕尺寸 (横竖屏切换后已解码的页按新尺寸重来)
+    drawn_size: (u32, u32),
 }
 
 impl ComicReaderPage {
@@ -146,6 +153,7 @@ impl ComicReaderPage {
             next_leave: Leave::Exit,
             last_saved: None,
             tracker: crate::stats::Tracker::default(),
+            drawn_size: (0, 0),
         }
     }
 
@@ -157,6 +165,7 @@ impl ComicReaderPage {
         }
         if let Some(first) = next.first {
             page.slots.insert(0, Slot::Ready(first));
+            page.drawn_size = next.size;
         }
         page.pending_present = Some(1);
         page
@@ -284,7 +293,7 @@ impl ComicReaderPage {
         cx.spawn(move || {
             // 排队期间读者可能已经翻远了: 下载前、解码前各查一次
             let far = || (index as i64 - focus.load(Ordering::Relaxed)).abs() > keep;
-            let cancelled = PageLoaded { chapter_id, index, cancelled: true, result: Ok(None) };
+            let cancelled = PageLoaded { chapter_id, index, size: (w, h), cancelled: true, result: Ok(None) };
             if far() {
                 return cancelled;
             }
@@ -301,7 +310,7 @@ impl ComicReaderPage {
             if crate::debug() {
                 eprintln!("[comic] 第 {} 页解码 {} ms", index + 1, started.elapsed().as_millis());
             }
-            PageLoaded { chapter_id, index, cancelled: false, result }
+            PageLoaded { chapter_id, index, size: (w, h), cancelled: false, result }
         });
     }
 
@@ -330,7 +339,7 @@ impl ComicReaderPage {
                 kn_render::decode_gray(&bytes, Some((w, h))).ok().map(|img| img.fit_within(w, h))
             });
             eprintln!("[comic] 预取下一话 {}: 清单 {}, 第一页 {}, {} ms", next.id, manifest.is_some(), first.is_some(), started.elapsed().as_millis());
-            NextPrefetched { chapter_id: next.id, manifest, first }
+            NextPrefetched { chapter_id: next.id, size: (w, h), manifest, first }
         });
     }
 
@@ -342,7 +351,7 @@ impl ComicReaderPage {
         self.focus.store(self.page as i64, Ordering::Relaxed);
         self.request_page(cx, self.page, 0);
         self.save_progress(cx, true);
-        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.height);
+        crate::sleep::on_book_opened(&cx.app.paths, cx.app.net(), self.book_id, cx.width.max(cx.height));
         // 预取交来的第一页已经解码好: 直接显示
         if matches!(self.slots.get(&self.page), Some(Slot::Ready(_))) {
             let delta = self.pending_present.take().unwrap_or(0);
@@ -379,6 +388,16 @@ impl ComicReaderPage {
     }
 
     fn on_page(&mut self, cx: &mut Cx<KinNovel>, p: PageLoaded) {
+        if p.chapter_id == self.chapter_id && p.size != (cx.width, cx.height) {
+            // 按切换方向之前的屏幕缩放的: 作废, 当前页按新尺寸重新请求 (其余页由空闲预取补上)
+            if matches!(self.slots.get(&p.index), Some(Slot::Pending)) {
+                self.slots.remove(&p.index);
+            }
+            if p.index == self.page {
+                self.request_page(cx, p.index, 0);
+            }
+            return;
+        }
         if p.chapter_id != self.chapter_id || p.cancelled || (p.index as i64 - self.page as i64).abs() > Self::keep_radius(cx) {
             if matches!(self.slots.get(&p.index), Some(Slot::Pending)) {
                 self.slots.remove(&p.index);
@@ -483,7 +502,11 @@ impl ComicReaderPage {
         self.save_progress(cx, true);
         self.next_leave = Leave::Chapter;
         if delta > 0 {
-            if let Some(next) = self.next.take().filter(|n| n.chapter_id == target.id) {
+            if let Some(mut next) = self.next.take().filter(|n| n.chapter_id == target.id) {
+                if next.size != (cx.width, cx.height) {
+                    // 预取之后换过方向: 清单还能用, 第一页要按新尺寸重新解码
+                    next.first = None;
+                }
                 return Transition::Replace(Box::new(ComicReaderPage::with_prefetched(self.book_id, next)));
             }
         }
@@ -590,6 +613,10 @@ impl ComicReaderPage {
                 cx.request_redraw(RefreshHint::Ui);
                 Transition::None
             }
+            HIT_ORIENTATION => {
+                super::toggle_orientation(cx, super::COMIC_ORIENTATION);
+                Transition::None
+            }
             HIT_SETTINGS => {
                 self.next_leave = Leave::Child;
                 Transition::Push(Box::new(super::settings::SettingsPage::comic()))
@@ -676,13 +703,14 @@ impl ComicReaderPage {
         }
         y += btn_h + gap;
 
-        // 翻页方向 / 每页全刷 / 设置
-        let cols = 3;
+        // 翻页方向 / 每页全刷 / 横竖屏 / 设置
+        let cols = 4;
         let col_w = (inner_w - gap * (cols - 1)) / cols;
         let cell = |i: i32| Rect::new(side + i * (col_w + gap), y, col_w as u32, btn_h as u32);
         let row = [
             (HIT_DIRECTION, if rtl { "从右往左" } else { "从左往右" }),
-            (HIT_FLASH, if flash { "每页全刷: 开" } else { "每页全刷: 关" }),
+            (HIT_FLASH, if flash { "全刷: 开" } else { "全刷: 关" }),
+            (HIT_ORIENTATION, super::orientation_label(cx.app, super::COMIC_ORIENTATION)),
             (HIT_SETTINGS, "设置"),
         ];
         for (i, (id, label)) in row.iter().enumerate() {
@@ -704,6 +732,10 @@ impl ComicReaderPage {
 impl Page<KinNovel> for ComicReaderPage {
     fn id(&self) -> PageId {
         PageId(12)
+    }
+
+    fn orientation(&self, app: &KinNovel) -> Option<Orientation> {
+        Some(super::reader_orientation(app, super::COMIC_ORIENTATION))
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
@@ -784,6 +816,15 @@ impl Page<KinNovel> for ComicReaderPage {
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let (w, h) = (cx.width, cx.height);
+        if self.drawn_size != (w, h) {
+            if self.drawn_size != (0, 0) && matches!(self.status, Status::Ready) {
+                // 横竖屏切换了: 已解码的页按旧屏幕缩放, 全部重来 (在途的结果到达时按尺寸丢弃)
+                self.slots.retain(|_, s| matches!(s, Slot::Pending));
+                self.request_page(cx, self.page, 0);
+                self.pending_present.get_or_insert(0);
+            }
+            self.drawn_size = (w, h);
+        }
         frame.fill_rect(Rect::new(0, 0, w, h), theme.background);
         match &self.status {
             Status::Loading => Self::draw_message(cx, frame, "正在打开…"),

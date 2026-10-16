@@ -56,6 +56,15 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   rows the device doesn't support are hidden (no panel at all without a frontlight).
 - Novel reader: taps on the thin status band at the top (chapter title + page on the left, time · battery right-aligned like every other header) do nothing (no accidental turns).
   Menu header = back · book title · bookmark ribbon (outline / filled = toggle a bookmark on this page) · home.
+  Menu rows: 上一章 / 目录 / 设置 / 下一章, then A－ · 字号 n · A＋ · 横屏|竖屏 · 夜间.
+- Landscape (novel and comic reader, separate settings `reader_orientation` / `comic_orientation`, also under
+  Settings → 阅读 / 漫画 → 屏幕方向): the menu button toggles it; the runtime rotates in software
+  (`kn_platform::Rotation`, like KOReader on Kindle) and flashes. Which way the device is turned is Settings → 显示 →
+  横屏握持 (`landscape_side`: 向左转 = counter-clockwise, default / 向右转). Pages declare it with
+  `Page::orientation` (default portrait; the image viewer inherits), so catalog / settings / book detail stay portrait
+  and leaving the reader returns to portrait. The novel reader re-paginates on a size change and keeps the first line
+  of the page; the comic reader re-decodes the pages for the new size. Every layout is the same code with width and
+  height swapped (`Metrics` stay those of the portrait screen).
   The chapter progress bar in the bottom panel is a slider (tap or swipe → page in the chapter, whole chapter laid out first).
   Illustrations: only the cover (first image of the volume's first chapter, with no body text before it) fills a page;
   every other image is laid out with its real size (the CDN URL carries `size=WxH`), at most 62 % of the text area high,
@@ -83,7 +92,7 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:
   one page fitted to the whole screen, no bars. Tap left/right 30 % = previous/next (mirrored when 翻页方向 = 从右往左),
   middle = overlay menu (话名 · 页码, progress bar filling from the reading side, 上一话 / 目录 / 放大 / 下一话,
-  翻页方向 / 每页全刷 / 设置). Long press = zoom (the illustration preview page). Settings has a 漫画 group.
+  翻页方向 / 全刷 开·关 / 横屏|竖屏 / 设置). Long press = zoom (the illustration preview page). Settings has a 漫画 group.
 
 ## Components (`kn_ui::widgets`)
 

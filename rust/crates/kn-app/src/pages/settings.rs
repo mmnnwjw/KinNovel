@@ -38,6 +38,8 @@ const fn toggle(key: &'static str, label: &'static str, note: &'static str, defa
 const CONVERT: &[(&str, &str)] = &[("", "关闭"), ("t2s", "繁转简"), ("s2t", "简转繁")];
 const COMIC_DIRECTION: &[(&str, &str)] = &[("ltr", "从左往右"), ("rtl", "从右往左")];
 const COMIC_QUALITY: &[(&str, &str)] = &[("high", "高清"), ("standard", "标准")];
+const ORIENTATION: &[(&str, &str)] = &[("portrait", "竖屏"), ("landscape", "横屏")];
+const LANDSCAPE_SIDE: &[(&str, &str)] = &[("left", "向左转"), ("right", "向右转")];
 /// 漫画分组的下标 (漫画阅读页的 "设置" 直接打开它)。
 const COMIC_GROUP: usize = 3;
 
@@ -51,6 +53,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
             step("reader_margin", "页边距", "", 16.0, 96.0, 8.0, 0, 34.0),
             toggle("first_line_indent", "首行缩进", "", true),
             Setting { key: "convert", label: "简繁转换", note: "", kind: Kind::Choice(CONVERT), default: 0.0 },
+            Setting { key: super::READER_ORIENTATION, label: "屏幕方向", note: "阅读菜单里也能切换", kind: Kind::Choice(ORIENTATION), default: 0.0 },
             toggle("prefetch_chapters", "预加载前后章节", "", false),
         ],
     ),
@@ -59,6 +62,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         &[
             toggle("night_mode", "夜间模式", "", false),
             toggle("page_turn_animation", "翻页动画", "PW5 及更新机型", true),
+            Setting { key: super::LANDSCAPE_SIDE, label: "横屏握持", note: "设备往哪边转", kind: Kind::Choice(LANDSCAPE_SIDE), default: 0.0 },
             toggle("page_flash", "翻页全屏刷新", "重启后生效", false),
             step("full_refresh_every", "残影清理间隔 (屏)", "重启后生效", 2.0, 12.0, 1.0, 0, 6.0),
             toggle("sleep_cover", "休眠显示封面", "重启后生效", false),
@@ -79,6 +83,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         &[
             Setting { key: "comic_direction", label: "翻页方向", note: "日漫选从右往左", kind: Kind::Choice(COMIC_DIRECTION), default: 0.0 },
             toggle("comic_page_flash", "每页全屏刷新", "", true),
+            Setting { key: super::COMIC_ORIENTATION, label: "屏幕方向", note: "", kind: Kind::Choice(ORIENTATION), default: 0.0 },
             Setting { key: "comic_quality", label: "画质", note: "标准: 更快、更省流量", kind: Kind::Choice(COMIC_QUALITY), default: 0.0 },
             step("comic_prefetch", "预加载页数", "", 1.0, 4.0, 1.0, 0, 2.0),
             step("comic_cache_mb", "漫画缓存 (MB)", "启动时清理", 64.0, 2048.0, 64.0, 0, 256.0),

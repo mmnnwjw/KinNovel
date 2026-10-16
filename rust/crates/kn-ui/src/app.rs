@@ -10,7 +10,7 @@
 use std::any::Any;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kn_platform::{Display, GestureKind, InputEvent, InputReader, KeyCode, PowerEvent, PowerMonitor, SwipeDir};
+use kn_platform::{Display, GestureKind, InputEvent, InputReader, KeyCode, PowerEvent, PowerMonitor, Rotation, SwipeDir};
 
 /// 按下电源键后等待系统进入屏保的时限; 超时说明这次按键没有引起休眠, 重新接管屏幕。
 const POWER_KEY_GRACE: Duration = Duration::from_secs(15);
@@ -24,6 +24,31 @@ use crate::theme::Theme;
 /// 页面标识 (应用层定义的枚举序号)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PageId(pub u16);
+
+/// 页面要求的屏幕方向 (软件旋转, 见 `kn_platform::Rotation`)。横屏时 `Cx` 的宽高互换。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Orientation {
+    #[default]
+    Portrait,
+    /// 横屏, 设备向左转 (逆时针) 拿: 原来的底边在右手边
+    LandscapeLeft,
+    /// 横屏, 设备向右转 (顺时针) 拿: 原来的底边在左手边
+    LandscapeRight,
+}
+
+impl Orientation {
+    pub fn rotation(self) -> Rotation {
+        match self {
+            Orientation::Portrait => Rotation::new(0),
+            Orientation::LandscapeLeft => Rotation::new(1),
+            Orientation::LandscapeRight => Rotation::new(3),
+        }
+    }
+
+    pub fn is_landscape(self) -> bool {
+        self != Orientation::Portrait
+    }
+}
 
 /// 页面处理事件后的导航意图。
 pub enum Transition<A> {
@@ -209,6 +234,12 @@ pub trait Page<A: App> {
     /// 用于调试与"同类页面"判断。
     fn id(&self) -> PageId;
 
+    /// 本页面的屏幕方向; None = 沿用当前方向 (例如从横屏阅读页打开的插图预览)。
+    /// 进入页面时与每次重绘前查询; 变化时运行时切换方向、整屏闪刷。
+    fn orientation(&self, _app: &A) -> Option<Orientation> {
+        Some(Orientation::Portrait)
+    }
+
     /// 首页的首批数据到了 (启动时运行时在启动画面上等它, 见 [`App::startup_hold`])。
     fn ready(&self) -> bool {
         true
@@ -275,13 +306,51 @@ struct Runtime<A: App> {
     tasks: Tasks<Delivery<A>>,
     redraw: Option<RefreshHint>,
     swipe: Option<SwipeDir>,
+    /// 逻辑画面尺寸 (横屏时与 panel 互换)
     width: u32,
     height: u32,
+    /// 面板 (竖屏) 尺寸
+    panel: (u32, u32),
+    orientation: Orientation,
+    /// 重力感应报告的倒拿 (Oasis / Scribe)
+    upside_down: bool,
     next_instance: u64,
     timers: Timers,
 }
 
 impl<A: App> Runtime<A> {
+    fn new(app: A, fonts: FontStore, panel: (u32, u32), waker: &Waker) -> Self {
+        Runtime {
+            app,
+            fonts,
+            glyphs: GlyphCache::new(4 * 1024 * 1024),
+            hits: Hits::default(),
+            tasks: Tasks::new(2, waker.clone()),
+            redraw: None,
+            swipe: None,
+            width: panel.0,
+            height: panel.1,
+            panel,
+            orientation: Orientation::Portrait,
+            upside_down: false,
+            next_instance: 0,
+            timers: Timers::default(),
+        }
+    }
+
+    /// 按页面要求的方向更新逻辑尺寸 (设备层的旋转由主循环在下一次重绘前跟上)。
+    fn orient_for(&mut self, page: &dyn Page<A>) {
+        if let Some(o) = page.orientation(&self.app) {
+            self.orientation = o;
+            (self.width, self.height) = o.rotation().logical_size(self.panel);
+        }
+    }
+
+    /// 逻辑画面相对面板的旋转 (阅读方向 + 倒拿)。
+    fn rotation(&self) -> Rotation {
+        self.orientation.rotation().then(Rotation::new(if self.upside_down { 2 } else { 0 }))
+    }
+
     fn cx(&mut self, instance: u64) -> Cx<'_, A> {
         let theme = self.app.theme();
         Cx {
@@ -319,6 +388,8 @@ impl<A: App> Stack<A> {
     fn enter_top(&mut self, rt: &mut Runtime<A>, returning: bool) {
         let top = self.top();
         let instance = top.instance;
+        // 先换好方向: 页面在 enter 里就能按新的宽高排版
+        rt.orient_for(&*top.page);
         top.page.enter(&mut rt.cx(instance), returning);
         rt.redraw_ui();
     }
@@ -569,19 +640,7 @@ pub struct Headless<A: App> {
 impl<A: App> Headless<A> {
     pub fn new(app: A, fonts: FontStore, width: u32, height: u32) -> std::io::Result<Self> {
         let waker = Waker::new()?;
-        let mut rt = Runtime {
-            app,
-            fonts,
-            glyphs: GlyphCache::new(4 * 1024 * 1024),
-            hits: Hits::default(),
-            tasks: Tasks::new(2, waker.clone()),
-            redraw: None,
-            swipe: None,
-            width,
-            height,
-            next_instance: 0,
-            timers: Timers::default(),
-        };
+        let mut rt = Runtime::new(app, fonts, (width, height), &waker);
         let home = rt.app.home_page();
         let entry = rt.new_entry(home);
         let mut stack = Stack { entries: vec![entry] };
@@ -632,9 +691,10 @@ impl<A: App> Headless<A> {
 
     /// 渲染当前页到新帧, 返回 (帧, 待处理的重绘提示)。
     pub fn frame(&mut self) -> (Bitmap, Option<RefreshHint>) {
+        let top = self.stack.top();
+        self.rt.orient_for(&*top.page);
         let mut frame = Bitmap::new(self.rt.width, self.rt.height, self.rt.app.theme().background);
         self.rt.hits.clear();
-        let top = self.stack.top();
         let instance = top.instance;
         top.page.render(&mut self.rt.cx(instance), &mut frame);
         (frame, self.rt.redraw.take())
@@ -671,21 +731,11 @@ pub fn run<A: App>(
 ) -> std::io::Result<()> {
     install_signal_handlers();
     let info = display.info().clone();
-    let (width, height) = (info.width, info.height);
     let waker = Waker::new()?;
-    let mut rt = Runtime {
-        app,
-        fonts,
-        glyphs: GlyphCache::new(4 * 1024 * 1024),
-        hits: Hits::default(),
-        tasks: Tasks::new(2, waker.clone()),
-        redraw: None,
-        swipe: None,
-        width,
-        height,
-        next_instance: 0,
-        timers: Timers::default(),
-    };
+    let mut rt = Runtime::new(app, fonts, (info.width, info.height), &waker);
+    // 启动时已倒拿 (main 按重力感应设好了显示与输入)
+    rt.upside_down = display.rotation().quarter_turns() == 2;
+    let mut applied = rt.rotation();
     let home = rt.app.home_page();
     let entry = rt.new_entry(home);
     let mut stack = Stack { entries: vec![entry] };
@@ -694,7 +744,7 @@ pub fn run<A: App>(
     A::on_start(&mut rt.cx(top));
     hold_startup(&mut rt, &mut stack, &waker);
 
-    let mut frame = Bitmap::new(width, height, rt.app.theme().background);
+    let mut frame = Bitmap::new(rt.width, rt.height, rt.app.theme().background);
     let mut events: Vec<InputEvent> = Vec::new();
     let mut power_events: Vec<PowerEvent> = Vec::new();
     let mut sleeping = false;
@@ -714,8 +764,6 @@ pub fn run<A: App>(
     // 让 powerd 的流程走完; 若 POWER_KEY_GRACE 内没进入屏保, 再暂停框架并重画。
     let mut power_key_at: Option<std::time::Instant> = None;
     let mut wants_idle = true;
-    // 重力感应上报的最近朝向 (只有 Oasis / Scribe 会有); 变化时整屏翻转重画
-    let mut upside_down: Option<bool> = None;
     // KN_DEBUG=1: 每帧打印渲染/差分/提交耗时 (设备上测翻页延迟)
     let debug = std::env::var_os("KN_DEBUG").is_some();
     let _ = input.grab();
@@ -761,6 +809,16 @@ pub fn run<A: App>(
                     if let Some(mut page) = rt.app.sleep_screen() {
                         // 框架还暂停着, 先画好屏保再交还 (唤醒后整屏重画)
                         let started = std::time::Instant::now();
+                        if applied.swaps_axes() {
+                            // 横屏阅读中休眠: 屏保 (封面) 按竖屏画; 唤醒后的重绘再转回页面要的方向
+                            rt.orientation = Orientation::Portrait;
+                            (rt.width, rt.height) = rt.panel;
+                            applied = rt.rotation();
+                            display.set_rotation(applied);
+                            input.set_rotation(applied);
+                            frame = Bitmap::new(rt.width, rt.height, rt.app.theme().background);
+                            scheduler.resize(rt.width, rt.height);
+                        }
                         frame.fill_rect(frame.bounds(), rt.app.theme().background);
                         rt.hits.clear();
                         page.render(&mut rt.cx(0), &mut frame);
@@ -823,14 +881,10 @@ pub fn run<A: App>(
                     continue;
                 }
                 if let InputEvent::Rotation { upside_down: ud } = event {
-                    // KOReader 的 rotation_map: 倒拿时画面翻转 180°, 触摸镜像, 翻页键互换
-                    if upside_down != Some(ud) {
-                        upside_down = Some(ud);
-                        display.set_upside_down(ud);
-                        input.set_upside_down(ud);
-                        scheduler.invalidate();
+                    // KOReader 的 rotation_map: 倒拿时画面翻转 180°, 触摸镜像, 翻页键互换 (重绘前生效)
+                    if rt.upside_down != ud {
+                        rt.upside_down = ud;
                         rt.redraw = Some(RefreshHint::Flash);
-                        feedback_shown = false;
                     }
                     continue;
                 }
@@ -900,6 +954,22 @@ pub fn run<A: App>(
                     last_theme = theme;
                     scheduler.set_background(theme.background);
                     hint = RefreshHint::Flash;
+                }
+                // 方向变了 (进入/离开横屏阅读页、阅读页里切换、倒拿): 显示与触摸跟着转, 整屏重画
+                rt.orient_for(&*stack.top().page);
+                let rotation = rt.rotation();
+                if rotation != applied {
+                    applied = rotation;
+                    display.set_rotation(rotation);
+                    input.set_rotation(rotation);
+                    if (frame.width(), frame.height()) != (rt.width, rt.height) {
+                        frame = Bitmap::new(rt.width, rt.height, rt.app.theme().background);
+                        scheduler.resize(rt.width, rt.height);
+                    }
+                    scheduler.invalidate();
+                    hint = RefreshHint::Flash;
+                    rt.swipe = None;
+                    feedback_shown = false;
                 }
                 let started = std::time::Instant::now();
                 let top = stack.top();
