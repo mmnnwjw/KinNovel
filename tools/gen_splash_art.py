@@ -1,97 +1,71 @@
-"""Draw the splash pixel art on a small grid and print it as text rows.
-'#' black, 'o' dark grey, '+' light grey, '.' background."""
-W, H = 48, 36
+"""Splash pixel art: flat books on a shelf (style of the LightNovelShelf web icon:
+rounded flat shapes, two books standing, one leaning), rasterised onto a coarse grid.
+'#' black, 'o' dark grey, '+' light grey, '.' background. Prints the rows."""
+import math
+
+W, H = 44, 34
 g = [['.'] * W for _ in range(H)]
 
 
-def put(x, y, c):
-    if 0 <= x < W and 0 <= y < H:
-        g[y][x] = c
+def inside_round_rect(px, py, x0, y0, x1, y1, r):
+    if not (x0 <= px <= x1 and y0 <= py <= y1):
+        return False
+    cx = min(max(px, x0 + r), x1 - r)
+    cy = min(max(py, y0 + r), y1 - r)
+    return (px - cx) ** 2 + (py - cy) ** 2 <= r * r
 
 
-def hline(x0, x1, y, c):
-    for x in range(x0, x1 + 1):
-        put(x, y, c)
+def fill(shape, c):
+    for y in range(H):
+        for x in range(W):
+            if shape(x + 0.5, y + 0.5):
+                g[y][x] = c
 
 
-def vline(x, y0, y1, c):
-    for y in range(y0, y1 + 1):
-        put(x, y, c)
+def rect(x0, y0, x1, y1, r, c):
+    fill(lambda px, py: inside_round_rect(px, py, x0, y0, x1, y1, r), c)
 
 
-def rect(x0, y0, x1, y1, c):
-    for y in range(y0, y1 + 1):
-        hline(x0, x1, y, c)
+def leaning(cx, cy, w, h, deg, r, c):
+    """Rounded rect of size w x h centred at (cx, cy), rotated clockwise by deg."""
+    a = math.radians(deg)
+    ca, sa = math.cos(a), math.sin(a)
+
+    def shape(px, py):
+        dx, dy = px - cx, py - cy
+        lx = dx * ca + dy * sa
+        ly = -dx * sa + dy * ca
+        return inside_round_rect(lx, ly, -w / 2, -h / 2, w / 2, h / 2, r)
+    fill(shape, c)
 
 
-# --- night sky: crescent moon, twinkles, dots
-moon = ["...###.", ".##+...", ".#+....", "#+.....", "#+.....", "#+.....", ".#+....", ".##+...", "...###."]
-for y, row in enumerate(moon):
-    for x, ch in enumerate(row):
-        if ch != '.':
-            put(37 + x, 1 + y, ch)
-for (sx, sy) in [(7, 4), (27, 2), (45, 12)]:
-    put(sx, sy, 'o'); put(sx - 1, sy, '+'); put(sx + 1, sy, '+'); put(sx, sy - 1, '+'); put(sx, sy + 1, '+')
-for (sx, sy) in [(14, 9), (33, 7), (2, 13), (20, 4)]:
-    put(sx, sy, 'o')
-
-# --- cat head peeking over the book
-x0, x1, top = 15, 32, 10      # head box (ears start at `top`)
-# ears: triangles, black outline, dark inner ear
-for i in range(5):
-    y = top + i
-    # left ear: outer edge vertical at x0, inner edge diagonal
-    put(x0, y, '#'); put(x0 + 1 + i, y, '#')
-    hline(x0 + 1, x0 + i, y, 'o' if i >= 2 else '+')
-    put(x1, y, '#'); put(x1 - 1 - i, y, '#')
-    hline(x1 - i, x1 - 1, y, 'o' if i >= 2 else '+')
-hline(x0 + 6, x1 - 6, top + 4, '#')                  # top of the head between the ears
-# face
-rect(x0 + 1, top + 5, x1 - 1, top + 11, '+')
-vline(x0, top + 5, top + 11, '#'); vline(x1, top + 5, top + 11, '#')
-# closed happy eyes  ^ ^
-for ex in (x0 + 4, x1 - 6):
-    put(ex, top + 8, '#'); put(ex + 1, top + 7, '#'); put(ex + 2, top + 8, '#')
-# nose + mouth
-hline(23, 24, top + 9, '#')
-put(22, top + 10, 'o'); put(25, top + 10, 'o')
-# cheeks
-put(x0 + 2, top + 10, 'o'); put(x1 - 2, top + 10, 'o')
-# whiskers
-for dy in (9, 11):
-    hline(x0 - 4, x0 - 1, top + dy, 'o'); hline(x1 + 1, x1 + 4, top + dy, 'o')
-
-# --- open book
-by = top + 12                  # page tops (row 22)
-bx0, bx1 = 3, 44
-sp0, sp1 = 23, 24
-bottom = by + 10
-for x in range(bx0, bx1 + 1):
-    if sp0 <= x <= sp1:
-        continue
-    outer = x - bx0 if x < sp0 else bx1 - x
-    y_top = by - (1 if outer < 6 else 0)          # outer corners lifted
-    put(x, y_top, '#')
-    rect(x, y_top + 1, x, bottom - 2, '.')
-    put(x, bottom - 1, 'o')                       # page stack
-    put(x, bottom, '#')                           # cover edge
-vline(bx0, by - 1, bottom, '#'); vline(bx1, by - 1, bottom, '#')
-vline(sp0, by, bottom + 1, '#'); vline(sp1, by, bottom + 1, '#')
-hline(sp0 - 2, sp1 + 2, bottom + 1, '#')
-# lines of text
-for i, (l, r) in enumerate([(13, 11), (15, 14), (10, 15), (14, 8)]):
-    y = by + 2 + i * 2
-    hline(bx0 + 3, bx0 + 2 + l, y, 'o')
-    hline(sp1 + 3, sp1 + 2 + r, y, 'o')
-# paws resting on the page tops
-for px in (16, 27):
-    hline(px + 1, px + 3, by - 1, '#')
-    put(px, by, '#'); hline(px + 1, px + 3, by, '+'); put(px + 4, by, '#')
-    put(px, by + 1, '#'); hline(px + 1, px + 3, by + 1, '+'); put(px + 4, by + 1, '#')
-    put(px + 2, by + 1, 'o')
-    hline(px + 1, px + 3, by + 2, '#')
+base = 31                       # shelf top (books stand on it)
+# book 1: narrow, black, a little shorter
+rect(3, 7, 10, base, 2.2, '#')
+# book 2: wide, dark grey, tallest; light label band near the top and a thin band at the bottom
+rect(11.5, 1, 22, base, 2.2, 'o')
+rect(13.5, 5, 20, 7, 0.0, '+')
+rect(13.5, 25.5, 20, 26.5, 0.0, '+')
+# book 1 spine line
+rect(5, 10, 8, 11, 0.0, 'o')
+# book 3: light grey, leaning against book 2 (its foot rests on the shelf)
+h3 = 22.0
+deg = -math.degrees(math.atan(0.5))  # 2:1 slope = clean pixel steps
+foot_x, foot_y = 35.5, base - 1.2  # lowest corner level with the others
+# centre = foot moved half the height along the tilted axis
+cx = foot_x + math.sin(math.radians(deg)) * h3 / 2
+cy = foot_y - math.cos(math.radians(deg)) * h3 / 2
+leaning(cx, cy, 7.5, h3, deg, 2.2, "+")
+# shelf
+# (no shelf line: the web icon has none)
 
 rows = [''.join(r) for r in g]
+while rows and set(rows[0]) == {'.'}:
+    rows.pop(0)
 while rows and set(rows[-1]) == {'.'}:
     rows.pop()
+# trim empty columns on both sides so the art is centred by its content
+left = min(len(r) - len(r.lstrip('.')) for r in rows)
+right = min(len(r) - len(r.rstrip('.')) for r in rows)
+rows = [r[left:len(r) - right] for r in rows]
 print('\n'.join(rows))
