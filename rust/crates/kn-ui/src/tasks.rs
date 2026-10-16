@@ -162,11 +162,11 @@ impl<T: Send + 'static> Tasks<T> {
 
 impl<T> Drop for Tasks<T> {
     fn drop(&mut self) {
-        // 关闭任务通道, 工作线程在 recv 失败后退出
+        // 关闭任务通道, 空闲的工作线程在 recv 失败后退出。不 join: 正在跑的任务可能卡在网络读
+        // (每次读最多 30 s, 下载封面时可能连着好几次), 退出时等它会让程序迟迟不退,
+        // 而启动脚本要等程序退出才恢复框架 —— 屏幕就一直停在 KinNovel 上。进程退出时线程随之结束。
         self.jobs.take();
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
-        }
+        self.workers.clear();
     }
 }
 
@@ -230,6 +230,20 @@ mod tests {
             cb(&mut v);
         }
         assert_eq!(v, 6);
+    }
+
+    #[test]
+    fn dropping_the_pool_does_not_wait_for_a_running_job() {
+        let tasks: Tasks<u32> = Tasks::new(2, Waker::new().unwrap());
+        // 模拟卡在网络读上的任务
+        tasks.spawn(|| {
+            thread::sleep(Duration::from_secs(5));
+            1
+        });
+        thread::sleep(Duration::from_millis(50));
+        let started = Instant::now();
+        drop(tasks);
+        assert!(started.elapsed() < Duration::from_secs(1), "drop waited {:?}", started.elapsed());
     }
 
     #[test]
