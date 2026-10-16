@@ -251,7 +251,21 @@ impl Client {
         method: &str,
         token: Option<&str>,
     ) -> Result<Value, NetError> {
-        let result = self.http_call_inner(path, payload, method, token);
+        self.http_call_verdict(path, payload, method, token, &mut false)
+    }
+
+    /// Like `http_call`; `verdict` is set when the server itself refused the
+    /// request (HTTP 2xx/3xx with `Success: false`), as opposed to an HTTP
+    /// error page from the server or a proxy.
+    fn http_call_verdict(
+        &self,
+        path: &str,
+        payload: Option<Value>,
+        method: &str,
+        token: Option<&str>,
+        verdict: &mut bool,
+    ) -> Result<Value, NetError> {
+        let result = self.http_call_inner(path, payload, method, token, verdict);
         self.0.health.record(&result);
         result
     }
@@ -262,6 +276,7 @@ impl Client {
         payload: Option<Value>,
         method: &str,
         token: Option<&str>,
+        verdict: &mut bool,
     ) -> Result<Value, NetError> {
         let server = self.0.hub.server();
         let mut full_path = path.to_string();
@@ -336,6 +351,7 @@ impl Client {
                 .or_else(|| obj.get("status"))
                 .and_then(Value::as_i64)
                 .unwrap_or(response.status as i64);
+            *verdict = response.status < 400;
             return Err(NetError::api(message, status as i32));
         }
         Ok(obj.get("Response").or_else(|| obj.get("response")).cloned().unwrap_or(Value::Null))
@@ -385,10 +401,15 @@ impl Client {
     /// `nested` = called from the 401 handler: fetch the user straight from
     /// the hub so a second 401 can't recurse into another re-login.
     fn login_inner(&self, email: &str, hash: &str, nested: bool) -> Result<Value, NetError> {
+        // The site answers HTTP 200 + `Success: false` with Status 401
+        // ("密码错误") or 404 ("没有此用户"), checked against the live API
+        // 2026-10-16. Only those verdicts mean the account itself is wrong;
+        // HTTP error pages (proxy 403/404, 5xx) and rate limiting do not.
+        let mut verdict = false;
         let credentials = self
-            .http_call("/api/user/login", Some(json!({"email": email, "password": hash})), "POST", None)
+            .http_call_verdict("/api/user/login", Some(json!({"email": email, "password": hash})), "POST", None, &mut verdict)
             .map_err(|e| match e {
-                NetError::Api { message, .. } if e.is_login_rejected() => NetError::Auth(message),
+                NetError::Api { status: 401 | 404, message } if verdict => NetError::Auth(message),
                 other => other,
             })?;
         self.store_credentials(&credentials)?;

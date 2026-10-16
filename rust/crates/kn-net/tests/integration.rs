@@ -254,7 +254,8 @@ fn access_token_refresh_on_401_then_retries() {
 /// Server that answers "unauthorized" until a login happened, with a dead
 /// refresh token: (server, login count, hub call count).
 fn dead_session_server(login_ok: bool) -> (FakeServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-    dead_session_server_with(login_ok, 200, json!({"Success": false, "Status": 400, "Msg": "密码错误"}))
+    // What the live API answers for a wrong password (checked 2026-10-16)
+    dead_session_server_with(login_ok, 200, json!({"Response": null, "Status": 401, "Success": false, "Msg": "密码错误"}))
 }
 
 /// Like [`dead_session_server`]; a failed login answers `(status, body)`.
@@ -318,6 +319,26 @@ fn failed_relogin_is_not_repeated_right_away() {
     assert!(client.take_account_rejected());
     assert!(!client.take_account_rejected());
     assert!(!client.has_refresh_token());
+}
+
+#[test]
+fn unknown_user_drops_the_account_but_an_http_404_does_not() {
+    // "没有此用户": the account is gone (or its email changed)
+    let (server, _, _) = dead_session_server_with(false, 200, json!({"Response": null, "Status": 404, "Success": false, "Msg": "没有此用户"}));
+    let seed = json!({"Token": "old", "RefreshToken": "dead", "TokenUpdatedAt": 0, "User": {"Id": 7}});
+    let client = client_with_seeded_session(&server, "relogin-nouser", &seed);
+    client.set_account(Some(("a@b.c".into(), "pw".into())));
+    assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).is_err());
+    assert!(client.take_account_rejected());
+
+    // An HTTP 404 / 403 page (moved endpoint, proxy) says nothing about the account
+    for status in [404u16, 403] {
+        let (server, _, _) = dead_session_server_with(false, status, json!({"Success": false, "Msg": "blocked"}));
+        let client = client_with_seeded_session(&server, &format!("relogin-http{status}"), &seed);
+        client.set_account(Some(("a@b.c".into(), "pw".into())));
+        assert!(client.invoke("GetBookShelf", json!({}), 0, Duration::ZERO).is_err());
+        assert!(!client.take_account_rejected(), "HTTP {status}");
+    }
 }
 
 #[test]

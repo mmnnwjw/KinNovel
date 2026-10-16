@@ -55,15 +55,6 @@ impl NetError {
         matches!(self, NetError::Api { status, .. } if *status == -100 || *status == 404)
     }
 
-    /// The server answered the login request itself with a rejection: any
-    /// API error that is not a server fault (5xx), a missing endpoint (404),
-    /// a timeout (408) or rate limiting (429). The site returns
-    /// `Success: false` + a message for a wrong password; its status code is
-    /// not documented.
-    pub fn is_login_rejected(&self) -> bool {
-        matches!(self, NetError::Api { status, .. } if *status < 500 && ![404, 408, 429].contains(status))
-    }
-
     /// True for the "access token expired" status api.py's `_invoke_direct`
     /// reacts to by refreshing and retrying once.
     pub fn is_unauthorized(&self) -> bool {
