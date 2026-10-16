@@ -42,17 +42,11 @@ KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户
 
 1. 从 [Releases](https://github.com/mmnnwjw/KinNovel/releases/latest) 下载 `KinNovel-vX.Y.Z.zip` 并解压。
 2. 用 USB 连接 Kindle，把 `KinNovel` 文件夹里的全部内容复制到 `extensions/kinnovel/`。
-3. 如需同步云端书架和进度，在 `extensions/kinnovel/bin/config.json` 中填写账号：
+3. 在 KUAL 中选择 **KinNovel**。第一次打开是欢迎页，用屏幕键盘输入轻书架的邮箱和密码登录，就能同步云端书架和阅读进度；也可以点「先逛逛」，以后在「我的」里登录。
 
-   ```json
-   { "account_email": "you@example.com", "account_password": "••••••" }
-   ```
+登录过期后，KinNovel 会用保存的账号自动重新登录。本机只保存密码的哈希值，不保存明文。
 
-   登录过期后，KinNovel 会用这里的账号自动重新登录。
-
-4. 在 KUAL 中选择 **KinNovel**。
-
-升级时直接覆盖安装即可，配置、进度、书签和缓存都会保留。
+升级时直接覆盖安装即可，设置、账号、进度、书签和缓存都会保留。从 1.4 及更早的版本升级时，`bin/config.json` 里的设置和账号会自动迁移到 `data/`，旧文件随后删除。
 
 ## 使用
 
@@ -84,7 +78,7 @@ KinNovel 是 [轻书架](https://www.lightnovel.life) 的非官方 Kindle 客户
 
 第一次进入书架、阅读页、漫画、搜索键盘、目录与书签和插图查看时，会弹出这一页的操作提示：点「我知道了」以后不再出现，点「感觉会忘记」则下次启动后还会提示。可以在「设置 → 显示 → 操作提示」里关闭；重新打开后所有提示会再显示一次。
 
-其他选项都在「我的 → 设置」里，也可以直接编辑 `config.json`。「休眠显示封面」重启 KinNovel 后生效。
+其他选项都在「我的 → 设置」里，也可以直接编辑 `data/settings.json`。「休眠显示封面」重启 KinNovel 后生效。
 
 ### 遇到问题
 

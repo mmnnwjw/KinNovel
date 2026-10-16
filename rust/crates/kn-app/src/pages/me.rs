@@ -1,4 +1,4 @@
-//! "我的": 账号卡片 (登录状态/签到) + 入口列表 (设置、存储空间、关于、退出), 对照 Python `account.py`。
+//! "我的": 账号卡片 (登录/签到/退出登录) + 入口列表 (设置、存储空间、关于、退出), 对照 Python `account.py`。
 //! 设置项在二级页 [`super::settings::SettingsPage`]。有新版本时「关于」一行提示, 关于对话框里可手动检查更新。
 
 use std::any::Any;
@@ -19,6 +19,9 @@ const HIT_DIALOG_EXIT: HitId = HitId(61);
 const HIT_SIGN_IN: HitId = HitId(70);
 const HIT_RETRY: HitId = HitId(71);
 const HIT_CHECK_UPDATE: HitId = HitId(72);
+const HIT_LOGIN: HitId = HitId(73);
+const HIT_LOGOUT: HitId = HitId(74);
+const HIT_DIALOG_LOGOUT: HitId = HitId(62);
 const TOAST_TOKEN: u32 = 1;
 
 /// 入口列表的行
@@ -62,6 +65,7 @@ fn rows(logged_in: bool) -> Vec<Row> {
 enum Dialog {
     About,
     Exit,
+    Logout,
 }
 
 struct InfoLoaded(Result<MyInfo, String>);
@@ -123,9 +127,16 @@ impl Page<KinNovel> for MePage {
         if !logged_in {
             let offline = cx.app.net().is_none();
             ink.text(frame, side + pad, card.y + (row_h - (m.body * 1.25) as i32) / 2, if offline { "离线模式" } else { "未登录" }, m.body, theme.foreground);
-            let note = if offline { "联网功能已关闭" } else { "账号配置于 bin/config.json" };
-            let nw = ink.width(note, m.small).ceil() as i32;
-            ink.text(frame, card.right() - pad - nw, card.y + (row_h - (m.small * 1.25) as i32) / 2, note, m.small, theme.muted);
+            if offline {
+                let note = "联网功能已关闭";
+                let nw = ink.width(note, m.small).ceil() as i32;
+                ink.text(frame, card.right() - pad - nw, card.y + (row_h - (m.small * 1.25) as i32) / 2, note, m.small, theme.muted);
+            } else {
+                let w = (m.touch as f32 * 1.6) as i32;
+                let r = Rect::new(card.right() - pad - w, card.y + (row_h - m.touch as i32) / 2, w as u32, m.touch);
+                widgets::button(&mut ink, frame, &theme, &m, r, "登录", ButtonStyle::Primary);
+                cx.hits.add(HIT_LOGIN, r).rounded(m.radius);
+            }
         } else {
             match &self.info {
                 None | Some(Err(_)) if self.info_loading => {
@@ -144,7 +155,13 @@ impl Page<KinNovel> for MePage {
                     let meta = format!("金币 {} · 连续签到 {} 天", info.coin, info.sign_streak);
                     let nw = ink.width(&meta, m.small).ceil() as i32;
                     ink.text(frame, card.right() - pad - nw, card.y + (row_h - (m.small * 1.25) as i32) / 2, &meta, m.small, theme.muted);
-                    let r = Rect::new(card.x + pad, card.y + row_h, card.w - 2 * pad as u32, m.touch);
+                    // 签到 (大) + 退出登录
+                    let out_w = (m.touch as f32 * 2.0) as i32;
+                    let gap = m.margin as i32 / 3;
+                    let out = Rect::new(card.right() - pad - out_w, card.y + row_h, out_w as u32, m.touch);
+                    widgets::button(&mut ink, frame, &theme, &m, out, "退出登录", ButtonStyle::Secondary);
+                    cx.hits.add(HIT_LOGOUT, out).rounded(m.radius);
+                    let r = Rect::new(card.x + pad, card.y + row_h, (out.x - gap - card.x - pad).max(0) as u32, m.touch);
                     let signed = info.today_signed || self.signing_in;
                     let label = if info.today_signed { "今日已签到" } else if self.signing_in { "签到中…" } else { "每日签到" };
                     widgets::button(&mut ink, frame, &theme, &m, r, label, if signed { ButtonStyle::Disabled } else { ButtonStyle::Primary });
@@ -192,6 +209,18 @@ impl Page<KinNovel> for MePage {
                     &[("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]
                 };
                 widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, "关于", &lines, buttons);
+            }
+            Some(Dialog::Logout) => {
+                widgets::dialog(
+                    &mut ink,
+                    frame,
+                    cx.hits,
+                    &theme,
+                    &m,
+                    "退出登录？",
+                    &["本机保存的账号会被删除", "书架和阅读进度仍保存在服务器上"],
+                    &[("取消", HIT_DIALOG_CLOSE, ButtonStyle::Secondary), ("退出登录", HIT_DIALOG_LOGOUT, ButtonStyle::Primary)],
+                );
             }
             Some(Dialog::Exit) => {
                 widgets::dialog(&mut ink, frame, cx.hits, &theme, &m, "退出 KinNovel？", &["阅读进度已保存"], &[("取消", HIT_DIALOG_CLOSE, ButtonStyle::Secondary), ("退出", HIT_DIALOG_EXIT, ButtonStyle::Primary)]);
@@ -256,6 +285,13 @@ impl Page<KinNovel> for MePage {
         if self.dialog.is_some() {
             match hit {
                 HIT_DIALOG_EXIT => return Transition::Exit,
+                HIT_DIALOG_LOGOUT => {
+                    cx.app.forget_account();
+                    self.dialog = None;
+                    self.info = None;
+                    self.show_toast(cx, "已退出登录");
+                    cx.request_redraw(RefreshHint::Clean);
+                }
                 HIT_CHECK_UPDATE if !matches!(self.update_check, Some(None)) => {
                     self.update_check = Some(None);
                     let (paths, net) = (cx.app.paths.clone(), cx.app.net());
@@ -288,6 +324,11 @@ impl Page<KinNovel> for MePage {
                 }
                 None => {}
             },
+            HIT_LOGIN => return Transition::Push(Box::new(super::login::LoginPage::new())),
+            HIT_LOGOUT => {
+                self.dialog = Some(Dialog::Logout);
+                cx.request_redraw(RefreshHint::Ui);
+            }
             HIT_RETRY => {
                 self.load_info(cx);
                 cx.request_redraw(RefreshHint::Ui);

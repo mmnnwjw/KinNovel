@@ -58,7 +58,7 @@ crates/
 
 - 机型/平台: FBInk 识别平台与触摸轴变换; 按键码、前光/色温、REAGL、方向感应等差异按 KOReader `device.lua` / `powerd.lua` 整理成 `kn-platform/src/model.rs` 的机型表, 未知机型回退到探测。
 - 电源: 先沿用 `lipc-wait-event` 子进程监听 `com.lab126.powerd`; 框架进程只 SIGSTOP/SIGCONT 不杀; 电源键按下时先恢复框架, 让系统进入屏保的流程能走完 (见 `research-kindle-devices.md` §3)。
-- 数据: 读写与 Python 版相同的 `bin/config.json`、`cache/session.json`、`cache/progress/*.json`、章节/字体缓存, 从 0.8.x 升级不丢进度与登录。新增的书签、阅读统计等放在 `data/`, 清理缓存不会删掉它们。
+- 数据: 读写与 Python 版相同的 `cache/session.json`、`cache/progress/*.json`、章节/字体缓存, 从 0.8.x 升级不丢进度与登录。设置 (`data/settings.json`, 键名沿用 Python 版)、账号 (`data/account.json`, 只存密码的 SHA-256)、书签、阅读统计等放在 `data/`, 清理缓存和覆盖安装都不会动它们。1.4 及以前的 `bin/config.json` 在第一次启动时迁移过来 (`kn-app/src/account.rs`), 然后删除。
 
 ## 验证与发布
 

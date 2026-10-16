@@ -1,6 +1,5 @@
-//! 设备上的数据: 配置、章节缓存、阅读进度、字体缓存。格式与 Python 版 (0.8.x) 完全一致, 两个版本可以共用
-//! 同一个扩展目录 (`/mnt/us/extensions/kinnovel`):
-//! - 配置 `bin/config.json` (保留未知键与键顺序; 含账号信息, 不要打印)
+//! 设备上的数据: 配置、章节缓存、阅读进度、字体缓存。缓存格式与 Python 版 (0.8.x) 一致, 从 0.8 升级不丢进度:
+//! - 设置 `data/settings.json` (保留未知键与键顺序; 键名沿用 Python 版), 账号另存 (见 `account.rs`)
 //! - 章节 `cache/content/sha256("{book}:{sort}:{convert}").json` = 服务器 GetChapterContent 响应
 //! - 进度 `cache/progress/{book}-{sort}[-{convert}].json` = `{"path", "offset", "page"}`
 //! - 字体 `cache/fonts/sha256(absolute_url(api_server, Font)).woff2`; 解码后的 TTF 另存为 `<同名>.ttf`
@@ -48,10 +47,6 @@ impl Paths {
     pub fn from_env() -> Self {
         let app_dir = std::env::var_os("KN_APP_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_APP_DIR));
         Paths { app_dir }
-    }
-
-    pub fn config_file(&self) -> PathBuf {
-        self.app_dir.join("bin").join("config.json")
     }
 
     pub fn cache_dir(&self) -> PathBuf {
@@ -120,7 +115,7 @@ impl Paths {
     }
 }
 
-/// `bin/config.json`。只读写需要的键, 其余原样保留。
+/// 设置 (`data/settings.json`)。只读写需要的键, 其余原样保留; 缺的键用代码里的默认值。
 pub struct Config {
     path: PathBuf,
     data: Map<String, Value>,

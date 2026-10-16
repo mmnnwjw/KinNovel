@@ -20,6 +20,7 @@ use crate::KinNovel;
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
+const HIT_LOGIN: HitId = HitId(40);
 const SEG_KIND_BASE: u32 = 10;
 const ROW_BASE: u32 = 1000;
 
@@ -260,7 +261,7 @@ impl Page<KinNovel> for HistoryPage {
                 return;
             }
             Status::NeedLogin => {
-                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "查看阅读历史需要登录\n在 config.json 中设置\naccount_email / account_password", None);
+                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "登录后可以查看阅读历史", Some(("登录", HIT_LOGIN)));
                 return;
             }
             Status::Error(e) => {
@@ -312,6 +313,7 @@ impl Page<KinNovel> for HistoryPage {
                 self.switch(cx, KINDS[(id - SEG_KIND_BASE) as usize].0);
                 Transition::None
             }
+            HIT_LOGIN => Transition::Push(Box::new(super::login::LoginPage::new())),
             HIT_RETRY => {
                 self.start_load(cx);
                 cx.request_redraw(RefreshHint::Ui);

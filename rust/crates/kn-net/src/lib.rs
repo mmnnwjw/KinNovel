@@ -36,7 +36,7 @@ pub mod stream;
 pub mod transport;
 pub mod turn;
 
-pub use client::{Client, ClientConfig};
+pub use client::{password_hash, Client, ClientConfig};
 pub use error::NetError;
 pub use session::SessionStore;
 pub use transport::{SignalRClient, SignalRConfig};

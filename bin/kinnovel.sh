@@ -82,9 +82,9 @@ trap on_exit INT TERM EXIT
 resume_fb_users
 # 休眠显示封面 (设置 sleep_cover, 同 KOReader): 暂停框架前卸载系统屏保模块, 退出时加载回来。
 # blanket 也会被暂停, 所以必须在 pause_fb_users 之前 / resume_fb_users 之后调用。有广告的机型 (ad_screensaver) 不动。
-CONFIG_FILE="$SCRIPT_DIR/config.json"
-[ -n "$KN_APP_DIR" ] && CONFIG_FILE="$KN_APP_DIR/bin/config.json"
-if grep -q '"sleep_cover": *true' "$CONFIG_FILE" 2>/dev/null; then
+# 设置在 data/settings.json; 1.4 及以前是 bin/config.json (第一次启动新版时程序才迁移, 所以两个都看)
+SETTINGS_DIR="${KN_APP_DIR:-$APP_DIR}"
+if grep -q '"sleep_cover": *true' "$SETTINGS_DIR/data/settings.json" "$SETTINGS_DIR/bin/config.json" 2>/dev/null; then
   case "$(lipc-get-prop com.lab126.blanket load 2>/dev/null)" in
     *ad_screensaver*) log "special offers device, keeping the system screensaver" ;;
     *screensaver*) lipc-set-prop com.lab126.blanket unload screensaver 2>/dev/null && SLEEP_COVER=1 ;;

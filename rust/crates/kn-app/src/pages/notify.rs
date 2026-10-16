@@ -15,6 +15,7 @@ const HIT_BACK: HitId = HitId(1);
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
+const HIT_LOGIN: HitId = HitId(40);
 const HIT_READ_ALL: HitId = HitId(5);
 const ROW_BASE: u32 = 1000;
 
@@ -81,7 +82,7 @@ impl Page<KinNovel> for NotificationsPage {
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
-        if !returning {
+        if !returning || matches!(self.status, Status::NeedLogin) {
             self.load(cx, 1);
         }
     }
@@ -149,7 +150,7 @@ impl Page<KinNovel> for NotificationsPage {
                 return;
             }
             Status::NeedLogin => {
-                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "查看通知需要登录\n在 config.json 中设置账号", None);
+                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "登录后可以查看通知", Some(("登录", HIT_LOGIN)));
                 return;
             }
             Status::Error(e) => {
@@ -197,6 +198,7 @@ impl Page<KinNovel> for NotificationsPage {
         let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
         match hit {
             HIT_BACK => Transition::Back,
+            HIT_LOGIN => Transition::Push(Box::new(super::login::LoginPage::new())),
             HIT_RETRY => {
                 self.load(cx, self.page);
                 cx.request_redraw(RefreshHint::Ui);

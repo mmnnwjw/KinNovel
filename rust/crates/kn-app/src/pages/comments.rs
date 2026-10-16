@@ -15,6 +15,7 @@ const HIT_BACK: HitId = HitId(1);
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
+const HIT_LOGIN: HitId = HitId(40);
 
 enum Status {
     Loading,
@@ -63,7 +64,8 @@ impl Page<KinNovel> for CommentsPage {
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
-        if !returning {
+        // 从登录页回来也重新加载
+        if !returning || matches!(self.status, Status::NeedLogin) {
             self.load(cx, 1);
         }
     }
@@ -99,7 +101,7 @@ impl Page<KinNovel> for CommentsPage {
                 return;
             }
             Status::NeedLogin => {
-                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "查看评论需要登录\n在 config.json 中设置账号", None);
+                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "登录后可以查看评论", Some(("登录", HIT_LOGIN)));
                 return;
             }
             Status::Error(e) => {
@@ -146,6 +148,7 @@ impl Page<KinNovel> for CommentsPage {
         let Some(hit) = cx.hits.at(Point { x: g.start.0, y: g.start.1 }) else { return Transition::None };
         match hit {
             HIT_BACK => Transition::Back,
+            HIT_LOGIN => Transition::Push(Box::new(super::login::LoginPage::new())),
             HIT_RETRY => {
                 self.load(cx, self.page);
                 cx.request_redraw(RefreshHint::Ui);

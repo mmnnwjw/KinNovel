@@ -1,9 +1,10 @@
 //! KinNovel 入口。
 //!
 //! - 设备上: `kinnovel` (由 KUAL 启动脚本拉起, 脚本负责暂停/恢复框架进程, 并设置 `KN_APP_DIR`)。
-//! - 主机上: `kinnovel --preview out.pgm [--read BOOK SORT] [--comic BOOK CHAPTER] [--sleep] [--tap X,Y]... [--long X,Y]... [--swipe left|right|up|down]...`
+//! - 主机上: `kinnovel --preview out.pgm [--read BOOK SORT] [--comic BOOK CHAPTER] [--login] [--sleep] [--tap X,Y]... [--long X,Y]... [--swipe left|right|up|down]...`
 //!   用真实页面逻辑 (无显示/输入设备) 渲染最后一帧; `KN_APP_DIR` 指向一份设备缓存的拷贝。
 
+mod account;
 mod api;
 mod comic;
 mod crash;
@@ -66,10 +67,17 @@ pub struct KinNovel {
     pub tip_open: Option<&'static str>,
     /// 本次运行里点了「感觉会忘记」的提示: 下次启动再提示
     pub tips_later: std::collections::HashSet<&'static str>,
+    /// 本次运行已经显示过欢迎页 (之后回首页直接到书架)
+    welcome_shown: bool,
 }
 
 impl App for KinNovel {
     fn home_page(&mut self) -> Box<dyn Page<Self>> {
+        // 第一次启动 (或还没登录): 欢迎页; 登录或「先逛逛」后进书架
+        if self.wants_welcome() && !self.welcome_shown {
+            self.welcome_shown = true;
+            return Box::new(pages::login::LoginPage::welcome());
+        }
         pages::tab_page(pages::Tab::Shelf)
     }
 
@@ -87,13 +95,11 @@ impl KinNovel {
     fn new(paths: Paths, config: Config, ui_fonts: Vec<FontId>, width: u32, height: u32, dpi: u32, light: kn_platform::Frontlight, online: bool) -> Self {
         let night = config.bool("night_mode", false);
         let net_client = net::client(&paths, &config);
-        let email = config.string("account_email", "").trim().to_string();
-        let password = config.string("account_password", "");
-        let account = (!email.is_empty() && !password.is_empty()).then_some((email, password));
+        let account = account::load(&paths).map(|a| (a.email, a.password_hash));
         // 会话失效 (刷新令牌也被拒) 时由客户端用这个账号自动重新登录
         net_client.set_account(account.clone());
         net::set_account(account);
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default() }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default(), welcome_shown: false }
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。
@@ -119,7 +125,31 @@ impl KinNovel {
         });
     }
 
-    /// 已登录, 或配置了账号 (需要时自动登录); fixture 预览模式也算。
+    /// 登录成功: 保存账号 (密码只存哈希), 之后会话失效时用它自动重新登录。
+    pub fn remember_account(&mut self, account: account::Account) {
+        if let Err(e) = account::save(&self.paths, &account) {
+            eprintln!("[account] 保存失败: {e}");
+        }
+        let pair = Some((account.email, account.password_hash));
+        self.net_client.set_account(pair.clone());
+        net::set_account(pair);
+    }
+
+    /// 退出登录: 删掉保存的账号和会话令牌。
+    pub fn forget_account(&mut self) {
+        account::clear(&self.paths);
+        net::set_account(None);
+        if let Err(e) = self.net_client.logout() {
+            eprintln!("[account] 清除会话失败: {e}");
+        }
+    }
+
+    /// 需要显示欢迎/登录页: 联网、没有登录、也没在欢迎页点过「先逛逛」。
+    pub fn wants_welcome(&self) -> bool {
+        !api::fake_mode() && self.online && !self.signed_in() && !self.config.bool("welcome_skipped", false)
+    }
+
+    /// 已登录, 或保存了账号 (需要时自动登录); fixture 预览模式也算。
     pub fn signed_in(&self) -> bool {
         api::fake_mode() || self.net().is_some_and(|n| n.user().is_some() || n.has_refresh_token() || net::has_account())
     }
@@ -171,7 +201,8 @@ fn preview(args: &[String]) {
         .unwrap_or((1236, 1648));
     let out = &args[0];
     let paths = Paths::from_env();
-    let config = Config::load(paths.config_file());
+    account::migrate_legacy_config(&paths);
+    let config = Config::load(paths.settings_file());
     let mut fonts = FontStore::new();
     let ui_fonts = load_ui_fonts(&mut fonts, &config);
     // 预览默认离线 (不访问服务器); KN_ONLINE=1 时联网
@@ -203,6 +234,11 @@ fn preview(args: &[String]) {
                 let chapter: i64 = args[i + 2].parse().expect("chapter id");
                 ui.push(Box::new(pages::comic::ComicReaderPage::new(book, chapter, pages::reader::Entry::Resume)));
                 i += 3;
+            }
+            // 欢迎/登录页
+            "--login" => {
+                ui.push(Box::new(pages::login::LoginPage::welcome()));
+                i += 1;
             }
             // 屏保页 (封面屏保的样子)
             "--sleep" => {
@@ -277,7 +313,8 @@ fn run_device() {
         info.touch_mirror_x,
         info.touch_mirror_y
     );
-    let config = Config::load(paths.config_file());
+    account::migrate_legacy_config(&paths);
+    let config = Config::load(paths.settings_file());
     let mut fonts = FontStore::new();
     let ui_fonts = load_ui_fonts(&mut fonts, &config);
     let policy = RefreshPolicy {

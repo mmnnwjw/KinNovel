@@ -44,7 +44,8 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
     changes one entry and saves the whole table (`SaveBookShelf` overwrites); the result shows as a toast.
   - **历史** — reading history (cloud + local), newest first; segmented 小说 / 漫画 (comic history is aggregated by series, like the web client).
   - **发现** — segmented control: 最新 / 排行 / 分类 / 漫画 (second row: 日榜/周榜/月榜 for 排行, 最近更新/上架时间/总点击量 for 漫画); a magnifier in the header opens **搜索**: 小说 / 漫画 tabs, modes 模糊 / 精确 / 书名 / 作者 / 系列 / 标签, recent searches, and the on-screen keyboard (en + pinyin, `kn_ui::keyboard` + `kn-ime`). The input field sits right above the keyboard so a keystroke refreshes only the lower half.
-  - **我的** — account card (login state, sign-in; the account itself is configured in `bin/config.json`) and the entry list below.
+  - **我的** — account card (logged out: 登录 button; logged in: name/level/coins, 每日签到 + 退出登录 with a confirm dialog) and the entry list below.
+- **Welcome / login** (`pages/login.rs`) — the home page on an online start while nobody is logged in and 「先逛逛」 was never tapped (config `welcome_skipped`); also pushed from 我的 and from every 「需要登录」 state (history, comments, notifications, shop) as a 登录 button. Fixed layout: title, one-line intro, 邮箱 / 密码 fields (password masked with ●, 显示/隐藏 toggle), one message line, full-width 登录. Tapping a field opens the keyboard (`TextEditor::render_keys`) over the lower half, where 先逛逛 and the registration note (register on the website) sit otherwise; Enter = 下一项 / 登录, tapping above the keyboard closes it. Both fields start in English mode.
 - Book detail: cover, meta, intro, action row 开始/继续阅读 · 目录 · 加入书架 / 移出书架 (logged in) · 评论; author and each tag start a search.
 - Pushed pages (book detail, catalog, series, settings sub-pages, reader) show a back arrow in the header and **no tab bar**.
 - The reader is full-screen; its overlay menu has back + home (home = shelf).

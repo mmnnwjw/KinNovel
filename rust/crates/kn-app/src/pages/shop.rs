@@ -15,6 +15,7 @@ const HIT_BACK: HitId = HitId(1);
 const HIT_PREV: HitId = HitId(2);
 const HIT_NEXT: HitId = HitId(3);
 const HIT_RETRY: HitId = HitId(4);
+const HIT_LOGIN: HitId = HitId(40);
 const HIT_DIALOG_CANCEL: HitId = HitId(5);
 const HIT_DIALOG_CONFIRM: HitId = HitId(6);
 const ROW_BASE: u32 = 1000;
@@ -83,7 +84,7 @@ impl Page<KinNovel> for ShopPage {
     }
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
-        if !returning {
+        if !returning || matches!(self.status, Status::NeedLogin) {
             self.load(cx);
         }
     }
@@ -144,7 +145,7 @@ impl Page<KinNovel> for ShopPage {
                 return;
             }
             Status::NeedLogin => {
-                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "积分商城需要登录\n在 config.json 中设置账号", None);
+                widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "登录后可以使用积分商城", Some(("登录", HIT_LOGIN)));
                 return;
             }
             Status::Error(e) => {
@@ -225,6 +226,7 @@ impl Page<KinNovel> for ShopPage {
         }
         match hit {
             HIT_BACK => return Transition::Back,
+            HIT_LOGIN => return Transition::Push(Box::new(super::login::LoginPage::new())),
             HIT_RETRY => {
                 self.load(cx);
                 cx.request_redraw(RefreshHint::Ui);

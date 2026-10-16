@@ -16,7 +16,7 @@ const IMAGE_LIMIT: usize = 16 * 1024 * 1024;
 /// 封面/插图下载失败后, 再次显示时隔多久重试 (网络可能已经恢复)。
 pub const RETRY_AFTER: Duration = Duration::from_secs(20);
 
-/// 配置里的账号 (邮箱, 密码); 启动时设置一次。
+/// 保存的账号 (邮箱, 密码哈希); 启动和登录/退出登录时设置。
 static ACCOUNT: Mutex<Option<(String, String)>> = Mutex::new(None);
 /// 串行化登录: 启动时的后台登录与页面加载可能同时需要会话。
 static LOGIN_LOCK: Mutex<()> = Mutex::new(());
@@ -29,7 +29,7 @@ pub fn has_account() -> bool {
     ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
-/// 需要登录的请求之前调用: 已有会话直接返回; 否则用配置里的账号登录 (阻塞, 只在后台线程用)。
+/// 需要登录的请求之前调用: 已有会话直接返回; 否则用保存的账号登录 (阻塞, 只在后台线程用)。
 pub fn ensure_login(net: &Client) -> Result<(), String> {
     if net.user().is_some() {
         return Ok(());
@@ -45,8 +45,8 @@ pub fn ensure_login(net: &Client) -> Result<(), String> {
             return Ok(());
         }
     }
-    let Some((email, password)) = account else { return Err("未登录 (在 bin/config.json 填写账号)".into()) };
-    net.login(&email, &password).map(|_| ()).map_err(|e| format!("登录失败: {e}"))
+    let Some((email, hash)) = account else { return Err("未登录".into()) };
+    net.login_hashed(&email, &hash).map(|_| ()).map_err(|e| format!("登录失败: {e}"))
 }
 
 /// 由配置建网络客户端 (session.json / visitor-id 与 Python 版共用)。

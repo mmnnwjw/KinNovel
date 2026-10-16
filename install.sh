@@ -6,24 +6,14 @@ TARGET="/mnt/us/extensions/kinnovel"
 
 mkdir -p "$TARGET"
 
-# 升级时保留设备上已有的用户配置(账号、字体、排版设置都存在这个文件里)
-CONFIG="$TARGET/bin/config.json"
-BACKUP="/tmp/kinnovel-config.json"
-rm -f "$BACKUP"
-if [ -f "$CONFIG" ]; then
-  cp "$CONFIG" "$BACKUP"
-fi
+# 设置和账号在 data/ (1.5 起), 安装包里没有, 覆盖安装不会动它们。
+# 1.4 及以前的 bin/config.json 也不在安装包里, 会原样留下, 第一次启动时由程序迁移到 data/。
 
 # 1.0 起是单个原生程序; 清理 0.8.x Python 版遗留的运行时 (约 40 MB)
 rm -rf "$TARGET/bin/src" "$TARGET/bin/lib" "$TARGET/bin/vendor"
 rm -f "$TARGET/bin/app.py" "$TARGET/bin/start.sh" "$TARGET/bin/image_worker.py" "$TARGET/bin/fb_snapshot.py"
 
 cp -R "$SCRIPT_DIR/bin" "$TARGET/"
-
-if [ -f "$BACKUP" ]; then
-  cp "$BACKUP" "$CONFIG"
-  rm -f "$BACKUP"
-fi
 
 cp "$SCRIPT_DIR/config.xml" "$TARGET/"
 cp "$SCRIPT_DIR/menu.json" "$TARGET/"

@@ -11,6 +11,7 @@ pub mod discover;
 pub mod history;
 pub mod image;
 pub mod light;
+pub mod login;
 pub mod me;
 pub mod notify;
 pub mod reader;

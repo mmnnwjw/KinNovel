@@ -13,6 +13,8 @@
 //!
 //! 使用: 页面在 `render` 里 `editor.render(...)` (底部 [`TextEditor::height`] 高的矩形),
 //! 在 `on_input` 里把落在 [`TextEditor::owns`] 范围内的命中交给 [`TextEditor::on_gesture`]。
+//! 输入框要放在别处 (登录页的表单) 时分开画: [`TextEditor::render_field`] + [`TextEditor::render_keys`]
+//! (高 [`TextEditor::keys_height`])。密码框用 [`TextEditor::set_masked`]。
 
 use kn_ime::Composer;
 use kn_platform::GestureKind;
@@ -73,6 +75,8 @@ pub struct TextEditor {
     shift: Shift,
     /// 符号层的页 (0 = 中文标点, 1 = ASCII)
     sym_page: u8,
+    /// 密码框: 输入框里每个字画成圆点
+    masked: bool,
     /// 候选翻页: 当前页第一个候选的下标, 及之前各页的起点 (往回翻用)
     cand_start: usize,
     cand_back: Vec<usize>,
@@ -99,6 +103,7 @@ impl TextEditor {
             symbols: false,
             shift: Shift::Off,
             sym_page: 0,
+            masked: false,
             cand_start: 0,
             cand_back: Vec::new(),
             cand_shown: 0,
@@ -115,6 +120,24 @@ impl TextEditor {
         self.cursor = self.text.len();
         self.composer_mut().clear();
         self.reset_candidates();
+    }
+
+    /// 输入框里的字画成圆点 (密码)。
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
+    /// 切到中文 (拼音) 或英文输入; 邮箱、密码默认英文。
+    pub fn set_chinese(&mut self, chinese: bool) {
+        self.finish();
+        self.chinese = chinese;
+        if self.symbols {
+            self.sym_page = if chinese { 0 } else { 1 };
+        }
     }
 
     pub fn is_composing(&self) -> bool {
@@ -137,6 +160,16 @@ impl TextEditor {
     pub fn height(m: &Metrics) -> u32 {
         // 上下各一个间距 + 输入框/候选行/五行键之间的间距
         field_h(m) + cand_h(m) + 5 * key_h(m) + 8 * gap(m)
+    }
+
+    /// 只有候选行 + 键盘 (输入框另画) 的高度。
+    pub fn keys_height(m: &Metrics) -> u32 {
+        cand_h(m) + 5 * key_h(m) + 7 * gap(m)
+    }
+
+    /// 输入框的高度。
+    pub fn field_height(m: &Metrics) -> u32 {
+        field_h(m)
     }
 
     fn composer_mut(&mut self) -> &mut Composer {
@@ -350,12 +383,25 @@ impl TextEditor {
         let g = gap(m) as i32;
         let side = m.margin as i32 / 2;
         frame.fill_rect(rect, theme.light);
-        let mut y = rect.y + g;
-
-        // 输入框
-        let field = Rect::new(rect.x + side, y, (rect.w as i32 - 2 * side).max(0) as u32, field_h(m));
+        let field = Rect::new(rect.x + side, rect.y + g, (rect.w as i32 - 2 * side).max(0) as u32, field_h(m));
         self.draw_field(ink, frame, hits, theme, m, field, placeholder);
-        y = field.bottom() + g;
+        let keys_y = field.bottom();
+        self.render_keys(ink, frame, hits, theme, m, Rect::new(rect.x, keys_y, rect.w, (rect.bottom() - keys_y).max(0) as u32), enter_label);
+    }
+
+    /// 只画输入框 (高 [`TextEditor::field_height`]), 带光标与清空按钮。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_field(&self, ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme, m: &Metrics, field: Rect, placeholder: &str) {
+        self.draw_field(ink, frame, hits, theme, m, field, placeholder);
+    }
+
+    /// 只画候选行 + 键盘 (`rect` 宽 = 屏宽, 高 = [`TextEditor::keys_height`])。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_keys(&mut self, ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme, m: &Metrics, rect: Rect, enter_label: &str) {
+        let g = gap(m) as i32;
+        let side = m.margin as i32 / 2;
+        frame.fill_rect(rect, theme.light);
+        let mut y = rect.y + g;
 
         // 候选行
         let cand = Rect::new(rect.x, y, rect.w, cand_h(m));
@@ -396,12 +442,13 @@ impl TextEditor {
             return;
         }
         let preedit = self.composer.as_ref().map_or("", |c| c.preedit()).to_string();
-        let after: String = self.text[self.cursor..].iter().collect();
+        let shown = |chars: &[char]| -> String { if self.masked { "●".repeat(chars.len()) } else { chars.iter().collect() } };
+        let after = shown(&self.text[self.cursor..]);
         // 放不下时从光标前面开始省略 (光标总在可见范围里)
         let mut skip = 0;
         let fixed = ink.width(&preedit, size) + ink.width("…", size);
         while skip < self.cursor {
-            let before: String = self.text[skip..self.cursor].iter().collect();
+            let before = shown(&self.text[skip..self.cursor]);
             let after_w = ink.width(&after, size).min(avail / 3.0);
             if ink.width(&before, size) + fixed + after_w <= avail {
                 break;
@@ -412,7 +459,7 @@ impl TextEditor {
         if skip > 0 {
             x += ink.text(frame, x as i32, top, "…", size, theme.muted);
         }
-        let before: String = self.text[skip..self.cursor].iter().collect();
+        let before = shown(&self.text[skip..self.cursor]);
         x += ink.text(frame, x as i32, top, &before, size, theme.foreground);
         if !preedit.is_empty() {
             let w = ink.text(frame, x as i32, top, &preedit, size, theme.foreground);

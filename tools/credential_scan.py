@@ -19,6 +19,8 @@ SECRET_PATTERNS = (
 )
 
 CONFIG_PASSWORD_PATTERN = re.compile(rb'"account_password"\s*:\s*"[^"]+"')
+# 1.5+: data/account.json (email + password hash)
+ACCOUNT_HASH_PATTERN = re.compile(rb'"password_sha256"\s*:\s*"[0-9a-f]{64}"')
 
 SENSITIVE_NAME_PATTERNS = (
     re.compile(r"^testaccount.*\.txt$", re.IGNORECASE),
@@ -57,6 +59,8 @@ def scan_file(path):
     if path.name == "config.json" and path.parent.name == "bin":
         if CONFIG_PASSWORD_PATTERN.search(data):
             findings.append((path, "non-empty account_password"))
+    if ACCOUNT_HASH_PATTERN.search(data):
+        findings.append((path, "saved account (password_sha256)"))
     return findings
 
 

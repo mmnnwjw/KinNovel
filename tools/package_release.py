@@ -7,7 +7,6 @@
 2. Collects the KUAL extension layout under `KinNovel/` inside the zip:
        KinNovel/bin/kinnovel        static armv7 binary (0755)
        KinNovel/bin/kinnovel.sh     launcher (0755)
-       KinNovel/bin/config.json     default settings (must not contain an account)
        KinNovel/{config.xml,menu.json,manifest.json,launch.sh,install.sh,uninstall.sh,
                  LICENSE,LICENSE-rime-pinyin-simp,LICENSE-NotoEmoji,README.md,THIRD-PARTY-NOTICES.md}
 3. Refuses to package anything that looks like a credential.
@@ -27,7 +26,6 @@ BINARY = ROOT / "rust" / "target" / "armv7-unknown-linux-musleabihf" / "release"
 FILES = [
     ("bin/kinnovel", BINARY),
     ("bin/kinnovel.sh", ROOT / "bin" / "kinnovel.sh"),
-    ("bin/config.json", ROOT / "bin" / "config.json"),
     ("config.xml", ROOT / "config.xml"),
     ("menu.json", ROOT / "menu.json"),
     ("manifest.json", ROOT / "manifest.json"),
@@ -67,13 +65,6 @@ def check_versions(v):
         sys.exit("config.xml version != %s" % v)
 
 
-def check_config():
-    config = json.loads((ROOT / "bin" / "config.json").read_text(encoding="utf-8"))
-    for key in ("account_email", "account_password"):
-        if config.get(key):
-            sys.exit("bin/config.json contains %s — refusing to package credentials" % key)
-
-
 def build():
     print("Building device binary ...")
     subprocess.run(["sh", str(ROOT / "rust" / "build.sh"), "kindle"], check=True)
@@ -85,7 +76,6 @@ def main():
         build()
     v = version()
     check_versions(v)
-    check_config()
     if not BINARY.is_file():
         sys.exit("missing %s (run without --no-build)" % BINARY)
     out_dir = Path(args[0]) if args else ROOT / "build"

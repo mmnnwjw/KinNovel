@@ -114,8 +114,8 @@ struct Inner {
     flight: Mutex<HashMap<String, Arc<Inflight>>>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     health: ServerHealth,
-    /// (email, password) from the app config; used to log in again when
-    /// both the access token and the refresh token are rejected.
+    /// (email, SHA-256 hex of the password) saved by the app; used to log in
+    /// again when both the access token and the refresh token are rejected.
     account: Mutex<Option<(String, String)>>,
     relogin: Mutex<Relogin>,
 }
@@ -188,7 +188,8 @@ impl Client {
     }
 
     /// Account to log in with again when the session is lost (refresh token
-    /// rejected); `None` disables the automatic re-login.
+    /// rejected), as (email, [`password_hash`]); `None` disables the
+    /// automatic re-login.
     pub fn set_account(&self, account: Option<(String, String)>) {
         *self.0.account.lock().unwrap() = account;
     }
@@ -337,15 +338,30 @@ impl Client {
     }
 
     pub fn login(&self, email: &str, password: &str) -> Result<Value, NetError> {
-        self.login_inner(email, password, false)
+        self.login_inner(email, &password_hash(password), false)
+    }
+
+    /// Like [`Client::login`], with the password already hashed
+    /// ([`password_hash`]; the server only ever sees the hash, so the app
+    /// can store that instead of the password).
+    pub fn login_hashed(&self, email: &str, hash: &str) -> Result<Value, NetError> {
+        self.login_inner(email, hash, false)
+    }
+
+    /// Forgets the session (tokens + user) and the re-login account.
+    pub fn logout(&self) -> Result<(), NetError> {
+        self.set_account(None);
+        self.0.hub.close();
+        self.0.cache.lock().unwrap().clear();
+        self.0.session.clear_credentials()
     }
 
     /// `nested` = called from the 401 handler: fetch the user straight from
     /// the hub so a second 401 can't recurse into another re-login.
-    fn login_inner(&self, email: &str, password: &str, nested: bool) -> Result<Value, NetError> {
+    fn login_inner(&self, email: &str, hash: &str, nested: bool) -> Result<Value, NetError> {
         let credentials = self.http_call(
             "/api/user/login",
-            Some(json!({"email": email, "password": sha256_hex(password)})),
+            Some(json!({"email": email, "password": hash})),
             "POST",
             None,
         )?;
@@ -584,7 +600,7 @@ impl Client {
     /// login and then reuse its outcome. Returns whether a usable session
     /// exists afterwards.
     fn relogin(&self) -> bool {
-        let Some((email, password)) = self.0.account.lock().unwrap().clone() else {
+        let Some((email, hash)) = self.0.account.lock().unwrap().clone() else {
             return false;
         };
         let mut state = self.0.relogin.lock().unwrap();
@@ -595,7 +611,7 @@ impl Client {
             }
         }
         state.last = Some(Instant::now());
-        state.ok = match self.login_inner(&email, &password, true) {
+        state.ok = match self.login_inner(&email, &hash, true) {
             Ok(_) => {
                 eprintln!("[net] 登录已失效, 已用配置的账号重新登录");
                 true
@@ -904,6 +920,12 @@ fn refresh_access_token_inner(inner: &Arc<Inner>) -> Result<Option<String>, NetE
     // free-function token-provider closure and the public method share one
     // code path.
     Client(inner.clone()).refresh_access_token()
+}
+
+/// What the login endpoint expects instead of the password: its SHA-256,
+/// lowercase hex (same as the web client).
+pub fn password_hash(password: &str) -> String {
+    sha256_hex(password)
 }
 
 fn sha256_hex(value: &str) -> String {
