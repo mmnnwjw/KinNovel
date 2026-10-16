@@ -192,6 +192,11 @@ impl Page<KinNovel> for ShelfPage {
         PageId(100)
     }
 
+    /// 本地数据读完、云端书架也回来了 (成功或失败)
+    fn ready(&self) -> bool {
+        self.data.is_some() && !self.cloud_loading
+    }
+
     fn enter(&mut self, cx: &mut Cx<KinNovel>, _returning: bool) {
         if let Some(text) = cx.app.startup_notice.take() {
             self.notice = Some(text);

@@ -1,7 +1,8 @@
 //! KinNovel 入口。
 //!
 //! - 设备上: `kinnovel` (由 KUAL 启动脚本拉起, 脚本负责暂停/恢复框架进程, 并设置 `KN_APP_DIR`)。
-//! - 主机上: `kinnovel --preview out.pgm [--read BOOK SORT] [--comic BOOK CHAPTER] [--login] [--sleep] [--tap X,Y]... [--long X,Y]... [--swipe left|right|up|down]...`
+//! - 主机上: `kinnovel --splash out.pgm [WxH]` 输出启动画面;
+//!   `kinnovel --preview out.pgm [--read BOOK SORT] [--comic BOOK CHAPTER] [--login] [--sleep] [--tap X,Y]... [--long X,Y]... [--swipe left|right|up|down]...`
 //!   用真实页面逻辑 (无显示/输入设备) 渲染最后一帧; `KN_APP_DIR` 指向一份设备缓存的拷贝。
 
 mod account;
@@ -12,6 +13,7 @@ mod covers;
 mod net;
 mod pages;
 mod sleep;
+mod splash;
 mod stats;
 mod store;
 mod tz;
@@ -69,6 +71,8 @@ pub struct KinNovel {
     pub tips_later: std::collections::HashSet<&'static str>,
     /// 本次运行已经显示过欢迎页 (之后回首页直接到书架)
     welcome_shown: bool,
+    /// 启动画面已经画在屏幕上 (设备上); 见 `startup_hold`
+    pub splash_shown: bool,
 }
 
 impl App for KinNovel {
@@ -101,6 +105,11 @@ impl App for KinNovel {
         });
     }
 
+    fn startup_hold(&self) -> Duration {
+        // 设备上画了启动画面: 首页数据到了再换掉它, 最多 2.5 s (之后照常显示「加载中」; KPW5 实测有会话时 0.8–2.2 s)
+        if self.splash_shown { Duration::from_millis(2500) } else { Duration::ZERO }
+    }
+
     fn take_transition(&mut self) -> kn_ui::Transition<Self> {
         if !self.net_client.take_account_rejected() {
             return kn_ui::Transition::None;
@@ -125,7 +134,7 @@ impl KinNovel {
         let account = account::load(&paths).map(|a| (a.email, a.password_hash));
         // 会话失效 (刷新令牌也被拒) 时由客户端用这个账号自动重新登录
         net_client.set_account(account);
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default(), welcome_shown: false }
+        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default(), welcome_shown: false, splash_shown: false }
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。
@@ -291,6 +300,11 @@ fn preview(args: &[String]) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     eprintln!("kinnovel {}", env!("CARGO_PKG_VERSION"));
+    if args.len() >= 3 && args[1] == "--splash" {
+        let (w, h) = args.get(3).and_then(|s| s.split_once('x')).and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))).unwrap_or((1236, 1648));
+        std::fs::write(&args[2], splash::render(w, h).to_pgm()).expect("write splash");
+        return;
+    }
     if args.len() >= 3 && args[1] == "--preview" {
         preview(&args[2..]);
         return;
@@ -324,6 +338,25 @@ fn run_device() {
         info.touch_mirror_x,
         info.touch_mirror_y
     );
+    // 测试钩子 KN_TEST_GSENSOR: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D)。
+    // 值为 "flip" 时假装框架没转过屏幕, 于是画面软件旋转 180° —— 在 KPW5 上倒着拿就能端到端验证。
+    let test_gsensor = std::env::var("KN_TEST_GSENSOR").ok();
+    let gsensor = info.has_gsensor() || test_gsensor.is_some();
+    // KOReader (Oasis / Scribe init): 启动时读 `com.lab126.winmgr accelerometer` (U/D/L/R) 定朝向。
+    // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来。横屏 (L/R) 只在系统阅读器里出现, 按正向处理。
+    let upside_down = gsensor && std::env::var("KN_ORIENTATION").as_deref() == Ok("D");
+    if gsensor {
+        let fb_upside_down = upside_down && test_gsensor.as_deref() != Some("flip");
+        eprintln!("[device] gsensor: upside_down={upside_down} fb_upside_down={fb_upside_down} (fb rota {})", info.fb_rota);
+        display.assume_fb_upside_down(fb_upside_down);
+        display.set_upside_down(upside_down);
+    }
+    // 启动画面: 先于字体/配置加载, 首页第一帧整屏闪刷时换掉
+    let started = std::time::Instant::now();
+    let full = kn_render::Rect::new(0, 0, info.width, info.height);
+    if let Err(e) = display.present(&splash::render(info.width, info.height), &kn_platform::RefreshRequest { rect: full, waveform: kn_platform::Waveform::Gc16, flash: true, swipe: None }) {
+        eprintln!("[splash] {e}");
+    }
     account::migrate_legacy_config(&paths);
     let config = Config::load(paths.settings_file());
     let mut fonts = FontStore::new();
@@ -346,6 +379,7 @@ fn run_device() {
     let light = kn_platform::Frontlight::detect(info.caps);
     let mut app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.startup_notice = crash_notice;
+    app.splash_shown = true;
     update::start(&app.paths, app.net(), app.config.bool("check_update", true));
     // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
     if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {
@@ -358,21 +392,12 @@ fn run_device() {
             .ok();
     }
     let mut input = InputReader::open(&info, GestureConfig::default()).expect("输入设备初始化失败");
-    // 测试钩子 KN_TEST_GSENSOR: 在没有重力感应的机型上也走这条路径 (配合 KN_ORIENTATION=D)。
-    // 值为 "flip" 时假装框架没转过屏幕, 于是画面软件旋转 180° —— 在 KPW5 上倒着拿就能端到端验证。
-    let test_gsensor = std::env::var("KN_TEST_GSENSOR").ok();
-    if info.has_gsensor() || test_gsensor.is_some() {
-        // KOReader (Oasis / Scribe init): 启动时读 `com.lab126.winmgr accelerometer` (U/D/L/R) 定朝向。
-        // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来。横屏 (L/R) 只在系统阅读器里出现, 按正向处理。
-        let upside_down = std::env::var("KN_ORIENTATION").as_deref() == Ok("D");
-        let fb_upside_down = upside_down && test_gsensor.as_deref() != Some("flip");
-        eprintln!("[device] gsensor: upside_down={upside_down} fb_upside_down={fb_upside_down} (fb rota {})", info.fb_rota);
-        display.assume_fb_upside_down(fb_upside_down);
-        display.set_upside_down(upside_down);
+    if gsensor {
         input.set_upside_down(upside_down);
     }
     let power = PowerMonitor::start();
     let scheduler = RefreshScheduler::new(info.width, info.height, policy);
+    eprintln!("[splash] 启动画面之后的初始化 {} ms", started.elapsed().as_millis());
     if let Err(e) = kn_ui::run(app, Box::new(display), fonts, input, power, scheduler) {
         eprintln!("[main] {}", e);
         std::process::exit(1);

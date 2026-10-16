@@ -59,6 +59,11 @@ pub trait App: Sized + 'static {
     fn sleep_screen(&mut self) -> Option<Box<dyn Page<Self>>> {
         None
     }
+    /// 启动画面 (应用在 `run` 之前自己画到屏幕上) 最多保留多久: 首页 [`Page::ready`] 之前不画第一帧,
+    /// 省掉一屏「加载中」。ZERO = 不等。
+    fn startup_hold(&self) -> Duration {
+        Duration::ZERO
+    }
     /// 启动后、首页进入之后调用一次 (例如用 `cx.spawn_app` 开始后台登录, 结果经任务池送回)。
     fn on_start(_cx: &mut Cx<Self>) {}
     /// 每个后台结果处理完后调用: 应用全局想做的导航 (例如保存的账号失效 → 登录页)。不支持 `Exit`。
@@ -203,6 +208,11 @@ impl<A: 'static> PagePoster<A> {
 pub trait Page<A: App> {
     /// 用于调试与"同类页面"判断。
     fn id(&self) -> PageId;
+
+    /// 首页的首批数据到了 (启动时运行时在启动画面上等它, 见 [`App::startup_hold`])。
+    fn ready(&self) -> bool {
+        true
+    }
 
     /// 进入页面 (首次进入 returning = false; 从上层返回 returning = true)。
     fn enter(&mut self, _cx: &mut Cx<A>, _returning: bool) {}
@@ -474,6 +484,44 @@ fn ms_to_next_minute() -> u64 {
 }
 
 /// 等待事件; 返回 (输入就绪, 电源就绪, 唤醒就绪)。主机上 (非 unix) 简单睡眠。
+/// 启动画面还在屏幕上: 只收后台结果, 等首页 `ready` 或 `App::startup_hold` 到时 (输入留给主循环)。
+fn hold_startup<A: App>(rt: &mut Runtime<A>, stack: &mut Stack<A>, waker: &Waker) {
+    let hold = rt.app.startup_hold();
+    if hold.is_zero() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while !stack.top().page.ready() {
+        let left = hold.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        if wait_waker(waker, left.as_millis() as u64 + 1) {
+            waker.drain();
+        }
+        let _ = stack.fire_timers(rt);
+        for delivery in rt.tasks.drain() {
+            stack.deliver(rt, delivery);
+        }
+    }
+    eprintln!("[startup] 启动画面上等首页 {} ms (ready={})", started.elapsed().as_millis(), stack.top().page.ready());
+}
+
+fn wait_waker(waker: &Waker, timeout_ms: u64) -> bool {
+    #[cfg(unix)]
+    {
+        let mut fd = libc::pollfd { fd: waker.fd(), events: libc::POLLIN, revents: 0 };
+        let rc = unsafe { libc::poll(&mut fd, 1, timeout_ms.min(i32::MAX as u64) as libc::c_int) };
+        rc > 0 && fd.revents != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = waker;
+        std::thread::sleep(Duration::from_millis(timeout_ms.min(20)));
+        true
+    }
+}
+
 fn wait(input: &InputReader, power: &PowerMonitor, waker: &Waker, timeout_ms: u64) -> (bool, bool, bool) {
     #[cfg(unix)]
     {
@@ -644,6 +692,7 @@ pub fn run<A: App>(
     stack.enter_top(&mut rt, false);
     let top = stack.top().instance;
     A::on_start(&mut rt.cx(top));
+    hold_startup(&mut rt, &mut stack, &waker);
 
     let mut frame = Bitmap::new(width, height, rt.app.theme().background);
     let mut events: Vec<InputEvent> = Vec::new();
@@ -655,6 +704,11 @@ pub fn run<A: App>(
     // 上一帧的配色: 日间/夜间切换后几乎每个像素都反转, 局部刷新残影很重, 要闪刷一次
     let mut last_theme = rt.app.theme();
     scheduler.set_background(last_theme.background);
+    if !rt.app.startup_hold().is_zero() {
+        // 屏幕上是启动画面, 调度器以为是空白: 第一帧整屏写入并闪刷
+        scheduler.invalidate();
+        rt.redraw = Some(RefreshHint::Flash);
+    }
     // 电源键按下时刻: 框架进程 (awesome 等) 被我们 SIGSTOP 时, powerd 进入屏保要向 winmgr 查询,
     // 查询会一直挂到超时, 设备根本睡不下去 (KPW5 FW 5.17 实测)。所以一看到电源键按下就先 SIGCONT 框架,
     // 让 powerd 的流程走完; 若 POWER_KEY_GRACE 内没进入屏保, 再暂停框架并重画。

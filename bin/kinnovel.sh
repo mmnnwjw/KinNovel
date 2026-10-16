@@ -39,12 +39,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCK_DIR/pid"
 
+# 一次 ls 列出所有进程的 fd 链接 (KPW5 上 0.15 s; 以前每个 fd 调一次 readlink 要 ~7 s)
 find_fb_users() {
-  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
-    for fd in /proc/$pid/fd/*; do
-      [ "$(readlink "$fd" 2>/dev/null)" = "$FB_DEV" ] && { echo "$pid"; break; }
-    done
-  done | sort -u
+  ls -l /proc/[0-9]*/fd/ 2>/dev/null | awk -v dev="$FB_DEV" '
+    /^\/proc\/[0-9]+\/fd/ { split($0, p, "/"); pid = p[3]; next }
+    $NF == dev { print pid }' | sort -u
 }
 
 resume_fb_users() {
