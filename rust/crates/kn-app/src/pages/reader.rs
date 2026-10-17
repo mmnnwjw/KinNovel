@@ -650,7 +650,7 @@ impl ReaderPage {
                 let result = crate::net::image_bytes(&paths, net.as_ref(), &url, h).and_then(|bytes| match bytes {
                     None => Ok(None),
                     Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h)))
-                        .map(|img| Some(img.fit_within(w, h)))
+                        .map(|img| Some(img.fit_within(w, h).dithered()))
                         .map_err(|e| e.to_string()),
                 });
                 ImageLoaded { url, size: (w, h), result }

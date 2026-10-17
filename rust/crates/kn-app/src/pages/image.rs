@@ -281,7 +281,7 @@ impl Page<KinNovel> for ImagePage {
                 if self.fit.is_none() {
                     let fw = ((src.width() as f32 * scale).round() as u32).max(1);
                     let fh = ((src.height() as f32 * scale).round() as u32).max(1);
-                    self.fit = Some(src.resize(fw, fh));
+                    self.fit = Some(src.resize(fw, fh).dithered());
                 }
                 let fit = self.fit.as_ref().expect("fit");
                 let x = (w as i32 - fit.width() as i32) / 2;
@@ -291,6 +291,7 @@ impl Page<KinNovel> for ImagePage {
                 let src_x = self.center.0 - w as f32 / 2.0 / scale;
                 let src_y = self.center.1 - h as f32 / 2.0 / scale;
                 src.sample_into(frame, Rect::new(0, 0, w, h), scale, src_x, src_y);
+                frame.dither16(Rect::new(0, 0, w, h));
             }
             if self.toolbar {
                 self.draw_toolbar(cx, frame);

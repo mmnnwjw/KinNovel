@@ -53,7 +53,7 @@ impl CoverCache {
             let (url, w, h) = (key.0.clone(), key.1, key.2);
             let result = crate::net::image_bytes(&paths, net.as_ref(), &url, h).and_then(|bytes| match bytes {
                 None => Ok(None),
-                Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h))).map(|img| Some(img.fit_within(w, h))).map_err(|e| e.to_string()),
+                Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h))).map(|img| Some(img.fit_within(w, h).dithered())).map_err(|e| e.to_string()),
             });
             CoverLoaded { key, result }
         });

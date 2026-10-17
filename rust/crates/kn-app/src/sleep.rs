@@ -113,7 +113,7 @@ impl Page<KinNovel> for SleepPage {
         });
         let image = cover.and_then(|url| cached_cover(&cx.app.paths, &url, cx.height)).and_then(|bytes| {
             let (bw, bh) = ((w - 2 * side) as u32, cover_height(cx.height));
-            kn_render::decode_gray(&bytes, Some((bw, bh))).ok().map(|img| img.fit_within(bw, bh))
+            kn_render::decode_gray(&bytes, Some((bw, bh))).ok().map(|img| img.fit_within(bw, bh).dithered())
         });
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };

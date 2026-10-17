@@ -636,6 +636,28 @@ impl Bitmap {
         }
     }
 
+    /// 图片用: 把 `rect` 区域按 8x8 有序抖动 (Bayer) 量化到墨水屏的 16 级灰 (0x00, 0x11, ..., 0xFF)。
+    /// 不抖动时面板按自己的规则截断, JPEG 噪点让 254/255 混杂的 "白" 底显示成浅灰底上的白斑,
+    /// 渐变也会出色带 (KOReader 在 Kindle 上同样对图片抖动)。抖动相位取位图坐标。
+    pub fn dither16(&mut self, rect: Rect) {
+        let Some(r) = rect.intersect(&self.bounds()) else { return };
+        let lut = dither_lut();
+        for y in r.y as u32..r.y as u32 + r.h {
+            let lrow = &lut[(y as usize & 7) * 8 * 256..][..8 * 256];
+            let row = &mut self.row_mut(y)[r.x as usize..r.x as usize + r.w as usize];
+            let x0 = r.x as usize;
+            for (i, p) in row.iter_mut().enumerate() {
+                *p = lrow[((x0 + i) & 7) * 256 + *p as usize];
+            }
+        }
+    }
+
+    /// 整张图 [`dither16`](Self::dither16), 便于链式调用 (`decode → fit_within → dithered`)。
+    pub fn dithered(mut self) -> Bitmap {
+        self.dither16(self.bounds());
+        self
+    }
+
     /// 导出为二进制 PGM (P5), 便于在主机上查看/测试快照。
     pub fn to_pgm(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + self.width as usize * self.height as usize);
@@ -645,6 +667,34 @@ impl Bitmap {
         }
         out
     }
+}
+
+/// `dither16` 的查表: [Bayer 行 y&7][列 x&7][灰度] → 16 级之一。
+/// 级别 = floor(v * 15 / 255 + (t + 0.5) / 64), t = 8x8 Bayer 阈值 0..64。
+fn dither_lut() -> &'static [u8] {
+    static LUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        const B: [[u32; 8]; 8] = [
+            [0, 32, 8, 40, 2, 34, 10, 42],
+            [48, 16, 56, 24, 50, 18, 58, 26],
+            [12, 44, 4, 36, 14, 46, 6, 38],
+            [60, 28, 52, 20, 62, 30, 54, 22],
+            [3, 35, 11, 43, 1, 33, 9, 41],
+            [51, 19, 59, 27, 49, 17, 57, 25],
+            [15, 47, 7, 39, 13, 45, 5, 37],
+            [63, 31, 55, 23, 61, 29, 53, 21],
+        ];
+        let mut lut = Vec::with_capacity(64 * 256);
+        for row in &B {
+            for &t in row {
+                for v in 0..256u32 {
+                    let level = (v * 15 * 128 + (2 * t + 1) * 255) / (255 * 128);
+                    lut.push((level.min(15) * 17) as u8);
+                }
+            }
+        }
+        lut
+    })
 }
 
 /// 单像素覆盖率混合: round((d * (255 - cov) + c * cov) / 255), 精确舍入。
@@ -770,6 +820,33 @@ fn blend(dst: u8, color: u8, coverage: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dither16_quantizes_to_panel_levels() {
+        let mut b = Bitmap::new(16, 16, 254);
+        b.dither16(b.bounds());
+        let px: Vec<u8> = (0..16).flat_map(|y| b.row(y).to_vec()).collect();
+        // 只出现面板的 16 级灰; 254 几乎全白
+        assert!(px.iter().all(|&v| v % 17 == 0));
+        let white = px.iter().filter(|&&v| v == 255).count();
+        assert!(white >= 240, "{white}");
+        for v in [0u8, 17, 136, 255] {
+            let mut b = Bitmap::new(8, 8, v);
+            b.dither16(b.bounds());
+            assert!((0..8).all(|y| b.row(y).iter().all(|&p| p == v)), "{v}");
+        }
+        // 8x8 块的平均灰度不变
+        for v in [30u8, 100, 200, 247] {
+            let mut b = Bitmap::new(8, 8, v);
+            b.dither16(b.bounds());
+            let sum: u32 = (0..8).flat_map(|y| b.row(y).to_vec()).map(|p| p as u32).sum();
+            assert!((sum as f32 / 64.0 - v as f32).abs() <= 1.0, "{v}: {}", sum as f32 / 64.0);
+        }
+        // 只改 rect 内
+        let mut b = Bitmap::new(8, 8, 100);
+        b.dither16(Rect::new(0, 0, 4, 8));
+        assert!((0..8).all(|y| b.row(y)[4..].iter().all(|&p| p == 100)));
+    }
+
     #[test]
     fn sample_into_scales_and_offsets() {
         // 2x1 源: 黑, 白; 放大 2 倍到 4x1
