@@ -505,7 +505,7 @@ impl ShelfPage {
                         match entry {
                             ShelfEntry::Book(book) => {
                                 let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-                                widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
+                                widgets::list_row_cover_badged(&mut ink, frame, &theme, &m, r, img, &book.badge(), &book.title, &book.subtitle(), &book.last_update);
                             }
                             ShelfEntry::Folder { title, count, .. } => {
                                 widgets::list_row_cover(&mut ink, frame, &theme, &m, r, None, title, &format!("文件夹 · {count} 项"), "");

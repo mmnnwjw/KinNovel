@@ -58,6 +58,13 @@ fn obj_of<'a>(v: &'a Value, key: &str) -> &'a Value {
     get(v, key).unwrap_or(&NULL)
 }
 
+/// 书目条目的 `Category: {ShortName, Name, Color}` → 角标文字 (简称优先, 缩略图很窄)。
+fn category_label(v: &Value) -> String {
+    let c = obj_of(v, "Category");
+    let short = str_of(c, "ShortName");
+    if short.is_empty() { str_of(c, "Name") } else { short }
+}
+
 fn arr_of<'a>(v: &'a Value, key: &str) -> Vec<&'a Value> {
     get(v, key).and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default()
 }
@@ -92,6 +99,11 @@ pub struct BookItem {
     pub comic: bool,
     /// 漫画列表条目的 `Count` (话数); 其它接口为 0
     pub count: i64,
+    /// 封面角标 (网页 BookCard): 分类简称 (`Category.ShortName`, 没有时用 `Name`); 空 = 不显示
+    pub category: String,
+    /// 阅读等级 `Level` / 书籍内部等级 `InteriorLevel`; 0 = 无
+    pub level: i64,
+    pub interior_level: i64,
 }
 
 impl BookItem {
@@ -110,6 +122,9 @@ impl BookItem {
             favorite: i64_of(v, "Favorite"),
             comic: is_kind(v, "comic"),
             count: i64_of(v, "Count"),
+            category: category_label(v),
+            level: i64_of(v, "Level"),
+            interior_level: i64_of(v, "InteriorLevel"),
         }
     }
 
@@ -117,6 +132,17 @@ impl BookItem {
     /// `{Id, Title, Cover, Count, LastUpdatedAt}`, 按系列聚合, `Id` 是系列里的一本。
     pub fn parse_comic(v: &Value) -> BookItem {
         BookItem { comic: true, ..BookItem::parse(v) }
+    }
+
+    /// 书名前的小框: 分类简称 · Level N (网页 BookCard 的封面角标; 有书籍内部等级时显示它, 与网页一致)。
+    pub fn badge(&self) -> String {
+        let level = if self.interior_level > 0 { self.interior_level } else { self.level };
+        match (self.category.is_empty(), level > 0) {
+            (false, true) => format!("{} · Level {level}", self.category),
+            (false, false) => self.category.clone(),
+            (true, true) => format!("Level {level}"),
+            (true, false) => String::new(),
+        }
     }
 
     /// 列表行的副标题: 漫画显示话数, 小说显示作者 (没有作者时显示最新章节)。
@@ -231,6 +257,9 @@ impl BookInfo {
             favorite: i64_of(book_v, "Favorite"),
             comic: is_kind(book_v, "comic"),
             count: 0,
+            category: category_label(book_v),
+            level: i64_of(book_v, "Level"),
+            interior_level: i64_of(book_v, "InteriorLevel"),
         };
         let tags = arr_of(classification, "tags").into_iter().filter_map(Value::as_str).map(str::to_string).collect();
         let mut series_name = str_of(v, "SeriesTitle");
@@ -1411,6 +1440,20 @@ mod tests {
         let p2 = parse_list_page(&bare, 3);
         assert_eq!(p2.items.len(), 1);
         assert_eq!(p2.page, 3);
+    }
+
+    #[test]
+    fn book_item_badges() {
+        let v = json!({"Id": 1, "Title": "t", "Level": 2, "InteriorLevel": 0,
+            "Category": {"ShortName": "轻小说", "Name": "轻小说文库", "Color": "#fff"}});
+        let b = BookItem::parse(&v);
+        assert_eq!((b.category.as_str(), b.level, b.interior_level), ("轻小说", 2, 0));
+        let b = BookItem::parse(&json!({"Id": 2, "Category": {"Name": "原创"}}));
+        assert_eq!(b.category, "原创");
+        assert_eq!(BookItem::parse(&json!({"Id": 3})).category, "");
+        assert_eq!(BookItem::parse(&v).badge(), "轻小说 · Level 2");
+        assert_eq!(BookItem::parse(&json!({"Id": 4, "Level": 1, "InteriorLevel": 5})).badge(), "Level 5");
+        assert_eq!(BookItem::parse(&json!({"Id": 3})).badge(), "");
     }
 
     #[test]

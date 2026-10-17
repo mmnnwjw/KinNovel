@@ -279,6 +279,13 @@ pub fn cover_slot(m: &Metrics, rect: Rect) -> Rect {
 /// `cover` 为 `None` 时画一个细描边圆角占位框 (不画内容, 与 UI-DESIGN 的约定一致)。
 #[allow(clippy::too_many_arguments)]
 pub fn list_row_cover(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, rect: Rect, cover: Option<&Bitmap>, title: &str, subtitle: &str, meta: &str) {
+    list_row_cover_badged(ink, frame, theme, m, rect, cover, "", title, subtitle, meta);
+}
+
+/// 同 [`list_row_cover`], 书名前面多一个灰底圆角小框写 `badge` (书目的分类 / 等级, 对应网页 BookCard
+/// 封面上的角标; 放在书名前不挡封面)。`badge` 为空时不画。
+#[allow(clippy::too_many_arguments)]
+pub fn list_row_cover_badged(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metrics, rect: Rect, cover: Option<&Bitmap>, badge: &str, title: &str, subtitle: &str, meta: &str) {
     let side = m.margin as i32;
     let pad = side / 2;
     let cover_rect = cover_slot(m, rect);
@@ -295,8 +302,22 @@ pub fn list_row_cover(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Metr
     let title_h = (m.body * 1.25) as i32;
     let sub_h = (m.small * 1.25) as i32;
     let mut y = rect.y + pad;
-    let fitted_title = ink.fit(title, m.body, text_w);
-    ink.text(frame, text_x, y, &fitted_title, m.body, theme.foreground);
+    let mut title_x = text_x;
+    if !badge.is_empty() {
+        let size = m.tiny;
+        let bh = (size * 1.4).round() as i32;
+        let inner = (size * 0.4).round() as i32;
+        let bw = (ink.width(badge, size).ceil() as i32 + 2 * inner).min((text_w as i32 / 2).max(0));
+        // 与书名同一行竖直居中
+        let by = y + (title_h - bh) / 2 - bh / 12;
+        let r = Rect::new(text_x, by, bw.max(0) as u32, bh as u32);
+        frame.rounded_rect(r, (m.radius / 2).max(4), Some(theme.light), None, 0);
+        // 汉字字面偏下, 文字略往上提
+        ink.text_centered(frame, Rect::new(r.x, r.y - bh / 10, r.w, r.h), badge, size, theme.foreground);
+        title_x += bw + inner;
+    }
+    let fitted_title = ink.fit(title, m.body, (text_x as f32 + text_w - title_x as f32).max(0.0));
+    ink.text(frame, title_x, y, &fitted_title, m.body, theme.foreground);
     y += title_h + (m.small * 0.3) as i32;
     if !subtitle.is_empty() {
         let fitted = ink.fit(subtitle, m.small, text_w);

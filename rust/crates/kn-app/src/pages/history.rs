@@ -283,7 +283,7 @@ impl Page<KinNovel> for HistoryPage {
             }
             let cover_rect = widgets::cover_slot(&m, r);
             let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-            widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), &book.last_update);
+            widgets::list_row_cover_badged(&mut ink, frame, &theme, &m, r, img, &book.badge(), &book.title, &book.subtitle(), &book.last_update);
             cx.hits.add(HitId(ROW_BASE + row as u32), r);
         }
         if !self.pages.contains_key(&(self.kind, self.page)) {

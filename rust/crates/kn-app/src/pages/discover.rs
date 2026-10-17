@@ -254,7 +254,7 @@ impl DiscoverPage {
             }
             let cover_rect = widgets::cover_slot(m, r);
             let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
-            widgets::list_row_cover(ink, frame, theme, m, r, img, &book.title, &book.subtitle(), &book.last_update);
+            widgets::list_row_cover_badged(ink, frame, theme, m, r, img, &book.badge(), &book.title, &book.subtitle(), &book.last_update);
             hits.add(HitId(ROW_BASE + row as u32), r);
         }
     }

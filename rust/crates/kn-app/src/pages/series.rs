@@ -189,7 +189,7 @@ impl Page<KinNovel> for SeriesPage {
             let img = self.covers.get(&book.cover, cover_rect.w, cover_rect.h);
             let current = book.id == self.current_book_id;
             let meta = if current { "当前书籍" } else { "" };
-            widgets::list_row_cover(&mut ink, frame, &theme, &m, r, img, &book.title, &book.subtitle(), meta);
+            widgets::list_row_cover_badged(&mut ink, frame, &theme, &m, r, img, &book.badge(), &book.title, &book.subtitle(), meta);
             cx.hits.add(HitId(ROW_BASE + row as u32), r);
         }
         if self.total_pages > 1 {

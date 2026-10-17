@@ -101,6 +101,7 @@ All components draw immediately into the frame and register hits; they never kee
 - **header** `(title, status, back)` — `touch × 1.1` high, `light` fill, hairline below. Back = left square hit; status (time · battery) right-aligned `tiny`.
 - **tab_bar** `(tabs, active)` — bottom, `touch × 1.15` high, hairline above; active tab: black fill + white label; others: label only. No icons (font glyph coverage is unreliable).
 - **list_row** `(title, subtitle, meta, cover?)` — height `touch × 1.35` (`× 1.9` with cover). Title `body`, one line, ellipsis; subtitle `small muted`; meta right-aligned `small muted`; hairline separator inset by `margin`. Whole row is the hit target with press feedback.
+- **list_row_cover_badged** (book rows; the web client's `BookCard.vue` cover badges) — a small rounded box filled with `light` grey before the title, `tiny` text: category short name, plus ` · Level N` (interior level if set, else reading level, like the web). Kept off the cover so it never hides the artwork.
 - **pager** `(page, pages)` — footer `touch` high: `‹ 上一页` · `n / m` · `下一页 ›` (text buttons, disabled at the ends). Swipe up = next page, swipe down = previous page. Page size = rows that fit; never partial rows.
 - **segmented** `(options, active)` — row of equal buttons, active = Primary, others = Secondary.
 - **card** — rounded rect, 2 px `foreground` border, `margin/2` padding. Used for "继续阅读" and the account card.
