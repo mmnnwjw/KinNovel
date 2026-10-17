@@ -225,6 +225,13 @@ pub struct FbinkDisplay {
     sw: Rotation,
     /// 软件旋转时的缓冲 (转好的区域)
     row: Vec<u8>,
+    /// 可能还在进行的刷新, 见 `present`
+    inflight: Vec<Inflight>,
+    /// 提交前等待重叠的进行中刷新 (见 `present`); KN_EPDC_WAIT=0 关掉 (对比测试用)
+    epdc_wait: bool,
+    /// 启动时关掉了 MTK 驱动的自动 REAGL, 退出时要恢复
+    auto_reagl_off: bool,
+    debug: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -297,6 +304,12 @@ impl FbinkDisplay {
             caps,
         };
 
+        // MTK 驱动默认会把局部刷新悄悄升级成 REAGL (hwtcon auto_waveform_replacement), 我们选的 GC16/DU
+        // 就不一定是实际用的波形了。KOReader 在所有 MTK Kindle 上启动时关掉它 (_MTK_ToggleFastMode(true)),
+        // 退出时恢复。KN_AUTO_REAGL=1 保留驱动默认 (对比测试用)。
+        let auto_reagl_off = is_mtk && std::env::var_os("KN_AUTO_REAGL").is_none_or(|v| v == "0")
+            && unsafe { ffi::shim_mtk_toggle_auto_reagl(fbfd, 0) } >= 0;
+
         Ok(FbinkDisplay {
             fbfd,
             info,
@@ -308,6 +321,10 @@ impl FbinkDisplay {
             rotation: Rotation::UPRIGHT,
             sw: Rotation::UPRIGHT,
             row: Vec::new(),
+            inflight: Vec::new(),
+            epdc_wait: std::env::var_os("KN_EPDC_WAIT").is_none_or(|v| v != "0"),
+            auto_reagl_off,
+            debug: std::env::var_os("KN_DEBUG").is_some(),
         })
     }
 
@@ -319,6 +336,33 @@ impl FbinkDisplay {
     /// `framebuffer.py` 同样对 MTK 翻页直接使用 REAGL/GLR16), 所以 MTK 上也
     /// 直接用 `WFM_REAGL`, 不要降级到 GL16。只有在 `!supports_reagl` (legacy
     /// einkfb 机型, 不支持 REAGL) 时才降级到 GL16。
+    /// 等 `marker` 刷完, 并把它从进行中列表里去掉。
+    fn wait_marker(&mut self, marker: u32, why: &str) {
+        let started = std::time::Instant::now();
+        unsafe {
+            crate::ffi::shim_wait_for_complete(self.fbfd, marker);
+        }
+        self.inflight.retain(|u| u.marker != marker);
+        if self.debug {
+            eprintln!("[epdc] wait {why} #{marker}: {:.1} ms", started.elapsed().as_secs_f32() * 1e3);
+        }
+    }
+
+    /// 等与 `rect` (面板坐标) 重叠、可能还没刷完的刷新; `flash_only` 时只等闪刷。
+    fn wait_overlapping(&mut self, rect: Rect, flash_only: bool) {
+        let now = std::time::Instant::now();
+        self.inflight.retain(|u| now.duration_since(u.at) < INFLIGHT_MAX);
+        let overlapping: Vec<u32> = self
+            .inflight
+            .iter()
+            .filter(|u| (u.flash || !flash_only) && u.rect.intersect(&rect).is_some_and(|i| !i.is_empty()))
+            .map(|u| u.marker)
+            .collect();
+        for m in overlapping {
+            self.wait_marker(m, "overlap");
+        }
+    }
+
     fn map_waveform(&self, wf: Waveform) -> std::os::raw::c_int {
         use crate::ffi::*;
         match wf {
@@ -348,6 +392,19 @@ impl FbinkDisplay {
         self.set_rotation(self.rotation);
     }
 }
+
+/// 提交后可能还没刷完的一次刷新 (面板坐标)。
+#[cfg(target_os = "linux")]
+struct Inflight {
+    marker: u32,
+    rect: Rect,
+    flash: bool,
+    at: std::time::Instant,
+}
+
+/// 超过这么久的刷新一定已经完成 (最慢的整屏 GC16 闪刷 KPW5 实测约 0.5 s)。
+#[cfg(target_os = "linux")]
+const INFLIGHT_MAX: std::time::Duration = std::time::Duration::from_millis(1500);
 
 // MTK_SWIPE_DIRECTION_INDEX_E (fbink.h ~534-542): DOWN=0, UP=1, LEFT=2,
 // RIGHT=3 (matches Python `framebuffer.py`'s `SWIPE_MTK` table). Duplicated
@@ -390,6 +447,17 @@ impl Display for FbinkDisplay {
         }
         let rot = self.sw;
         let fb_rect = rot.to_panel_rect(rect, panel);
+
+        // 新刷新和还在进行的刷新区域重叠时会撞在一起 (典型: 按下反馈的 DU 还没刷完, 抬手就跳页闪刷),
+        // 闪刷之后旧画面仍留着淡淡的字 (KPW5 相机实拍: 发现页点开书籍详情, 封面旁留下列表行的书名)。
+        // KOReader mxc_update 在 REAGL / GC16 / 整屏闪刷之前等上一次刷新完成; 它的界面刷新用 AUTO, 不受影响。
+        // 我们界面也用 GC16, 照搬会让一帧里不相交的几个区域互相排队, 所以只等重叠的。
+        // 按下反馈 (DU/A2) 只等重叠的闪刷 (闪刷不再就地等完, 见下), 其余不等, 保证跟手。
+        // 放在写帧缓冲之前: 上一次刷新可能还没被驱动取走画面。
+        let wfm = self.map_waveform(req.waveform);
+        if self.epdc_wait {
+            self.wait_overlapping(fb_rect, wfm == crate::ffi::WFM_DU || wfm == crate::ffi::WFM_A2);
+        }
 
         // 只拷贝区域内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
         // 旋转时先在内存里把区域转好 (帧缓冲不宜逐像素跳着写)。
@@ -446,7 +514,6 @@ impl Display for FbinkDisplay {
             }
         }
 
-        let wfm = self.map_waveform(req.waveform);
         // i.MX 机型的 REAGL 必须配 UPDATE_MODE_FULL (fbink.c: "REAGL should always be paired with FULL",
         // 由调用方负责; KOReader 同样处理), REAGL 的 FULL 不闪。MTK 上 REAGL + PARTIAL 已实测正常, 保持不变。
         let full = req.flash || (wfm == crate::ffi::WFM_REAGL && !self.info.is_mtk);
@@ -468,6 +535,9 @@ impl Display for FbinkDisplay {
         // 返回内核实际的 marker, wait_complete 才能真正等到这次刷新完成
         let marker = unsafe { ffi::shim_get_last_marker() };
         self.next_marker = marker;
+        // KOReader 在 FULL 刷新提交后就地等它完成。我们一帧里常有几块不相交的区域闪刷 (清深色块),
+        // 就地等会让它们排队 (关弹窗 0.74 s、打开书 1.2 s); 只记下来, 之后重叠的刷新 (含按下反馈) 再等。
+        self.inflight.push(Inflight { marker, rect: fb_rect, flash: full, at: std::time::Instant::now() });
         Ok(marker)
     }
 
@@ -484,6 +554,12 @@ impl Display for FbinkDisplay {
         if rc < 0 {
             return Err(std::io::Error::from_raw_os_error(-rc));
         }
+        // 框架运行期间 (屏保) 可能改过这个全局开关, 重新关掉
+        if self.auto_reagl_off {
+            unsafe { ffi::shim_mtk_toggle_auto_reagl(self.fbfd, 0) };
+        }
+        // 屏保期间之前的刷新早已完成
+        self.inflight.clear();
         let mut state = ffi::ShimState::default();
         unsafe { ffi::shim_get_state(self.fbfd, &mut state as *mut ffi::ShimState) };
         let mut fb_size: usize = 0;
@@ -516,6 +592,9 @@ impl Drop for FbinkDisplay {
     fn drop(&mut self) {
         use crate::ffi;
         unsafe {
+            if self.auto_reagl_off {
+                ffi::shim_mtk_toggle_auto_reagl(self.fbfd, 1);
+            }
             ffi::shim_fbink_close(self.fbfd);
         }
     }
