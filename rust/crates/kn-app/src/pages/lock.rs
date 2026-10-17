@@ -4,11 +4,14 @@
 //! - 设置页: 开启 = 输两遍新密码; 关闭 / 修改 = 先输当前密码。
 //! 输满 6 位自动验证, 不用按确认; 错了清空重输。解锁时左下角是「退出」(框架暂停着, 忘了密码也能回到系统),
 //! 设置流程里是「取消」。
+//!
+//! 样子是居中的弹窗 (参照 KOReader 的 screenlockpin 插件): 启动 / 唤醒时背景就是屏幕上原来的画面
+//! (启动画面 / 屏保, 从帧缓冲读回, `Backdrop::Screen`), 设置流程里是设置页 (`Backdrop::Below`); 只刷新弹窗。
 
 use kn_platform::{GestureKind, InputEvent};
 use kn_render::{Bitmap, Point, Rect};
-use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
+use kn_ui::widgets::{self, Ink};
+use kn_ui::{Backdrop, Cx, HitId, Page, PageId, RefreshHint, Transition};
 use serde_json::Value;
 
 use crate::KinNovel;
@@ -50,11 +53,14 @@ pub struct LockPage {
     digits: String,
     /// 提示行显示的错误 (密码错误 / 两次不一致)
     message: Option<&'static str>,
+    /// 弹窗后面的画面; 运行时给过一次之后不再要
+    backdrop: Option<Bitmap>,
+    backdrop_set: bool,
 }
 
 impl LockPage {
     fn with(mode: Mode) -> Self {
-        LockPage { mode, digits: String::new(), message: None }
+        LockPage { mode, digits: String::new(), message: None, backdrop: None, backdrop_set: false }
     }
 
     pub fn startup() -> Self {
@@ -106,10 +112,13 @@ impl LockPage {
         match self.mode.clone() {
             Mode::Unlock { resume } if correct => {
                 cx.app.unlock();
+                // 换成完整的页面 (背景是启动画面 / 屏保): 整屏闪刷
+                cx.request_redraw(RefreshHint::Flash);
                 return if resume { Transition::Back } else { Transition::Home };
             }
             Mode::Verify(After::Disable) if correct => {
                 cx.app.config.set("lock_pin", Value::from(""));
+                cx.request_redraw(RefreshHint::Clean);
                 return Transition::Back;
             }
             Mode::Verify(After::Change) if correct => self.mode = Mode::New,
@@ -119,6 +128,7 @@ impl LockPage {
                 cx.app.config.set("lock_pin", Value::from(entered));
                 // 本次运行已经在用了, 不必马上再解锁
                 cx.app.unlock();
+                cx.request_redraw(RefreshHint::Clean);
                 return Transition::Back;
             }
             Mode::Confirm(_) => {
@@ -135,38 +145,61 @@ impl Page<KinNovel> for LockPage {
         PageId(195)
     }
 
+    /// 弹窗只刷新自己那块, 进来时不闪
+    fn flash_on_enter(&self) -> bool {
+        false
+    }
+
+    fn wants_backdrop(&self) -> Backdrop {
+        match self.mode {
+            _ if self.backdrop_set => Backdrop::None,
+            Mode::Unlock { .. } => Backdrop::Screen,
+            _ => Backdrop::Below,
+        }
+    }
+
+    fn set_backdrop(&mut self, backdrop: Option<Bitmap>) {
+        self.backdrop = backdrop;
+        self.backdrop_set = true;
+    }
+
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
         let theme = cx.theme;
         let m = cx.app.metrics;
+        let (w, h) = (cx.width, cx.height);
+        match &self.backdrop {
+            Some(bg) if bg.width() == w && bg.height() == h => frame.blit(bg, bg.bounds(), 0, 0),
+            // 读不回屏幕时 (主机预览等): 启动用启动画面, 其余用纯底色
+            _ if self.mode == (Mode::Unlock { resume: false }) => {
+                let splash = crate::splash::render(w, h);
+                frame.blit(&splash, splash.bounds(), 0, 0);
+            }
+            _ => frame.fill_rect(frame.bounds(), theme.background),
+        }
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-        let (w, h) = (cx.width as i32, cx.height as i32);
-        let side = m.margin as i32;
 
-        // 时间与日期
-        let utc = crate::store::unix_now();
-        let local = utc + crate::tz::local_utc_offset_secs(utc);
-        let (days, minutes) = (local.div_euclid(86_400), local.rem_euclid(86_400) / 60);
-        let (_, month, day) = crate::stats::civil_from_days(days);
-        // 1970-01-01 是星期四
-        let weekday = ["四", "五", "六", "日", "一", "二", "三"][days.rem_euclid(7) as usize];
-        let mut y = h / 9;
-        let hero_h = (m.hero * 1.3) as i32;
-        ink.text_centered(frame, Rect::new(0, y, w as u32, hero_h as u32), &format!("{:02}:{:02}", minutes / 60, minutes % 60), m.hero, theme.foreground);
-        y += hero_h;
-        let small_h = (m.small * 1.4) as i32;
-        let date = format!("{month} 月 {day} 日 · 星期{weekday}");
-        ink.text_centered(frame, Rect::new(0, y, w as u32, small_h as u32), &date, m.small, theme.muted);
-        y += small_h + m.margin as i32 * 2;
+        // 卡片: 提示 + 圆点, 下面 3x4 键格 (细线分隔); 框外点击吞掉
+        // 尺寸照 screenlockpin 的 40% 缩放: 键格约占屏宽 62%, 键高约为键宽的 0.57 (KPW5: 255 x 145 px),
+        // 按屏宽走, 大屏 (Scribe) 不会因为界面缩放的上限变扁; 小屏至少 1.2 个触控高度
+        let key_w = (w as f32 * 0.62 / 3.0) as i32;
+        let key_h = ((key_w as f32 * 0.57) as i32).max((m.touch as f32 * 1.2) as i32);
+        let card_w = (key_w * 3).min(w as i32 - 2 * m.margin as i32);
+        let key_w = card_w / 3;
+        let head_h = (m.body * 1.4) as i32 + (m.body * 0.55) as i32 + m.margin as i32 * 2;
+        let card_h = head_h + key_h * 4;
+        let card = Rect::new((w as i32 - card_w) / 2, (h as i32 - card_h) / 2, card_w as u32, card_h as u32);
+        cx.hits.add(HitId(u32::MAX), Rect::new(0, 0, w, h)).no_feedback();
+        widgets::card(frame, &theme, &m, card);
 
-        // 提示 + 圆点
         let body_h = (m.body * 1.4) as i32;
-        ink.text_centered(frame, Rect::new(0, y, w as u32, body_h as u32), self.prompt(), m.body, theme.foreground);
-        y += body_h + m.margin as i32 / 2;
+        let mut y = card.y + m.margin as i32 * 3 / 4;
+        ink.text_centered(frame, Rect::new(card.x, y, card.w, body_h as u32), self.prompt(), m.body, theme.foreground);
+        y += body_h + m.margin as i32 / 4;
         let dot = (m.body * 0.55) as i32;
         let gap = dot;
         let total = PIN_LEN as i32 * dot + (PIN_LEN as i32 - 1) * gap;
-        let mut x = (w - total) / 2;
+        let mut x = card.x + (card_w - total) / 2;
         for i in 0..PIN_LEN {
             let r = Rect::new(x, y, dot as u32, dot as u32);
             let filled = i < self.digits.len();
@@ -174,26 +207,30 @@ impl Page<KinNovel> for LockPage {
             x += dot + gap;
         }
 
-        // 数字键盘: 1-9, 退出 (设置流程里是取消) 0 删除
-        let key_h = (m.touch as f32 * 1.1) as i32;
-        let key_gap = m.margin as i32 / 2;
-        let pad_w = (w - 2 * side).min(m.touch as i32 * 6);
-        let key_w = (pad_w - 2 * key_gap) / 3;
-        let pad_h = 4 * key_h + 3 * key_gap;
-        let top = h - side * 2 - pad_h;
-        let left = (w - pad_w) / 2;
+        let top = card.y + head_h;
         let exit = if self.unlocking() { "退出" } else { "取消" };
         for (i, label) in ["1", "2", "3", "4", "5", "6", "7", "8", "9", exit, "0", "删除"].iter().enumerate() {
             let (col, row) = ((i % 3) as i32, (i / 3) as i32);
-            let r = Rect::new(left + col * (key_w + key_gap), top + row * (key_h + key_gap), key_w as u32, key_h as u32);
+            // 最右一列补齐卡片宽度的余数; 最下一行收进圆角里
+            let cw = if col == 2 { card_w - 2 * key_w } else { key_w };
+            let r = Rect::new(card.x + col * key_w, top + row * key_h, cw as u32, key_h as u32);
             let id = match i {
                 9 => HIT_EXIT,
                 11 => HIT_DELETE,
                 10 => HitId(KEY_BASE),
                 n => HitId(KEY_BASE + n as u32 + 1),
             };
-            widgets::button(&mut ink, frame, &theme, &m, r, label, ButtonStyle::Secondary);
-            cx.hits.add(id, r).rounded(m.radius);
+            let size = if label.len() == 1 { m.title } else { m.body };
+            let color = if label.len() == 1 { theme.foreground } else { theme.muted };
+            ink.text_centered(frame, r, label, size, color);
+            cx.hits.add(id, r.inflate(-2));
+        }
+        // 键格细线: 横线 4 条 (含顶边), 竖线 2 条
+        for row in 0..4 {
+            frame.fill_rect(Rect::new(card.x + 2, top + row * key_h, card.w - 4, 1), theme.mid);
+        }
+        for col in 1..3 {
+            frame.fill_rect(Rect::new(card.x + col * key_w, top, 1, (key_h * 4 - (m.radius as i32)) as u32), theme.mid);
         }
     }
 

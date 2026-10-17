@@ -67,6 +67,16 @@ pub enum Transition<A> {
     Exit,
 }
 
+/// 弹窗式页面 (不重画背景, 只刷新弹窗) 的背景来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backdrop {
+    None,
+    /// 屏幕上现在的画面 (启动画面、屏保): 从帧缓冲读回, 背景一个像素都不刷新
+    Screen,
+    /// 栈里下面那一页重新画一遍 (不带按下反馈的反相)
+    Below,
+}
+
 /// 应用状态需要实现的最小接口。
 pub trait App: Sized + 'static {
     fn home_page(&mut self) -> Box<dyn Page<Self>>;
@@ -265,6 +275,12 @@ pub trait Page<A: App> {
 
     /// 即将休眠 (落盘阅读进度等)。在 `App::on_suspend` 之前调用。
     fn on_suspend(&mut self, _cx: &mut Cx<A>) {}
+    /// 弹窗式页面要的背景 (见 [`Backdrop`]); 运行时在下一次绘制前用 [`Page::set_backdrop`] 交给页面一次。
+    fn wants_backdrop(&self) -> Backdrop {
+        Backdrop::None
+    }
+    /// 运行时取到的背景 (`None` = 取不到, 页面自己画个背景)。
+    fn set_backdrop(&mut self, _backdrop: Option<Bitmap>) {}
 
     /// 页面自己画满整帧 (例如阅读页直接拷贝缓存好的正文位图): 运行时跳过渲染前的背景清空 (整屏 ~4 ms)。
     fn opaque(&self) -> bool {
@@ -988,6 +1004,34 @@ pub fn run<A: App>(
                     hint = RefreshHint::Flash;
                     rt.swipe = None;
                     feedback_shown = false;
+                }
+                // 弹窗式页面: 先取背景。屏幕上的画面读回后当作 "已显示" 的内容, 只刷新弹窗那块 (不闪)
+                let want = stack.top().page.wants_backdrop();
+                if want != Backdrop::None {
+                    let mut bg = Bitmap::new(rt.width, rt.height, rt.app.theme().background);
+                    let got = match want {
+                        Backdrop::Screen => {
+                            let ok = display.read_back(&mut bg);
+                            if ok {
+                                scheduler.adopt(&bg);
+                                if hint == RefreshHint::Flash {
+                                    hint = RefreshHint::Ui;
+                                }
+                            }
+                            ok
+                        }
+                        _ => {
+                            let n = stack.entries.len();
+                            if n >= 2 {
+                                let below = &mut stack.entries[n - 2];
+                                let instance = below.instance;
+                                below.page.render(&mut rt.cx(instance), &mut bg);
+                                rt.hits.clear();
+                            }
+                            n >= 2
+                        }
+                    };
+                    stack.top().page.set_backdrop(got.then_some(bg));
                 }
                 let started = std::time::Instant::now();
                 let top = stack.top();

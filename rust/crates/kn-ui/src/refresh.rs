@@ -134,6 +134,15 @@ impl RefreshScheduler {
         self.light_background = background >= 128;
     }
 
+    /// 屏幕上现在就是 `screen` (从帧缓冲读回的): 之后按它做差分。
+    pub fn adopt(&mut self, screen: &Bitmap) {
+        if screen.width() == self.screen.width() && screen.height() == self.screen.height() {
+            self.screen.blit(screen, screen.bounds(), 0, 0);
+            self.screen_valid = true;
+            self.feedback = None;
+        }
+    }
+
     /// 屏幕被外部改写过; 下一次刷新走整屏。
     pub fn invalidate(&mut self) {
         self.screen_valid = false;

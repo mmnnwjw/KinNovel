@@ -21,7 +21,7 @@ mod tasks;
 mod theme;
 pub mod widgets;
 
-pub use app::{render_once, run, App, Cx, Delivery, Headless, Orientation, Page, PageId, PagePoster, Transition};
+pub use app::{render_once, run, App, Backdrop, Cx, Delivery, Headless, Orientation, Page, PageId, PagePoster, Transition};
 pub use hits::{HitId, Hits};
 pub use refresh::{RefreshHint, RefreshPolicy, RefreshScheduler};
 pub use tasks::{Poster, Tasks, Waker};

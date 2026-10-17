@@ -91,6 +91,12 @@ pub trait Display {
         Ok(())
     }
 
+    /// 把屏幕上现在的画面读回 `out` (逻辑画面, 与 `present` 的帧同尺寸), 用来在它上面画弹窗而不重画背景
+    /// (启动画面 / 屏保上的锁屏)。做不到时返回 false。
+    fn read_back(&mut self, _out: &mut Bitmap) -> bool {
+        false
+    }
+
     /// 夜间模式 (上层画的是白字黑底)。支持硬件反色的实现可以让驱动反色显示并换用夜间波形;
     /// 默认什么都不做 (软件画好的黑底照常显示)。
     fn set_night(&mut self, _night: bool) {}
@@ -177,6 +183,14 @@ impl Display for MemoryDisplay {
         self.rotation = rotation;
     }
 
+    fn read_back(&mut self, out: &mut Bitmap) -> bool {
+        if self.rotation != Rotation::UPRIGHT || out.width() != self.screen.width() || out.height() != self.screen.height() {
+            return false;
+        }
+        out.blit(&self.screen, self.screen.bounds(), 0, 0);
+        true
+    }
+
     fn rotation(&self) -> Rotation {
         self.rotation
     }
@@ -239,6 +253,8 @@ pub struct FbinkDisplay {
     hw_night_ok: bool,
     /// 硬件夜间模式开着: 写入帧缓冲时反色 (驱动再反回来), 波形换成夜间版
     hw_night: bool,
+    /// 帧缓冲里的内容是在硬件反色下由我们写进去的 (存的是反色画面); 框架画的 (reinit 之后) 不是。见 `read_back`
+    fb_inverted: bool,
     /// 启动时的硬件反色状态 (退出 / 崩溃后恢复, 见 [`restore_after_crash`])
     orig_inverted: bool,
     debug: bool,
@@ -338,6 +354,7 @@ impl FbinkDisplay {
             // 框架 (系统深色模式) 可能已经开着硬件反色; 退出时恢复成启动时的样子
             hw_night: state.inverted_grayscale != 0,
             orig_inverted: state.inverted_grayscale != 0,
+            fb_inverted: false,
             debug: std::env::var_os("KN_DEBUG").is_some(),
         })
     }
@@ -589,6 +606,7 @@ impl Display for FbinkDisplay {
             }
         }
         self.row = row;
+        self.fb_inverted = self.hw_night;
         let rect = fb_rect;
 
         // MTK 原生翻页动画, 仅在设备支持且上层要求时启用。
@@ -651,7 +669,34 @@ impl Display for FbinkDisplay {
         self.inflight.clear();
         // 硬件夜间模式由上层在进屏保前关掉、回来后重开 (见 kn-ui run), 这里不动
         self.refresh_state();
+        // 屏保期间框架重画过屏幕, 帧缓冲里是正常 (未反色) 的画面
+        self.fb_inverted = false;
         Ok(())
+    }
+
+    fn read_back(&mut self, out: &mut Bitmap) -> bool {
+        // 只处理竖屏、8 位 (锁屏只在竖屏出现); 屏幕上看到的 = 帧缓冲内容, 我们在硬件反色下写的要反回来
+        if self.sw != Rotation::UPRIGHT || self.info.bytes_per_pixel != 1 || out.width() != self.info.width || out.height() != self.info.height {
+            return false;
+        }
+        let w = out.width() as usize;
+        for y in 0..out.height() as usize {
+            let off = y * self.fb_stride;
+            if off + w > self.fb_size {
+                return false;
+            }
+            // SAFETY: off + w <= fb_size, fb_ptr 映射在 Drop 前一直有效
+            let src = unsafe { std::slice::from_raw_parts(self.fb_ptr.add(off), w) };
+            let dst = &mut out.row_mut(y as u32)[..w];
+            if self.fb_inverted {
+                for (d, &s) in dst.iter_mut().zip(src) {
+                    *d = !s;
+                }
+            } else {
+                dst.copy_from_slice(src);
+            }
+        }
+        true
     }
 
     fn set_night(&mut self, night: bool) {
