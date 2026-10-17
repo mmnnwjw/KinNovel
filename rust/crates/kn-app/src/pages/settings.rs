@@ -16,6 +16,10 @@ enum Kind {
     Toggle { default: bool },
     /// 字符串取值循环切换: (配置值, 显示名); 配置值 "" 写成 null (Python 的 None)
     Choice(&'static [(&'static str, &'static str)]),
+    /// 锁屏密码 (`pages::lock`): 开 / 关
+    LockToggle,
+    /// 修改锁屏密码 (开着时可用)
+    LockChange,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +81,8 @@ const GROUPS: &[(&str, &[Setting])] = &[
             toggle("ignore_ai", "忽略 AI 翻译", "", false),
             step("cache_limit_mb", "缓存上限 (MB)", "启动时清理", 64.0, 1024.0, 64.0, 0, 192.0),
             toggle("check_update", "自动检查更新", "每天一次, 访问 GitHub", true),
+            Setting { key: "lock_pin", label: "锁屏密码", note: "启动和唤醒时输入 6 位数字", kind: Kind::LockToggle, default: 0.0 },
+            Setting { key: "lock_pin", label: "修改锁屏密码", note: "", kind: Kind::LockChange, default: 0.0 },
         ],
     ),
     (
@@ -127,6 +133,7 @@ fn number(config: &crate::store::Config, s: &Setting) -> f64 {
             let v = config.string(s.key, "");
             options.iter().position(|(value, _)| *value == v).unwrap_or(0) as f64
         }
+        Kind::LockToggle | Kind::LockChange => super::lock::configured_pin(config).is_some() as u8 as f64,
     }
 }
 
@@ -161,6 +168,8 @@ impl SettingsPage {
                 let (value, _) = options[(v as usize + 1) % options.len()];
                 cx.app.config.set(s.key, if value.is_empty() { Value::Null } else { Value::from(value) });
             }
+            // 由 on_input 压栈锁屏页处理
+            Kind::LockToggle | Kind::LockChange => {}
         }
         cx.request_redraw(RefreshHint::Ui);
     }
@@ -226,6 +235,17 @@ impl Page<KinNovel> for SettingsPage {
                     wide(options[index].1, index != 0, &mut ink, frame);
                     cx.hits.add(id(2), r);
                 }
+                Kind::LockToggle => {
+                    let on = v != 0.0;
+                    wide(if on { "开" } else { "关" }, on, &mut ink, frame);
+                    cx.hits.add(id(2), r);
+                }
+                Kind::LockChange => {
+                    let on = v != 0.0;
+                    let sw = Rect::new(cx.width as i32 - side - btn * 2, r.y + (row_h - btn * 2 / 3) / 2, (btn * 2) as u32, (btn * 2 / 3) as u32);
+                    widgets::button(&mut ink, frame, &theme, &m, sw, "修改", if on { ButtonStyle::Secondary } else { ButtonStyle::Disabled });
+                    cx.hits.add(id(2), r).enabled(on);
+                }
             }
             frame.fill_rect(Rect::new(side, r.bottom() - 1, cx.width - 2 * m.margin, 1), theme.mid);
             y += row_h;
@@ -252,6 +272,14 @@ impl Page<KinNovel> for SettingsPage {
                 let settings = GROUPS[self.group].1;
                 let index = ((id - SET_BASE) / 4) as usize;
                 if let Some(s) = settings.get(index) {
+                    let on = super::lock::configured_pin(&cx.app.config).is_some();
+                    match s.kind {
+                        Kind::LockToggle if on => return Transition::Push(Box::new(super::lock::LockPage::verify(super::lock::After::Disable))),
+                        Kind::LockToggle => return Transition::Push(Box::new(super::lock::LockPage::enable())),
+                        Kind::LockChange if on => return Transition::Push(Box::new(super::lock::LockPage::verify(super::lock::After::Change))),
+                        Kind::LockChange => return Transition::None,
+                        _ => {}
+                    }
                     let delta = if (id - SET_BASE) % 4 == 0 { -1 } else { 1 };
                     let s = for_screen(s, cx.app);
                     self.change(cx, &s, delta);

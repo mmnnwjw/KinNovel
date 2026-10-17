@@ -91,7 +91,7 @@ pub trait App: Sized + 'static {
     }
     /// 启动后、首页进入之后调用一次 (例如用 `cx.spawn_app` 开始后台登录, 结果经任务池送回)。
     fn on_start(_cx: &mut Cx<Self>) {}
-    /// 每个后台结果处理完后调用: 应用全局想做的导航 (例如保存的账号失效 → 登录页)。不支持 `Exit`。
+    /// 每个后台结果处理完后、休眠唤醒后调用: 应用全局想做的导航 (例如保存的账号失效 → 登录页)。不支持 `Exit`。
     fn take_transition(&mut self) -> Transition<Self> {
         Transition::None
     }
@@ -852,6 +852,13 @@ pub fn run<A: App>(
                     display.set_night(rt.app.theme().night);
                     scheduler.invalidate();
                     rt.app.on_resume();
+                    // 应用唤醒后要盖的页面 (例如锁屏) 在第一帧之前压栈, 原页面不会先露出来
+                    match rt.app.take_transition() {
+                        Transition::None | Transition::Exit => {}
+                        transition => {
+                            stack.apply(&mut rt, transition);
+                        }
+                    }
                     rt.redraw = Some(RefreshHint::Flash);
                 }
                 _ => {}

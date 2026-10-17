@@ -73,10 +73,18 @@ pub struct KinNovel {
     welcome_shown: bool,
     /// 启动画面已经画在屏幕上 (设备上); 见 `startup_hold`
     pub splash_shown: bool,
+    /// 锁屏 (`pages::lock`): 本次已解锁 / 锁屏页正在显示 / 唤醒后要盖一层锁屏
+    unlocked: bool,
+    lock_showing: bool,
+    lock_pending: bool,
 }
 
 impl App for KinNovel {
     fn home_page(&mut self) -> Box<dyn Page<Self>> {
+        if self.locked() {
+            self.lock_showing = true;
+            return Box::new(pages::lock::LockPage::startup());
+        }
         // 第一次启动 (或还没登录): 欢迎页; 登录或「先逛逛」后进书架
         if self.wants_welcome() && !self.welcome_shown {
             self.welcome_shown = true;
@@ -110,7 +118,20 @@ impl App for KinNovel {
         if self.splash_shown { Duration::from_millis(2500) } else { Duration::ZERO }
     }
 
+    fn on_resume(&mut self) {
+        // 休眠唤醒: 设了锁屏密码就重新上锁 (锁屏页已经在显示时不再叠一层)
+        if pages::lock::configured_pin(&self.config).is_some() && !self.lock_showing {
+            self.unlocked = false;
+            self.lock_pending = true;
+        }
+    }
+
     fn take_transition(&mut self) -> kn_ui::Transition<Self> {
+        if self.lock_pending {
+            self.lock_pending = false;
+            self.lock_showing = true;
+            return kn_ui::Transition::Push(Box::new(pages::lock::LockPage::resume()));
+        }
         if !self.net_client.take_account_rejected() {
             return kn_ui::Transition::None;
         }
@@ -134,7 +155,43 @@ impl KinNovel {
         let account = account::load(&paths).map(|a| (a.email, a.password_hash));
         // 会话失效 (刷新令牌也被拒) 时由客户端用这个账号自动重新登录
         net_client.set_account(account);
-        KinNovel { paths, config, ui_fonts, metrics: Metrics::for_screen(width, height), night, chapter_font: None, light, dpi, net_client, online, reader_jump: None, startup_notice: None, tip_open: None, tips_later: Default::default(), welcome_shown: false, splash_shown: false }
+        let mut config = config;
+        // 锁屏密码默认留空 (设置 → 内容里开关 / 修改)
+        if !config.contains("lock_pin") {
+            config.set("lock_pin", serde_json::Value::from(""));
+        }
+        KinNovel {
+            paths,
+            config,
+            ui_fonts,
+            metrics: Metrics::for_screen(width, height),
+            night,
+            chapter_font: None,
+            light,
+            dpi,
+            net_client,
+            online,
+            reader_jump: None,
+            startup_notice: None,
+            tip_open: None,
+            tips_later: Default::default(),
+            welcome_shown: false,
+            splash_shown: false,
+            unlocked: false,
+            lock_showing: false,
+            lock_pending: false,
+        }
+    }
+
+    /// 设了锁屏密码且本次还没解锁。
+    fn locked(&self) -> bool {
+        !self.unlocked && pages::lock::configured_pin(&self.config).is_some()
+    }
+
+    /// 锁屏页输对了密码。
+    pub fn unlock(&mut self) {
+        self.unlocked = true;
+        self.lock_showing = false;
     }
 
     /// 按 300 ppi 设计的像素值换算到本机。

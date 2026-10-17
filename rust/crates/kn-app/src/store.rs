@@ -138,6 +138,10 @@ impl Config {
         Config { path: PathBuf::new(), data: Map::new() }
     }
 
+    pub fn contains(&self, key: &str) -> bool {
+        self.data.contains_key(key)
+    }
+
     pub fn int(&self, key: &str, default: i64) -> i64 {
         self.data.get(key).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))).unwrap_or(default)
     }
