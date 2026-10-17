@@ -906,6 +906,8 @@ pub fn run<A: App>(
                 if debug {
                     eprintln!("[input] {:?}", event);
                 }
+                // 有人在用: 重置系统的屏幕超时 (见 PowerMonitor::user_activity)
+                power.user_activity();
                 if let InputEvent::Key { code: KeyCode::Power, pressed: true } = event {
                     if !sleeping && power_key_at.is_none() {
                         power.release_framework();

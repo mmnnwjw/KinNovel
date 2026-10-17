@@ -31,6 +31,8 @@ mod unix_impl {
 
     const RESTART_BACKOFF_BASE_MS: u64 = 1_000;
     const RESTART_BACKOFF_MAX_MS: u64 = 30_000;
+    /// 通知 powerd 用户在操作的最短间隔 (`user_activity`)
+    const ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn read_paused_pids(path: &Path) -> Vec<i32> {
         let Ok(content) = std::fs::read_to_string(path) else {
@@ -97,6 +99,8 @@ mod unix_impl {
         next_watchdog_at: Option<Instant>,
         consecutive_active: u32,
         lipc_available: bool,
+        /// 上次通知 powerd 用户在操作 (见 `user_activity`)
+        last_activity: Option<Instant>,
     }
 
     impl PowerMonitor {
@@ -115,6 +119,7 @@ mod unix_impl {
                 next_watchdog_at: None,
                 consecutive_active: 0,
                 lipc_available,
+                last_activity: None,
             };
             if lipc_available {
                 mon.try_spawn();
@@ -303,6 +308,24 @@ mod unix_impl {
             deadlines.into_iter().min()
         }
 
+        /// 用户在操作 (触摸 / 按键): 重置 powerd 的屏保计时 (系统设置里的「屏幕超时」)。
+        /// 我们独占 (EVIOCGRAB) 了输入设备, powerd 看不到这些触摸, 不通知的话看书看到超时就会被强制休眠
+        /// (KPW5 实测: 程序里点屏幕, `status` 的剩余时间照样往下走)。KOReader 同样每次输入调用
+        /// `touchScreenSaverTimeout`。最多 30 s 一次, 在后台线程里跑, 不阻塞界面。
+        pub fn user_activity(&mut self) {
+            if !self.lipc_available || self.last_activity.is_some_and(|t| t.elapsed() < ACTIVITY_INTERVAL) {
+                return;
+            }
+            self.last_activity = Some(Instant::now());
+            std::thread::spawn(|| {
+                let _ = Command::new("lipc-set-prop")
+                    .args(["-i", "com.lab126.powerd", "touchScreenSaverTimeout", "1"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            });
+        }
+
         pub fn release_framework(&self) {
             let pids = if self.tracked_pids.is_empty() {
                 read_paused_pids(&self.pause_file)
@@ -366,6 +389,8 @@ impl PowerMonitor {
     pub fn next_deadline_ms(&self) -> Option<u64> {
         None
     }
+
+    pub fn user_activity(&mut self) {}
 
     /// 休眠: 继续 (SIGCONT) 被暂停的框架进程, 让系统锁屏接管屏幕。
     pub fn release_framework(&self) {}
