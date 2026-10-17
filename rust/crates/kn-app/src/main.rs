@@ -305,6 +305,11 @@ fn main() {
         std::fs::write(&args[2], splash::render(w, h).to_pgm()).expect("write splash");
         return;
     }
+    if args.len() >= 2 && args[1] == "--restore-display" {
+        // 启动脚本在程序异常退出后调用: 恢复硬件反色等驱动全局状态
+        kn_platform::display::restore_after_crash();
+        return;
+    }
     if args.len() >= 3 && args[1] == "--preview" {
         preview(&args[2..]);
         return;

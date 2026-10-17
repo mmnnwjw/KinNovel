@@ -72,6 +72,7 @@ typedef struct {
     char     device_name[32];
     char     device_codename[32];
     char     device_platform[32];
+    uint8_t  inverted_grayscale; // vInfo.grayscale == GRAYSCALE_8BIT_INVERTED (硬件夜间模式开着)
 } ShimState;
 
 void shim_get_state(int fbfd, ShimState* out) {
@@ -99,6 +100,7 @@ void shim_get_state(int fbfd, ShimState* out) {
     memcpy(out->device_name, g_state.device_name, sizeof(out->device_name) - 1);
     memcpy(out->device_codename, g_state.device_codename, sizeof(out->device_codename) - 1);
     memcpy(out->device_platform, g_state.device_platform, sizeof(out->device_platform) - 1);
+    out->inverted_grayscale       = g_state.inverted_grayscale ? 1 : 0;
 }
 
 unsigned char* shim_get_fb_pointer(int fbfd, size_t* buffer_size) {
@@ -114,6 +116,9 @@ static WFM_MODE_INDEX_T map_wfm(int mode_sel) {
         case 4: return WFM_REAGL;
         case 5: return WFM_A2;
         case 6: return WFM_REAGLD;
+        case 7: return WFM_GCK16;
+        case 8: return WFM_GLKW16;
+        case 9: return WFM_DUNM;
         default: return WFM_AUTO;
     }
 }
@@ -138,6 +143,15 @@ int shim_wait_for_complete(int fbfd, uint32_t marker) {
 
 int shim_mtk_set_swipe_data(uint8_t direction, uint8_t steps) {
     return fbink_mtk_set_swipe_data(direction, steps);
+}
+
+// 硬件夜间模式: 帧缓冲 grayscale 设为 GRAYSCALE_8BIT_INVERTED, 驱动反色显示并按夜间挑波形 (KOReader 在 MTK 上的做法)。
+// 成功后 FBInk 已 reinit, 调用方要重新取 state / fb 指针。
+int shim_set_hw_night(int fbfd, int on) {
+    ensure_cfg();
+    // 只设 grayscale (KPW5 实测): 再给每次刷新带 is_nightmode (EPDC_FLAG_ENABLE_INVERSION) 会反两次, 等于没反;
+    // 只带 is_nightmode 不设 grayscale 时整屏发灰。
+    return fbink_set_fb_info(fbfd, KEEP_CURRENT_ROTATE, KEEP_CURRENT_BITDEPTH, on ? 2 : 1, &g_cfg);
 }
 
 int shim_mtk_toggle_auto_reagl(int fbfd, int toggle) {

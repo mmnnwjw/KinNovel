@@ -458,8 +458,10 @@ impl<A: App> Stack<A> {
             // 进入/离开二级页面: 整屏 GC16 + 残影预算 (约每 UI_FLASH_EVERY 屏闪一次), 被点那一行的按下反相
             // 由定点清残影单独闪刷。以前每次都整屏闪刷: 残影其实来自按下反馈与闪刷撞车 (见 kn-platform
             // display.rs 的进行中刷新等待), 修好之后不必每次闪 (用户嫌闪得多)。
-            if rt.redraw.is_none_or(|h| h.strength() < RefreshHint::Ui.strength()) {
-                rt.redraw = Some(RefreshHint::Ui);
+            // 夜间 (白字黑底) 局部刷新残影重得多 (相机实拍: 进详情页后下半屏留着列表行), 仍然每次整屏闪刷
+            let hint = if rt.app.theme().night { RefreshHint::Flash } else { RefreshHint::Ui };
+            if rt.redraw.is_none_or(|h| h.strength() < hint.strength()) {
+                rt.redraw = Some(hint);
             }
         }
         true
@@ -757,6 +759,8 @@ pub fn run<A: App>(
     // 上一帧的配色: 日间/夜间切换后几乎每个像素都反转, 局部刷新残影很重, 要闪刷一次
     let mut last_theme = rt.app.theme();
     scheduler.set_background(last_theme.background);
+    // 夜间模式交给驱动反色 (支持时), 驱动随之换用夜间波形
+    display.set_night(last_theme.night);
     if !rt.app.startup_hold().is_zero() {
         // 屏幕上是启动画面, 调度器以为是空白: 第一帧整屏写入并闪刷
         scheduler.invalidate();
@@ -832,6 +836,8 @@ pub fn run<A: App>(
                         scheduler.invalidate();
                         eprintln!("[sleep] 屏保 {} ms", started.elapsed().as_millis());
                     }
+                    // 系统界面 (屏保 / 唤醒后的锁屏) 不该被反色; 唤醒回来再开
+                    display.set_night(false);
                     power.release_framework();
                 }
                 PowerEvent::OutOfScreenSaver if sleeping => {
@@ -843,6 +849,7 @@ pub fn run<A: App>(
                     input.reset();
                     let _ = input.grab();
                     let _ = display.reinit();
+                    display.set_night(rt.app.theme().night);
                     scheduler.invalidate();
                     rt.app.on_resume();
                     rt.redraw = Some(RefreshHint::Flash);
@@ -956,6 +963,7 @@ pub fn run<A: App>(
                 if theme != last_theme {
                     last_theme = theme;
                     scheduler.set_background(theme.background);
+                    display.set_night(theme.night);
                     hint = RefreshHint::Flash;
                 }
                 // 方向变了 (进入/离开横屏阅读页、阅读页里切换、倒拿): 显示与触摸跟着转, 整屏重画

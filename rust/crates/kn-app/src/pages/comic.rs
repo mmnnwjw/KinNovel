@@ -428,6 +428,7 @@ impl ComicReaderPage {
     /// (`delta` 决定方向, 0 = 无动画; 设备不支持时显示层忽略)。
     fn present(&self, cx: &mut Cx<KinNovel>, delta: i64) {
         let animate = delta != 0 && cx.app.config.bool("page_turn_animation", true);
+        super::apply_swipe_steps(cx.app);
         // 向后翻: 从左往右读时内容左移, 从右往左读时右移
         let swipe = animate.then(|| if (delta > 0) != Self::rtl(cx) { SwipeDir::Left } else { SwipeDir::Right });
         if cx.app.config.bool("comic_page_flash", true) {
@@ -578,7 +579,8 @@ impl ComicReaderPage {
             } else {
                 self.note.clear();
             }
-            cx.request_redraw(RefreshHint::Ui);
+            // 夜间关菜单: 按钮细框在 GCK16 局部刷新后留淡淡的残影 (相机实拍), 对变化区域闪刷
+            cx.request_redraw(if !visible && cx.theme.night { RefreshHint::Clean } else { RefreshHint::Ui });
         }
     }
 

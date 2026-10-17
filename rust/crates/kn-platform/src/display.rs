@@ -91,6 +91,10 @@ pub trait Display {
         Ok(())
     }
 
+    /// 夜间模式 (上层画的是白字黑底)。支持硬件反色的实现可以让驱动反色显示并换用夜间波形;
+    /// 默认什么都不做 (软件画好的黑底照常显示)。
+    fn set_night(&mut self, _night: bool) {}
+
     /// 逻辑画面相对用户正拿的竖屏转了多少 (横屏阅读、Oasis / Scribe 倒拿)。实现保证上层画的帧在用户看来
     /// 是正的 (软件旋转); 之后 `present` 收到的帧是 `rotation.logical_size(info 宽高)`。
     fn set_rotation(&mut self, _rotation: Rotation) {}
@@ -231,6 +235,12 @@ pub struct FbinkDisplay {
     epdc_wait: bool,
     /// 启动时关掉了 MTK 驱动的自动 REAGL, 退出时要恢复
     auto_reagl_off: bool,
+    /// 可以用硬件夜间模式 (MTK, 8 位灰度; KN_HW_NIGHT=0 关掉, 对比测试用)
+    hw_night_ok: bool,
+    /// 硬件夜间模式开着: 写入帧缓冲时反色 (驱动再反回来), 波形换成夜间版
+    hw_night: bool,
+    /// 启动时的硬件反色状态 (退出 / 崩溃后恢复, 见 [`restore_after_crash`])
+    orig_inverted: bool,
     debug: bool,
 }
 
@@ -324,6 +334,10 @@ impl FbinkDisplay {
             inflight: Vec::new(),
             epdc_wait: std::env::var_os("KN_EPDC_WAIT").is_none_or(|v| v != "0"),
             auto_reagl_off,
+            hw_night_ok: is_mtk && bytes_per_pixel == 1 && std::env::var_os("KN_HW_NIGHT").is_none_or(|v| v != "0"),
+            // 框架 (系统深色模式) 可能已经开着硬件反色; 退出时恢复成启动时的样子
+            hw_night: state.inverted_grayscale != 0,
+            orig_inverted: state.inverted_grayscale != 0,
             debug: std::env::var_os("KN_DEBUG").is_some(),
         })
     }
@@ -336,6 +350,43 @@ impl FbinkDisplay {
     /// `framebuffer.py` 同样对 MTK 翻页直接使用 REAGL/GLR16), 所以 MTK 上也
     /// 直接用 `WFM_REAGL`, 不要降级到 GL16。只有在 `!supports_reagl` (legacy
     /// einkfb 机型, 不支持 REAGL) 时才降级到 GL16。
+    /// 重新取 FBInk 状态与帧缓冲映射 (reinit / fbink_set_fb_info 之后)。
+    fn refresh_state(&mut self) {
+        use crate::ffi;
+        let mut state = ffi::ShimState::default();
+        unsafe { ffi::shim_get_state(self.fbfd, &mut state as *mut ffi::ShimState) };
+        let mut fb_size: usize = 0;
+        let fb_ptr = unsafe { ffi::shim_get_fb_pointer(self.fbfd, &mut fb_size as *mut usize) };
+        if !fb_ptr.is_null() {
+            self.fb_ptr = fb_ptr;
+            self.fb_size = fb_size;
+            self.fb_stride = state.scanline_stride as usize;
+            self.info.width = state.view_width;
+            self.info.height = state.view_height;
+            self.info.stride = state.scanline_stride as usize;
+            self.info.fb_rota = state.current_rota;
+        }
+    }
+
+    /// 本次刷新实际用的 (FBInk 波形选择子, UPDATE_MODE_FULL)。
+    fn waveform_for(&self, req: &RefreshRequest) -> (std::os::raw::c_int, bool) {
+        use crate::ffi::*;
+        if self.hw_night {
+            // KOReader (MTK 夜间): 翻页 GLKW16 + FULL (类似 REAGL, 不闪); 界面与闪刷 GCK16; 快速 DUNM
+            return match req.waveform {
+                _ if req.flash => (WFM_GCK16, true),
+                Waveform::Reagl => (WFM_GLKW16, true),
+                Waveform::Gc16 | Waveform::Gl16 => (WFM_GCK16, false),
+                Waveform::Du => (WFM_DUNM, false),
+                other => (self.map_waveform(other), false),
+            };
+        }
+        let wfm = self.map_waveform(req.waveform);
+        // i.MX 机型的 REAGL 必须配 UPDATE_MODE_FULL (fbink.c: "REAGL should always be paired with FULL",
+        // 由调用方负责; KOReader 同样处理), REAGL 的 FULL 不闪。MTK 上 REAGL + PARTIAL 已实测正常, 保持不变。
+        (wfm, req.flash || (wfm == WFM_REAGL && !self.info.is_mtk))
+    }
+
     /// 等 `marker` 刷完, 并把它从进行中列表里去掉。
     fn wait_marker(&mut self, marker: u32, why: &str) {
         let started = std::time::Instant::now();
@@ -392,6 +443,39 @@ impl FbinkDisplay {
         self.set_rotation(self.rotation);
     }
 }
+
+/// MTK 翻页动画的阶数 (原生阅读器 12, 驱动上限 60): 越多越细腻, 动画也越长。设置项 `swipe_steps`。
+static SWIPE_STEPS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(12);
+
+pub fn set_swipe_steps(steps: u8) {
+    SWIPE_STEPS.store(steps.clamp(2, 60), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 改过硬件反色时记下启动时的状态 ("0" / "1"), 正常退出时删除。
+#[cfg(target_os = "linux")]
+const RESTORE_FILE: &str = "/tmp/kinnovel_grayscale";
+
+/// 上次运行异常退出 (崩溃 / 被杀) 后恢复显示驱动的全局状态: 硬件反色、MTK 自动 REAGL。
+/// 启动脚本在程序非正常退出后调用 (`kinnovel --restore-display`), 否则系统界面会一直反色。
+#[cfg(target_os = "linux")]
+pub fn restore_after_crash() {
+    use crate::ffi;
+    let Ok(orig) = std::fs::read_to_string(RESTORE_FILE) else { return };
+    let _ = std::fs::remove_file(RESTORE_FILE);
+    unsafe {
+        let fd = ffi::shim_fbink_open();
+        if fd < 0 || ffi::shim_fbink_init(fd, 0) < 0 {
+            return;
+        }
+        let rc = ffi::shim_set_hw_night(fd, (orig.trim() == "1") as i32);
+        ffi::shim_mtk_toggle_auto_reagl(fd, 1);
+        ffi::shim_fbink_close(fd);
+        eprintln!("[display] 已恢复硬件反色 = {} (rc {rc})", orig.trim());
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn restore_after_crash() {}
 
 /// 提交后可能还没刷完的一次刷新 (面板坐标)。
 #[cfg(target_os = "linux")]
@@ -454,10 +538,10 @@ impl Display for FbinkDisplay {
         // 我们界面也用 GC16, 照搬会让一帧里不相交的几个区域互相排队, 所以只等重叠的。
         // 按下反馈 (DU/A2) 只等重叠的闪刷 (闪刷不再就地等完, 见下), 其余不等, 保证跟手。
         // 放在写帧缓冲之前: 上一次刷新可能还没被驱动取走画面。
-        let wfm = self.map_waveform(req.waveform);
         if self.epdc_wait {
-            self.wait_overlapping(fb_rect, wfm == crate::ffi::WFM_DU || wfm == crate::ffi::WFM_A2);
+            self.wait_overlapping(fb_rect, matches!(req.waveform, Waveform::Du | Waveform::A2));
         }
+        let (wfm, full) = self.waveform_for(req);
 
         // 只拷贝区域内的行段到映射的帧缓冲, 考虑 stride (frame 与 fb 的 stride 可能不同)。
         // 旋转时先在内存里把区域转好 (帧缓冲不宜逐像素跳着写)。
@@ -485,6 +569,12 @@ impl Display for FbinkDisplay {
             // SAFETY: dst_off + w*bpp <= fb_size (检查见上), fb_ptr 映射在 Drop 前一直有效
             let dst = unsafe { std::slice::from_raw_parts_mut(self.fb_ptr.add(dst_off), w * bpp) };
             match bpp {
+                // 硬件夜间模式: 驱动会反色显示, 写入反色后的画面
+                1 if self.hw_night => {
+                    for (d, &v) in dst.iter_mut().zip(src) {
+                        *d = !v;
+                    }
+                }
                 1 => dst.copy_from_slice(src),
                 3 => {
                     for (d, &v) in dst.chunks_exact_mut(3).zip(src) {
@@ -507,16 +597,14 @@ impl Display for FbinkDisplay {
             if let Some(dir) = req.swipe {
                 // 软件旋转时按帧缓冲的方向换算 (横屏时逻辑上的左右是帧缓冲的上下)
                 let direction = swipe_direction_code(dir, rot);
-                let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, 12u8) };
+                let steps = SWIPE_STEPS.load(std::sync::atomic::Ordering::Relaxed);
+                let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, steps) };
                 if rc == 0 {
                     is_animated = 1;
                 }
             }
         }
 
-        // i.MX 机型的 REAGL 必须配 UPDATE_MODE_FULL (fbink.c: "REAGL should always be paired with FULL",
-        // 由调用方负责; KOReader 同样处理), REAGL 的 FULL 不闪。MTK 上 REAGL + PARTIAL 已实测正常, 保持不变。
-        let full = req.flash || (wfm == crate::ffi::WFM_REAGL && !self.info.is_mtk);
         let rc = unsafe {
             ffi::shim_refresh(
                 self.fbfd,
@@ -537,7 +625,8 @@ impl Display for FbinkDisplay {
         self.next_marker = marker;
         // KOReader 在 FULL 刷新提交后就地等它完成。我们一帧里常有几块不相交的区域闪刷 (清深色块),
         // 就地等会让它们排队 (关弹窗 0.74 s、打开书 1.2 s); 只记下来, 之后重叠的刷新 (含按下反馈) 再等。
-        self.inflight.push(Inflight { marker, rect: fb_rect, flash: full, at: std::time::Instant::now() });
+        // REAGL / GLKW16 的 FULL 不闪, 不算闪刷
+        self.inflight.push(Inflight { marker, rect: fb_rect, flash: req.flash, at: std::time::Instant::now() });
         Ok(marker)
     }
 
@@ -560,20 +649,26 @@ impl Display for FbinkDisplay {
         }
         // 屏保期间之前的刷新早已完成
         self.inflight.clear();
-        let mut state = ffi::ShimState::default();
-        unsafe { ffi::shim_get_state(self.fbfd, &mut state as *mut ffi::ShimState) };
-        let mut fb_size: usize = 0;
-        let fb_ptr = unsafe { ffi::shim_get_fb_pointer(self.fbfd, &mut fb_size as *mut usize) };
-        if !fb_ptr.is_null() {
-            self.fb_ptr = fb_ptr;
-            self.fb_size = fb_size;
-            self.fb_stride = state.scanline_stride as usize;
-            self.info.width = state.view_width;
-            self.info.height = state.view_height;
-            self.info.stride = state.scanline_stride as usize;
-            self.info.fb_rota = state.current_rota;
-        }
+        // 硬件夜间模式由上层在进屏保前关掉、回来后重开 (见 kn-ui run), 这里不动
+        self.refresh_state();
         Ok(())
+    }
+
+    fn set_night(&mut self, night: bool) {
+        if !self.hw_night_ok || night == self.hw_night {
+            return;
+        }
+        // 先记下启动时的状态: 程序崩溃 (panic = abort, Drop 不会跑) 后启动脚本据此恢复
+        let _ = std::fs::write(RESTORE_FILE, if self.orig_inverted { "1" } else { "0" });
+        let rc = unsafe { crate::ffi::shim_set_hw_night(self.fbfd, night as i32) };
+        if self.debug {
+            eprintln!("[epdc] 硬件夜间模式 {night}: rc {rc}");
+        }
+        if rc >= 0 {
+            self.hw_night = night;
+            // fbink_set_fb_info 成功后已 reinit, 帧缓冲映射可能变了
+            self.refresh_state();
+        }
     }
 
     fn set_rotation(&mut self, rotation: Rotation) {
@@ -595,6 +690,10 @@ impl Drop for FbinkDisplay {
             if self.auto_reagl_off {
                 ffi::shim_mtk_toggle_auto_reagl(self.fbfd, 1);
             }
+            if self.hw_night != self.orig_inverted {
+                ffi::shim_set_hw_night(self.fbfd, self.orig_inverted as i32);
+            }
+            let _ = std::fs::remove_file(RESTORE_FILE);
             ffi::shim_fbink_close(self.fbfd);
         }
     }

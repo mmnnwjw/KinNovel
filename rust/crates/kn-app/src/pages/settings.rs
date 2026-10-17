@@ -62,6 +62,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         &[
             toggle("night_mode", "夜间模式", "", false),
             toggle("page_turn_animation", "翻页动画", "PW5 及更新机型", true),
+            step(super::SWIPE_STEPS, "翻页动画阶数", "越多越细腻, 动画越长", 6.0, 60.0, 6.0, 0, 12.0),
             Setting { key: super::LANDSCAPE_SIDE, label: "横屏握持", note: "设备往哪边转", kind: Kind::Choice(LANDSCAPE_SIDE), default: 0.0 },
             toggle("page_flash", "翻页全屏刷新", "重启后生效", false),
             step("full_refresh_every", "残影清理间隔 (屏)", "重启后生效", 2.0, 12.0, 1.0, 0, 6.0),

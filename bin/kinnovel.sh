@@ -105,6 +105,8 @@ usleep 200000 2>/dev/null || sleep 1
 KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" >> "$LOG_FILE" 2>&1
 RET=$?
 log "exited with $RET"
+# 程序改过显示驱动的全局状态 (夜间模式的硬件反色) 却没能正常退出时留下这个文件: 恢复, 否则系统界面会一直反色
+[ -f /tmp/kinnovel_grayscale ] && "$BIN_RUN" --restore-display >> "$LOG_FILE" 2>&1
 # 异常退出: panic 时程序自己写了 last_crash.txt (含消息); 被信号杀死 (段错误等) 时在这里补一个,
 # 下次启动书架页会提示。SIGTERM/SIGINT (正常的 kill / 关机) 不算。
 CRASH_MARKER="$LOG_DIR/last_crash.txt"

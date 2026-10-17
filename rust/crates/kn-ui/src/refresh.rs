@@ -83,6 +83,8 @@ const FULL_RATIO: f32 = 0.95;
 const REAGL_TURN_WEIGHT: f32 = 0.25;
 /// 阅读页以外: 局部刷新累计多少屏后, 下一次大面积刷新升级为闪刷 (配置值更小时用配置值)。
 const UI_FLASH_EVERY: f32 = 3.0;
+/// 夜间的 `UI_FLASH_EVERY` (白字黑底的局部刷新残影重得多)
+const NIGHT_UI_FLASH_EVERY: f32 = 1.0;
 /// 定点清残影的格子边长 (px)。
 const CLEAR_TILE: u32 = 16;
 /// 格子里至少这么多像素由深色变成背景色, 才算 "实心深色块被清掉"。正文/列表文字远达不到。
@@ -152,6 +154,9 @@ impl RefreshScheduler {
         let configured = if self.policy.full_refresh_every > 0.0 { self.policy.full_refresh_every } else { 6.0 };
         if hint == RefreshHint::Turn {
             configured
+        } else if !self.light_background {
+            // 夜间: 列表 / 菜单的大面积变化累计 1 屏就闪
+            configured.min(NIGHT_UI_FLASH_EVERY)
         } else {
             configured.min(UI_FLASH_EVERY)
         }

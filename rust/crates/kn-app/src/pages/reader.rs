@@ -710,6 +710,7 @@ impl ReaderPage {
         self.save_progress(cx, false);
         self.tracker.page(&cx.app.paths, self.book_id, &self.chapter.book_name, false);
         // MTK 原生翻页动画 (Python `page_turn_animation`, 默认开): 向后翻内容左移, 向前翻右移
+        super::apply_swipe_steps(cx.app);
         let swipe = cx.app.config.bool("page_turn_animation", true).then_some(if delta > 0 { SwipeDir::Left } else { SwipeDir::Right });
         cx.request_turn(swipe);
         Transition::None
@@ -1089,7 +1090,8 @@ impl ReaderPage {
             } else {
                 self.note.clear();
             }
-            cx.request_redraw(RefreshHint::Ui);
+            // 夜间关菜单: 按钮细框在 GCK16 局部刷新后留淡淡的残影 (相机实拍), 对变化区域闪刷
+            cx.request_redraw(if !visible && cx.theme.night { RefreshHint::Clean } else { RefreshHint::Ui });
         }
     }
 

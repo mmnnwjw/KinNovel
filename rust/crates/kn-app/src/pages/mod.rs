@@ -71,6 +71,14 @@ pub fn tab_transition(hit: HitId, active: Tab) -> Option<Transition<KinNovel>> {
     Some(if tab == active { Transition::None } else { Transition::Root(tab_page(tab)) })
 }
 
+/// MTK 翻页动画阶数的配置键 (见 `kn_platform::display::set_swipe_steps`)。
+pub const SWIPE_STEPS: &str = "swipe_steps";
+
+/// 翻页前把设置里的动画阶数交给显示层。
+pub fn apply_swipe_steps(app: &KinNovel) {
+    kn_platform::display::set_swipe_steps(app.config.int(SWIPE_STEPS, 12).clamp(2, 60) as u8);
+}
+
 /// 小说阅读页的屏幕方向配置键 (漫画是 [`COMIC_ORIENTATION`]); 值 "landscape" = 横屏。
 pub const READER_ORIENTATION: &str = "reader_orientation";
 pub const COMIC_ORIENTATION: &str = "comic_orientation";

@@ -119,7 +119,11 @@ All components draw immediately into the frame and register hits; they never kee
 | List page change / tab switch | `Ui` (GC16, up to 4 diff regions) + region flash where a solid dark block (old selected tab/chip, inverted row) turns back to background | partial refresh leaves dark blocks as ghosts; text-only changes never flash |
 | Press feedback | runtime (invert + A2 for small targets such as keys, DU for larger ones) | instant; KOReader uses `a2` only on the keyboard, `fast` elsewhere |
 | Toast show/hide, overlay menu | `Ui` | small rect |
+| Enter / leave a second-level page (Push / Back / Home) | day: `Ui` + ghost budget (a flash every ~3 screens; the tapped row's inversion gets a region flash); night: `Flash` | the old per-navigation flash was really fighting EPDC collisions (fixed in the display layer); white-on-black partials still ghost, so night keeps it |
+| Close the reader / comic menu | day `Ui`, night `Clean` (region flash) | thin button outlines ghost under night partials |
 | Night mode toggle, wake from sleep | `Flash` | full inversion |
+
+Night mode on MTK (PW5 and later): the frame is still drawn white-on-black, but the display layer sets the framebuffer to `GRAYSCALE_8BIT_INVERTED` and writes the inverted (black-on-white) image, so the driver inverts it and uses the night waveforms (GCK16 for UI and flashes, GLKW16 for page turns, DUNM for fast) and dark swipe animations (KOReader does the same). The flag is global, so it is cleared before the screensaver and on exit; after a crash the launcher runs `kinnovel --restore-display`. Night ghost budget for UI changes: 1 screen (day 3). The swipe animation step count is a setting (`swipe_steps`, 6–60, default 12 like the stock reader).
 
 ## Text and data
 

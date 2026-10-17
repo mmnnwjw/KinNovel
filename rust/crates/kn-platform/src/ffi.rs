@@ -28,6 +28,7 @@ pub struct ShimState {
     pub device_name: [u8; 32],
     pub device_codename: [u8; 32],
     pub device_platform: [u8; 32],
+    pub inverted_grayscale: u8,
 }
 
 impl ShimState {
@@ -102,6 +103,7 @@ unsafe extern "C" {
     pub fn shim_wait_for_complete(fbfd: c_int, marker: u32) -> c_int;
     pub fn shim_mtk_set_swipe_data(direction: u8, steps: u8) -> c_int;
     pub fn shim_mtk_toggle_auto_reagl(fbfd: c_int, toggle: c_int) -> c_int;
+    pub fn shim_set_hw_night(fbfd: c_int, on: c_int) -> c_int;
     pub fn shim_wait_for_any_complete(fbfd: c_int) -> c_int;
     pub fn shim_input_scan(
         match_types: u32,
@@ -133,6 +135,10 @@ pub const WFM_GL16: c_int = 3;
 pub const WFM_REAGL: c_int = 4;
 pub const WFM_A2: c_int = 5;
 pub const WFM_REAGLD: c_int = 6;
+/// 夜间 (白字黑底) 波形, 仅 MTK / Eclipse: 闪刷与界面 GCK16, 翻页 GLKW16, 快速 DUNM
+pub const WFM_GCK16: c_int = 7;
+pub const WFM_GLKW16: c_int = 8;
+pub const WFM_DUNM: c_int = 9;
 
 // MTK_SWIPE_DIRECTION_INDEX_E (fbink.h ~534-542), as consumed by
 // fbink_mtk_set_swipe_data / shim_mtk_set_swipe_data. Matches Python
