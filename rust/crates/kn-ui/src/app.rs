@@ -455,9 +455,12 @@ impl<A: App> Stack<A> {
             }
         }
         if nav_flash && self.top().page.flash_on_enter() {
-            // 进入/离开二级页面: 整屏闪刷, 清掉上一页的残影 (含被点那一行的按下反相)。
-            // 切换标签 (Root) 画面结构相同, 走普通刷新 + 残影预算。
-            rt.redraw = Some(RefreshHint::Flash);
+            // 进入/离开二级页面: 整屏 GC16 + 残影预算 (约每 UI_FLASH_EVERY 屏闪一次), 被点那一行的按下反相
+            // 由定点清残影单独闪刷。以前每次都整屏闪刷: 残影其实来自按下反馈与闪刷撞车 (见 kn-platform
+            // display.rs 的进行中刷新等待), 修好之后不必每次闪 (用户嫌闪得多)。
+            if rt.redraw.is_none_or(|h| h.strength() < RefreshHint::Ui.strength()) {
+                rt.redraw = Some(RefreshHint::Ui);
+            }
         }
         true
     }
