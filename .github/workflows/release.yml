@@ -75,5 +75,5 @@ jobs:
           python tools/gitee_release.py ensure-repo
           # checkout 是浅克隆, Gitee 上还没有的祖先提交推不过去
           git fetch --unshallow origin || true
-          GIT_TERMINAL_PROMPT=0 timeout 600 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 push --progress "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/KinNovel.git" "refs/tags/$tag:refs/tags/$tag" --force
+          GIT_TERMINAL_PROMPT=0 timeout 2700 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 push --progress "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/KinNovel.git" "refs/tags/$tag:refs/tags/$tag" --force
           python tools/gitee_release.py release "$tag" "build/KinNovel-$tag.zip" "docs/releases/$tag.md"

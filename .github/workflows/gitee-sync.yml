@@ -16,7 +16,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     env:
       GITEE_USER: ${{ secrets.GITEE_USER }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -40,9 +40,10 @@ jobs:
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 60
           remote="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/KinNovel.git"
-          git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin$' | grep -v '/HEAD$' | while read -r b; do
+          # GitHub 的机器到 Gitee 只有十几 KB/s: 第一次同步整个仓库 (~26 MB) 要半小时以上, 之后只推增量。main 先推
+          git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin$' | grep -v '/HEAD$' | sort -k1,1 -t/ -r | while read -r b; do
             echo "push ${b#origin/}"
-            timeout 600 git push --progress "$remote" "refs/remotes/$b:refs/heads/${b#origin/}" --force
+            timeout 2700 git push --progress "$remote" "refs/remotes/$b:refs/heads/${b#origin/}" --force
           done
           echo "push tags"
-          timeout 600 git push --progress "$remote" "refs/tags/*:refs/tags/*" --force
+          timeout 2700 git push --progress "$remote" "refs/tags/*:refs/tags/*" --force
