@@ -2,7 +2,6 @@ name: Release
 
 # 推送 vX.Y.Z 标签: 测试 → 构建设备程序 → 打包 → 创建 (或更新) GitHub Release 并上传 zip。
 # 说明文字取 docs/releases/vX.Y.Z.md, 没有就让 GitHub 按提交生成。
-# Gitee 镜像上的同名发行版由 gitee-release.yml 在这个工作流成功后创建。
 on:
   push:
     tags: ["v*"]

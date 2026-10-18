@@ -4,32 +4,26 @@
 //! `data/update.json` = `{"checked": unix 秒, "latest": "1.3.0", "prompted": "1.3.0"}`:
 //! 发现新版本时在首页类页面上弹一次提示 (每个版本只弹一次, `prompted`), 「我的 → 关于」一直有提示。
 //!
-//! GitHub 在国内经常连不上, 所以版本信息和安装包都有多个来源:
-//! - 版本信息: Gitee 镜像仓库和 GitHub 的发行版列表**同时**查, 取两边最高的版本 (Gitee 同步失败落后时
-//!   不会装到旧版); 一边先成功后另一边最多再等几秒。列表里比当前新的所有版本的说明都给更新页显示。
-//! - 安装包: Gitee 发行版附件 → GitHub 下载地址经加速镜像 → GitHub 原始地址。
-//!   加速镜像是第三方服务, 只有拿到了 sha256 (Gitee 发行说明里的 `SHA256:` 行 / GitHub 资产的 digest) 才用它,
-//!   下载后必须校验一致。Gitee 仓库由 CI 同步 (`.github/workflows/gitee-sync.yml`), 发行版由 `gitee-release.yml` 发布。
+//! - 版本信息: GitHub 的发行版列表, 取最高的版本; 比当前新的所有版本的说明都给更新页显示。
+//! - 安装包: GitHub 在国内经常连不上, 先经加速镜像下载, 最后才用 GitHub 原始地址。
+//!   加速镜像是第三方服务, 只有拿到了 sha256 (GitHub 资产的 digest) 才用它, 下载后必须校验一致。
 //! 只访问这些主机, 不碰轻书架服务器。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::store::{self, atomic_write, Paths};
 
-const GITEE_LIST: &str = "https://gitee.com/api/v5/repos/mmnnwjw/KinNovel/releases?page=1&per_page=20&direction=desc";
 const GITHUB_LIST: &str = "https://api.github.com/repos/mmnnwjw/KinNovel/releases?per_page=20";
 const GITHUB_DOWNLOAD: &str = "https://github.com/mmnnwjw/KinNovel/releases/download";
 /// GitHub 加速镜像 (前缀 + 完整的 GitHub 地址)。2026-10 实测可用; 失效了按顺序跳过。
 const MIRRORS: &[&str] = &["https://gh-proxy.com/", "https://ghfast.top/", "https://gh.llkk.cc/"];
 pub const PROJECT_PAGE: &str = "github.com/mmnnwjw/KinNovel";
 const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
-/// 一个来源先成功后, 另一个最多再等这么久 (国内连 GitHub 常常要等到 30 秒超时)
-const SECOND_SOURCE_GRACE: Duration = Duration::from_secs(5);
 /// 发布包上限 (现在约 3.5 MB)
 const PACKAGE_LIMIT: usize = 32 * 1024 * 1024;
 
@@ -139,7 +133,7 @@ pub struct VersionNotes {
     pub notes: String,
 }
 
-/// 要安装的版本 (两个来源里最高的)。
+/// 要安装的版本 (发行版列表里最高的)。
 #[derive(Clone, Debug, Default)]
 pub struct Release {
     /// "1.6.2"
@@ -150,26 +144,24 @@ pub struct Release {
     pub sha256: Option<String>,
     /// 安装包下载地址, 按顺序尝试
     pub urls: Vec<String>,
-    /// 最新版本信息来自哪里 ("Gitee" / "GitHub" / "Gitee + GitHub")
+    /// 版本信息来自哪里 (更新页显示)
     pub source: String,
 }
 
-/// 一个来源列出的一个版本
+/// 发行版列表里的一个版本
 #[derive(Clone, Debug, Default)]
 struct Listed {
     version: String,
     date: String,
     notes: String,
     sha256: Option<String>,
-    /// Gitee 附件地址
-    url: Option<String>,
 }
 
 fn package_name(version: &str) -> String {
     format!("KinNovel-v{version}.zip")
 }
 
-/// 文本里第一个 64 位十六进制串 (发行说明里的 "SHA256: …" 行, 或 GitHub 的 "sha256:…")。
+/// 文本里第一个 64 位十六进制串 (GitHub 资产的 digest "sha256:…")。
 fn find_sha256(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
     let start = lower.find("sha256")?;
@@ -191,29 +183,7 @@ fn listed_common(v: &Value) -> Option<Listed> {
         .map(|d| d.chars().take(10).collect())
         .unwrap_or_default();
     let notes = v.get("body").and_then(Value::as_str).unwrap_or("").to_string();
-    Some(Listed { version, date, notes, sha256: None, url: None })
-}
-
-/// Gitee 发行版列表 → 各版本 (只取上传的附件, 不要自动生成的源码包; sha256 在说明的 `SHA256:` 行)。
-fn parse_gitee(v: &Value) -> Vec<Listed> {
-    v.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| {
-            let mut l = listed_common(r)?;
-            let wanted = package_name(&l.version);
-            l.url = r
-                .get("assets")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|a| a.get("browser_download_url").and_then(Value::as_str))
-                .find(|u| u.ends_with(&wanted))
-                .map(str::to_string);
-            l.sha256 = l.notes.lines().find(|x| x.to_ascii_lowercase().contains("sha256")).and_then(find_sha256);
-            Some(l)
-        })
-        .collect()
+    Some(Listed { version, date, notes, sha256: None })
 }
 
 /// GitHub 发行版列表 → 各版本 (资产的 digest 字段是 "sha256:…")。
@@ -238,43 +208,27 @@ fn parse_github(v: &Value) -> Vec<Listed> {
         .collect()
 }
 
-/// 合并两个来源的列表: 取最高版本; 说明、日期、sha256 哪边有用哪边; 安装包地址 Gitee → 镜像 → GitHub。
-fn merge(sources: &[(&'static str, Vec<Listed>)]) -> Option<Release> {
-    let mut by_version: BTreeMap<(u32, u32, u32), (Listed, Vec<&'static str>)> = BTreeMap::new();
-    for (name, list) in sources {
-        for l in list {
-            let Some(key) = parse_version(&l.version) else { continue };
-            let entry = by_version.entry(key).or_insert_with(|| (Listed { version: l.version.clone(), ..Default::default() }, Vec::new()));
-            entry.1.push(name);
-            let m = &mut entry.0;
-            if m.notes.trim().is_empty() {
-                m.notes = l.notes.clone();
-            }
-            if m.date.is_empty() {
-                m.date = l.date.clone();
-            }
-            m.sha256 = m.sha256.take().or_else(|| l.sha256.clone());
-            m.url = m.url.take().or_else(|| l.url.clone());
-        }
-    }
-    let (_, (latest, names)) = by_version.iter().next_back()?;
+/// 发行版列表 → 要安装的版本: 取最高版本, 收集比当前新的所有版本的说明; 安装包地址 镜像 (有 sha256 时) → GitHub。
+fn latest_of(list: &[Listed]) -> Option<Release> {
+    let by_version: BTreeMap<(u32, u32, u32), &Listed> = list.iter().filter_map(|l| Some((parse_version(&l.version)?, l))).collect();
+    let (_, latest) = by_version.iter().next_back()?;
     let current = parse_version(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let mut changes: Vec<VersionNotes> = by_version
         .iter()
         .rev()
         .filter(|(k, _)| **k > current)
-        .map(|(_, (l, _))| VersionNotes { version: l.version.clone(), date: l.date.clone(), notes: l.notes.clone() })
+        .map(|(_, l)| VersionNotes { version: l.version.clone(), date: l.date.clone(), notes: l.notes.clone() })
         .collect();
     if changes.is_empty() {
         changes.push(VersionNotes { version: latest.version.clone(), date: latest.date.clone(), notes: latest.notes.clone() });
     }
     let github = format!("{GITHUB_DOWNLOAD}/v{0}/{1}", latest.version, package_name(&latest.version));
-    let mut urls: Vec<String> = latest.url.iter().cloned().collect();
+    let mut urls = Vec::new();
     if latest.sha256.is_some() {
         urls.extend(MIRRORS.iter().map(|m| format!("{m}{github}")));
     }
     urls.push(github);
-    Some(Release { version: latest.version.clone(), changes, sha256: latest.sha256.clone(), urls, source: names.join(" + ") })
+    Some(Release { version: latest.version.clone(), changes, sha256: latest.sha256.clone(), urls, source: "GitHub".into() })
 }
 
 fn fetch_list(net: &kn_net::Client, url: &str, parse: fn(&Value) -> Vec<Listed>) -> Result<Vec<Listed>, String> {
@@ -287,31 +241,9 @@ fn fetch_list(net: &kn_net::Client, url: &str, parse: fn(&Value) -> Vec<Listed>)
     Ok(list)
 }
 
-/// 同时问 Gitee 和 GitHub, 合并结果。
 fn fetch_latest(net: &kn_net::Client) -> Result<Release, String> {
-    let (tx, rx) = mpsc::channel();
-    for (name, url, parse) in [("Gitee", GITEE_LIST, parse_gitee as fn(&Value) -> Vec<Listed>), ("GitHub", GITHUB_LIST, parse_github)] {
-        let (tx, net) = (tx.clone(), net.clone());
-        std::thread::spawn(move || {
-            let _ = tx.send((name, fetch_list(&net, url, parse)));
-        });
-    }
-    drop(tx);
-    let mut ok: Vec<(&'static str, Vec<Listed>)> = Vec::new();
-    let mut errors = Vec::new();
-    for _ in 0..2 {
-        // 已经有一个成功的来源: 另一个只再等一会儿
-        let received = if ok.is_empty() { rx.recv().ok() } else { rx.recv_timeout(SECOND_SOURCE_GRACE).ok() };
-        match received {
-            Some((name, Ok(list))) => ok.push((name, list)),
-            Some((name, Err(e))) => {
-                eprintln!("[update] {name}: {e}");
-                errors.push(format!("{name}: {e}"));
-            }
-            None => break,
-        }
-    }
-    merge(&ok).ok_or_else(|| if errors.is_empty() { "没有发布版本".to_string() } else { errors.join("; ") })
+    let list = fetch_list(net, GITHUB_LIST, parse_github).inspect_err(|e| eprintln!("[update] GitHub: {e}"))?;
+    latest_of(&list).ok_or_else(|| "没有发布版本".to_string())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -505,43 +437,30 @@ mod tests {
     const HASH: &str = "9128847c9a4c2ed440dfadc0e6b1d4f7ad75ae02d90d3118d09a590834346a36";
 
     #[test]
-    fn release_lists_merge_to_the_highest_version() {
+    fn release_list_gives_the_highest_version_and_newer_notes() {
         let current = env!("CARGO_PKG_VERSION");
         let (ma, mi, pa) = parse_version(current).unwrap();
         let next = format!("{ma}.{mi}.{}", pa + 1);
         let next2 = format!("{ma}.{mi}.{}", pa + 2);
-        // Gitee 落后一个版本 (同步失败), 但有 sha256 和附件
-        let gitee = json!([
-            {"tag_name": format!("v{next}"), "created_at": "2026-10-20T10:00:00+08:00",
-             "body": format!("## 新功能\n- a\n\nSHA256: {}\n", HASH.to_uppercase()),
-             "assets": [
-                {"browser_download_url": format!("https://gitee.com/mmnnwjw/KinNovel/releases/download/v{next}/KinNovel-v{next}.zip")},
-                {"browser_download_url": format!("https://gitee.com/mmnnwjw/KinNovel/archive/refs/tags/v{next}.zip")}
-             ]},
-            {"tag_name": format!("v{current}"), "body": "old"}
-        ]);
         let github = json!([
+            {"tag_name": format!("v{next}"), "published_at": "2026-10-20T10:00:00Z", "body": "## 新功能\n- a", "assets": []},
             {"tag_name": format!("v{next2}"), "published_at": "2026-10-21T01:00:00Z", "body": "- b",
              "assets": [{"name": format!("KinNovel-v{next2}.zip"), "digest": format!("sha256:{HASH}")}]},
-            {"tag_name": format!("v{next}"), "body": "", "assets": []},
+            {"tag_name": format!("v{current}"), "body": "old", "assets": []},
             {"tag_name": "v99.0.0-rc1", "prerelease": true, "body": "", "assets": []}
         ]);
-        let r = merge(&[("Gitee", parse_gitee(&gitee)), ("GitHub", parse_github(&github))]).unwrap();
+        let r = latest_of(&parse_github(&github)).unwrap();
         assert_eq!(r.version, next2);
-        assert_eq!(r.source, "GitHub");
         assert_eq!(r.sha256.as_deref(), Some(HASH));
         let versions: Vec<_> = r.changes.iter().map(|c| (c.version.as_str(), c.date.as_str())).collect();
         assert_eq!(versions, vec![(next2.as_str(), "2026-10-21"), (next.as_str(), "2026-10-20")]);
-        assert!(r.changes[1].notes.contains("新功能"), "Gitee 的说明补上 GitHub 空的说明");
-        // Gitee 没有最新版的附件: 镜像 + GitHub
         assert!(r.urls[0].starts_with("https://gh-proxy.com/https://github.com/"));
         assert!(r.urls.last().unwrap().starts_with("https://github.com/"));
-
-        // 只有 Gitee: 附件地址排第一
-        let r = merge(&[("Gitee", parse_gitee(&gitee))]).unwrap();
-        assert_eq!((r.version.as_str(), r.source.as_str()), (next.as_str(), "Gitee"));
-        assert!(r.urls[0].starts_with("https://gitee.com/"));
-        assert!(merge(&[]).is_none());
+        // 没有 sha256: 不用加速镜像
+        let plain = json!([{"tag_name": format!("v{next}"), "body": "", "assets": []}]);
+        let r = latest_of(&parse_github(&plain)).unwrap();
+        assert_eq!(r.urls.len(), 1);
+        assert!(latest_of(&[]).is_none());
         assert!(find_sha256("没有哈希").is_none());
     }
 

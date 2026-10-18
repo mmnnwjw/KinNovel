@@ -203,7 +203,7 @@ impl Page<KinNovel> for UpdatePage {
         let line_h = (m.small * 1.6) as i32;
         let mut lines: Vec<String> = Vec::new();
         match &self.state {
-            State::Checking => lines.push("正在从 Gitee / GitHub 获取版本信息…".into()),
+            State::Checking => lines.push("正在获取版本信息…".into()),
             State::Failed(e) => {
                 lines.push("连不上更新服务器, 请检查网络后重试。".into());
                 lines.extend(super::announce::wrap_all(e, &ink, m.small, width as f32));
