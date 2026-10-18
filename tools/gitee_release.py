@@ -3,7 +3,7 @@
   python tools/gitee_release.py ensure-repo
       仓库 gitee.com/<GITEE_USER>/KinNovel 不存在时创建 (公开)。
   python tools/gitee_release.py wait-tag <tag> [分钟]
-      等标签出现在 Gitee 上 (代码由 Gitee 的 Pull 镜像从 GitHub 拉取, 最短 5 分钟一次), 默认最多等 40 分钟。
+      等标签出现在 Gitee 上 (由 gitee-sync.yml 推送), 默认最多等 40 分钟。
   python tools/gitee_release.py release <tag> <zip> [notes.md]
       创建 (或更新) 该标签的发行版: 说明 = notes.md + "SHA256: <zip 的哈希>" (程序用它校验下载),
       附件 = zip (同名旧附件先删掉)。标签要先在 Gitee 上 (wait-tag)。

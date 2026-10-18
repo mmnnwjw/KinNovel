@@ -9,7 +9,7 @@
 //!   不会装到旧版); 一边先成功后另一边最多再等几秒。列表里比当前新的所有版本的说明都给更新页显示。
 //! - 安装包: Gitee 发行版附件 → GitHub 下载地址经加速镜像 → GitHub 原始地址。
 //!   加速镜像是第三方服务, 只有拿到了 sha256 (Gitee 发行说明里的 `SHA256:` 行 / GitHub 资产的 digest) 才用它,
-//!   下载后必须校验一致。Gitee 仓库由 Gitee 的 Pull 镜像从 GitHub 拉取, 发行版由 CI 发布 (`.github/workflows/gitee-release.yml`)。
+//!   下载后必须校验一致。Gitee 仓库由 CI 同步 (`.github/workflows/gitee-sync.yml`), 发行版由 `gitee-release.yml` 发布。
 //! 只访问这些主机, 不碰轻书架服务器。
 
 use std::collections::BTreeMap;
