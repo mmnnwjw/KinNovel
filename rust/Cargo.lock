@@ -327,7 +327,7 @@ checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "kn-app"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "crc32fast",
  "kn-net",
@@ -342,14 +342,14 @@ dependencies = [
 
 [[package]]
 name = "kn-ime"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "brotli-decompressor",
 ]
 
 [[package]]
 name = "kn-net"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "base64",
  "flate2",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "kn-platform"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "cc",
  "kn-render",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "kn-render"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "cc",
  "image-webp",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "kn-text"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "html5ever",
  "kn-render",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "kn-ui"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "kn-ime",
  "kn-platform",
