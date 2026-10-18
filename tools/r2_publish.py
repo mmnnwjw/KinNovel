@@ -2,7 +2,7 @@
 
 上传两样东西 (客户端 `rust/crates/kn-app/src/update.rs` 读取):
 - `KinNovel-vX.Y.Z.zip` + `.sig`: 安装包和它的 Ed25519 签名 (`tools/sign_update.py`; 客户端验签不过不装)。
-  缓存一小时 (同一版本偶尔会原地替换)。
+  客户端下载时带 `?sha256=<内容的哈希>`, 同一版本原地替换后地址也跟着变, 不会取到边缘缓存里的旧包。
 - `releases.json`: 最近 20 个发行版, 格式与 GitHub `GET /repos/{repo}/releases` 相同 (只留客户端用到的字段),
   资产的 `digest` = "sha256:…"。文件名固定, 上传时设 `Cache-Control: no-cache`。
 先传安装包和签名, 再传 releases.json, 所以列表里的版本在服务器上一定已经有包。
@@ -103,8 +103,9 @@ def main():
     print(f'uploaded releases.json: {len(listing)} releases, {len(body)} B')
 
     # 经公开域名读回来
-    got = http_get(f'{PUBLIC}/{name}')
-    if hashlib.sha256(got).hexdigest() != digest or http_get(f'{PUBLIC}/{name}.sig') != sig:
+    # 与客户端一样带 ?sha256= (Cloudflare 默认缓存 .zip, 原地替换过的版本不带参数可能读到边缘节点上的旧包)
+    got = http_get(f'{PUBLIC}/{name}?sha256={digest}')
+    if hashlib.sha256(got).hexdigest() != digest or http_get(f'{PUBLIC}/{name}.sig?sha256={digest}') != sig:
         sys.exit(f'{PUBLIC}/{name} 读回来的内容不一致')
     got = json.loads(http_get(f'{PUBLIC}/releases.json?t={digest[:8]}'))
     if not any(r['tag_name'] == tag for r in got):

@@ -242,7 +242,13 @@ fn latest_of(list: &[Listed]) -> Option<Release> {
         changes.push(VersionNotes { version: latest.version.clone(), date: latest.date.clone(), notes: latest.notes.clone() });
     }
     let name = package_name(&latest.version);
-    let urls = vec![format!("{UPDATE_SERVER}/{name}"), format!("{GITHUB_DOWNLOAD}/v{0}/{name}", latest.version)];
+    // 更新服务器的地址带上 sha256: Cloudflare 默认缓存 .zip, 同一版本原地替换过时旧包还留在边缘节点上,
+    // 地址随内容变就不会取到旧的
+    let server = match &latest.sha256 {
+        Some(sha) => format!("{UPDATE_SERVER}/{name}?sha256={sha}"),
+        None => format!("{UPDATE_SERVER}/{name}"),
+    };
+    let urls = vec![server, format!("{GITHUB_DOWNLOAD}/v{0}/{name}", latest.version)];
     Some(Release { version: latest.version.clone(), changes, sha256: latest.sha256.clone(), urls, source: String::new() })
 }
 
@@ -324,13 +330,21 @@ fn signature_valid(public_key: &str, package: &str, sha256: &str, signature: &st
     key.verify_strict(signed_message(package, sha256).as_bytes(), &Signature::from_bytes(&sig)).is_ok()
 }
 
+/// 安装包地址 → 签名地址 (查询参数留在后面)
+fn sig_url(url: &str) -> String {
+    match url.split_once('?') {
+        Some((path, query)) => format!("{path}.sig?{query}"),
+        None => format!("{url}.sig"),
+    }
+}
+
 /// 从各来源取 `.sig` 验签, 有一个通过就行。
 fn check_signature(net: &kn_net::Client, release: &Release, sha256: &str) -> Result<(), String> {
     let package = package_name(&release.version);
     let mut errors = Vec::new();
     for url in &release.urls {
         let host = url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url);
-        match net.download(&format!("{url}.sig"), 4096) {
+        match net.download(&sig_url(url), 4096) {
             Ok(sig) if signature_valid(SIGNING_PUBLIC_KEY, &package, sha256, &String::from_utf8_lossy(&sig)) => return Ok(()),
             Ok(_) => errors.push(format!("{host}: 签名不符")),
             Err(e) => errors.push(format!("{host}: 签名 {e}")),
@@ -548,7 +562,9 @@ mod tests {
         assert_eq!(r.sha256.as_deref(), Some(HASH));
         let versions: Vec<_> = r.changes.iter().map(|c| (c.version.as_str(), c.date.as_str())).collect();
         assert_eq!(versions, vec![(next2.as_str(), "2026-10-21"), (next.as_str(), "2026-10-20")]);
-        assert_eq!(r.urls[0], format!("https://update.mmnnwjw.dpdns.org/KinNovel-v{next2}.zip"));
+        assert_eq!(r.urls[0], format!("https://update.mmnnwjw.dpdns.org/KinNovel-v{next2}.zip?sha256={HASH}"));
+        assert_eq!(sig_url(&r.urls[0]), format!("https://update.mmnnwjw.dpdns.org/KinNovel-v{next2}.zip.sig?sha256={HASH}"));
+        assert_eq!(sig_url(&r.urls[1]), format!("{}.sig", r.urls[1]));
         assert!(r.urls[1].starts_with("https://github.com/"));
         // 两个来源合并: 同一版本取有 sha256 的那条, 版本取两边最高
         let server = json!([{"tag_name": format!("v{next}"), "body": "", "assets": []}]);
