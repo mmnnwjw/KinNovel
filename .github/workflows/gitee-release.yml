@@ -28,10 +28,12 @@ jobs:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
     steps:
-      - name: Checkout the tag (tools + release notes)
+      # 脚本用 main 上最新的; 发行说明从标签里取 (补发旧版本时标签里的脚本可能是旧的)
+      - name: Checkout main (tools) with tags
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: main
+          fetch-depth: 0
 
       - name: Download the GitHub release zip
         env:
@@ -39,10 +41,11 @@ jobs:
         run: |
           mkdir -p build
           gh release download "$TAG" --pattern "KinNovel-$TAG.zip" --dir build
+          git show "$TAG:docs/releases/$TAG.md" > build/notes.md 2>/dev/null || : > build/notes.md
           ls -l build
 
       - name: Wait for the tag on Gitee (pull mirror)
         run: python3 tools/gitee_release.py wait-tag "$TAG"
 
       - name: Publish the Gitee release
-        run: python3 tools/gitee_release.py release "$TAG" "build/KinNovel-$TAG.zip" "docs/releases/$TAG.md"
+        run: python3 tools/gitee_release.py release "$TAG" "build/KinNovel-$TAG.zip" build/notes.md
