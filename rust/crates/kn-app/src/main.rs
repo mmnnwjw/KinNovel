@@ -232,16 +232,22 @@ impl KinNovel {
     }
 }
 
+/// 补充符号字体 (霞鹜新晰黑屏幕版的子集, IPA 字体许可, 由 tools/gen_symbol_font.py 生成): 只含 Kindle 系统黑体
+/// 缺的符号/标点/拉丁扩展 (♡ ♢ ♤ ♧ ✿ ✦ 〜 …), 编进程序, 接在界面字体后面。
+static SYMBOL_FONT: &[u8] = include_bytes!("../data/KinNovelSymbols.ttf");
 /// 黑白 emoji 字体 (Noto Emoji, OFL-1.1, 由 tools/gen_emoji_font.py 精简), 编进程序, 放在界面字体链最后:
-/// 界面字体没有的 emoji 用它画; 两者都没有的字符画成空白 (它的 .notdef 是空的), 不再是方框。
+/// 界面字体没有的 emoji 用它画; 都没有的字符画成空白 (它的 .notdef 是空的), 不再是方框。
 static EMOJI_FONT: &[u8] = include_bytes!("../data/NotoEmoji-subset.ttf");
 
-/// 界面字体: KN_FONT 环境变量 > 配置 font_path (与 Python 版同键) > 系统黑体; 后接 emoji 字体。
+/// 界面字体: KN_FONT 环境变量 > 配置 font_path (与 Python 版同键) > 系统黑体; 后接补充符号字体和 emoji 字体。
+/// 阅读页的字体链 = 章节字体 + 这条链。
 fn load_ui_fonts(fonts: &mut FontStore, config: &Config) -> Vec<FontId> {
     let mut chain = vec![load_ui_font(fonts, config)];
-    match fonts.load_bytes(EMOJI_FONT.to_vec()) {
-        Ok(id) => chain.push(id),
-        Err(e) => eprintln!("[font] emoji: {e:?}"),
+    for (name, bytes) in [("symbols", SYMBOL_FONT), ("emoji", EMOJI_FONT)] {
+        match fonts.load_bytes(bytes.to_vec()) {
+            Ok(id) => chain.push(id),
+            Err(e) => eprintln!("[font] {name}: {e:?}"),
+        }
     }
     chain
 }

@@ -357,7 +357,6 @@ impl ReaderPage {
         self.blocks = loaded.blocks;
         self.notes = loaded.notes;
         self.footnote = None;
-        let system = cx.app.ui_fonts[0];
         let mut chapter_font = None;
         match (loaded.font_path, loaded.font_bytes) {
             (Some(path), Some(Ok(bytes))) => match cx.fonts.load_bytes(bytes) {
@@ -380,7 +379,8 @@ impl ReaderPage {
             }
             (None, _) => {}
         }
-        self.chain = chapter_font.into_iter().chain(std::iter::once(system)).collect();
+        // 章节字体没有的字 (♡ 之类) 依次找系统字体、补充符号字体、emoji 字体; 都没有画空白而不是方框
+        self.chain = chapter_font.into_iter().chain(cx.app.ui_fonts.iter().copied()).collect();
         self.widths.clear();
         self.restart_layout(cx);
 
@@ -486,7 +486,7 @@ impl ReaderPage {
         let mut bmp = Bitmap::new(cx.width, content_h, theme.background);
         let Some(items) = self.pages.get(index) else { return bmp };
         // 基线按系统字体的 ascent 定位 (章节字体是反爬用的子集字体, 度量不可靠)
-        let metrics_chain = [*self.chain.last().expect("chain")];
+        let metrics_chain = [cx.app.ui_fonts[0]];
         for item in items {
             match item {
                 PageItem::Text { text, x, y, rich: Some(line), .. } => {
@@ -534,7 +534,7 @@ impl ReaderPage {
     /// 一行带样式的文字 (网页样式模式)。基线按行内最大字号定, 与兼容模式的整行文字一致。
     fn draw_rich_line(&self, cx: &mut Cx<KinNovel>, bmp: &mut Bitmap, text: &str, x: f32, y: f32, line: &RichLine) {
         let theme = cx.theme;
-        let metrics_chain = vec![*self.chain.last().expect("chain")];
+        let metrics_chain = vec![cx.app.ui_fonts[0]];
         let ascent = |cx: &Cx<KinNovel>, size: u32| cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain.clone(), size_px: size as f32 }).ascent;
         let baseline = (y + ascent(cx, line.max_size)).round();
         // 最近的注音基字 (x, 宽, 字号)
@@ -869,9 +869,9 @@ impl ReaderPage {
                 path: anchor.path,
                 offset: anchor.offset,
                 excerpt: self.page_excerpt(),
-                // 正文用了章节字体 (字体链不止系统字体) 时记下它, 书签列表用它画摘录
+                // 正文用了章节字体 (字体链比界面字体链长) 时记下它, 书签列表用它画摘录
                 font: match &cx.app.chapter_font {
-                    Some((path, _)) if self.chain.len() > 1 => path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                    Some((path, _)) if self.chain.len() > cx.app.ui_fonts.len() => path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
                     _ => String::new(),
                 },
                 time: store::unix_now(),
@@ -1425,7 +1425,7 @@ impl ReaderPage {
             let hw = ink.width(hint, m.tiny).ceil() as i32;
             ink.text(frame, card.x + card_w - pad - hw, card.y + pad / 2 + ((m.small - m.tiny) / 2.0) as i32, hint, m.tiny, theme.muted);
         }
-        let metrics_chain = vec![*self.chain.last().expect("chain")];
+        let metrics_chain = vec![cx.app.ui_fonts[0]];
         let ascent = cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain, size_px: font }).ascent;
         let style = TextStyle { fonts: self.chain.clone(), size_px: font };
         let mut y = card.y + pad / 2 + title_h + (line_h - font as i32) / 2;

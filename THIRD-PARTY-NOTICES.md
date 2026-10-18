@@ -209,6 +209,17 @@ chapter text uses the per-chapter fonts served by LightNovelShelf; neither is sh
 - License: SIL Open Font License 1.1 (no Reserved Font Name). The license text is in
   `LICENSE-NotoEmoji` (release zip) / `rust/crates/kn-app/data/LICENSE-NotoEmoji` (source).
 
+### LXGW Neo XiHei Screen (symbol subset "KinNovel Symbols")
+
+- URL: https://github.com/lxgw/LxgwNeoXiZhi-Screen (`LXGWNeoXiHeiScreenFull.ttf`), based on
+  IPAex Gothic by the Information-technology Promotion Agency, Japan (IPA).
+- Used for: symbols, punctuation and Latin/Greek/Cyrillic extensions the Kindle system font lacks
+  (e.g. ♡ ♢ ♤ ♧ ✿ ✦ 〜), in both the interface and the reader font chains. Reduced to those code
+  points, stripped of layout tables and hinting and renamed "KinNovel Symbols" by
+  `tools/gen_symbol_font.py`; embedded in `bin/kinnovel`. The original font is available from the URL above.
+- License: IPA Font License Agreement v1.0. The agreement is in `LICENSE-LXGW` (release zip) /
+  `rust/crates/kn-app/data/LICENSE-LXGW` (source).
+
 ## Content notice
 
 KinNovel accesses only the public LightNovelShelf web interfaces. Novel text,

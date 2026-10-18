@@ -8,7 +8,7 @@
        KinNovel/bin/kinnovel        static armv7 binary (0755)
        KinNovel/bin/kinnovel.sh     launcher (0755)
        KinNovel/{config.xml,menu.json}  what KUAL reads
-       KinNovel/{LICENSE,LICENSE-rime-pinyin-simp,LICENSE-NotoEmoji,README.md,THIRD-PARTY-NOTICES.md}
+       KinNovel/{LICENSE,LICENSE-rime-pinyin-simp,LICENSE-NotoEmoji,LICENSE-LXGW,README.md,THIRD-PARTY-NOTICES.md}
    Installing = copying the folder's contents to extensions/kinnovel/ (no install scripts).
 3. Refuses to package anything that looks like a credential.
 """
@@ -35,6 +35,8 @@ FILES = [
     ("LICENSE-rime-pinyin-simp", ROOT / "rust" / "crates" / "kn-ime" / "data" / "LICENSE-rime-pinyin-simp"),
     # OFL-1.1 requires the license with the embedded emoji font
     ("LICENSE-NotoEmoji", ROOT / "rust" / "crates" / "kn-app" / "data" / "LICENSE-NotoEmoji"),
+    # IPA Font License 1.0: the agreement accompanies the embedded symbol font (a derived program)
+    ("LICENSE-LXGW", ROOT / "rust" / "crates" / "kn-app" / "data" / "LICENSE-LXGW"),
 ]
 EXECUTABLE = {"bin/kinnovel", "bin/kinnovel.sh"}
 

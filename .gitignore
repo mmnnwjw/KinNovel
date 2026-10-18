@@ -25,3 +25,6 @@ id_rsa*
 
 # 本地 Claude Code 说明, 不入库
 CLAUDE.md
+
+# 用户反馈截图 (本地)
+/feedback/
