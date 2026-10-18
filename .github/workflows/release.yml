@@ -1,6 +1,7 @@
 name: Release
 
 # 推送 vX.Y.Z 标签: 测试 → 构建设备程序 → 打包 → 创建 (或更新) GitHub Release 并上传 zip
+# (安装包旁边带 Ed25519 签名 .zip.sig, tools/sign_update.py, 仓库 Secret UPDATE_SIGNING_KEY)
 # → 同步到自己的更新服务器 (R2, tools/r2_publish.py; 需要仓库 Secrets R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY)。
 # 说明文字取 docs/releases/vX.Y.Z.md, 没有就让 GitHub 按提交生成。
 on:
@@ -50,6 +51,13 @@ jobs:
           sh rust/build.sh kindle
           python tools/package_release.py --no-build
 
+      - name: Sign the package
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          python -m pip install pynacl
+          python tools/sign_update.py "build/KinNovel-$GITHUB_REF_NAME.zip"
+
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,11 +65,11 @@ jobs:
           tag="$GITHUB_REF_NAME"
           zip="build/KinNovel-$tag.zip"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$zip" --clobber
+            gh release upload "$tag" "$zip" "$zip.sig" --clobber
           elif [ -f "docs/releases/$tag.md" ]; then
-            gh release create "$tag" "$zip" --title "KinNovel ${tag#v}" --notes-file "docs/releases/$tag.md"
+            gh release create "$tag" "$zip" "$zip.sig" --title "KinNovel ${tag#v}" --notes-file "docs/releases/$tag.md"
           else
-            gh release create "$tag" "$zip" --title "KinNovel ${tag#v}" --generate-notes
+            gh release create "$tag" "$zip" "$zip.sig" --title "KinNovel ${tag#v}" --generate-notes
           fi
 
       - name: Publish to the update server (Cloudflare R2)
@@ -71,5 +79,5 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
-          python -m pip install boto3
+          python -m pip install boto3 pynacl
           python tools/r2_publish.py "$GITHUB_REF_NAME" --zip "build/KinNovel-$GITHUB_REF_NAME.zip"

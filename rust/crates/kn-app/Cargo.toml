@@ -20,3 +20,5 @@ sha2.workspace = true
 # 应用内更新: 解压发布包 (raw deflate + CRC 校验)
 miniz_oxide = "0.8"
 crc32fast = "1"
+# 应用内更新: 验证安装包签名
+ed25519-dalek = { version = "2", default-features = false }

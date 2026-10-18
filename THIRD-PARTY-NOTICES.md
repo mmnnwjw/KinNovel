@@ -97,8 +97,12 @@ crate sources published on crates.io.
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 |
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 |
+| curve25519-dalek | 4.1.3 | BSD-3-Clause |
+| curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 |
 | data-encoding | 2.11.1 | MIT |
 | digest | 0.10.7 | MIT OR Apache-2.0 |
+| ed25519 | 2.2.3 | Apache-2.0 OR MIT |
+| ed25519-dalek | 2.2.0 | BSD-3-Clause |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 |
@@ -153,6 +157,7 @@ crate sources published on crates.io.
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 |
+| signature | 2.2.0 | Apache-2.0 OR MIT |
 | simd-adler32 | 0.3.10 | MIT |
 | siphasher | 1.0.4 | MIT OR Apache-2.0 |
 | skrifa | 0.31.3 | MIT OR Apache-2.0 |

@@ -9,6 +9,9 @@
 //! - 版本信息: 更新服务器的 `releases.json` (与 GitHub 发行版列表同样的格式) 和 GitHub 的发行版列表**同时**查,
 //!   一边先回来后另一边最多再等几秒, 两边合并取最高的版本; 比当前新的所有版本的说明都给更新页显示。
 //! - 安装包: 更新服务器 → GitHub。有 sha256 (资产的 digest) 时下载后必须校验一致。
+//! - 签名: 每个安装包旁边有 `KinNovel-vX.Y.Z.zip.sig` (CI 用 Ed25519 私钥签的「包名 + sha256」,
+//!   `tools/sign_update.py`), 两个来源都放。验签不过的包一律不装, 所以更新服务器的桶或域名
+//!   被别人控制了也推不了假更新 (版本列表本身不签, 最多显示一个装不上的假版本)。
 //! 只访问这些主机, 不碰轻书架服务器。
 
 use std::collections::BTreeMap;
@@ -30,6 +33,8 @@ const UPDATE_SERVER_NAME: &str = "更新服务器";
 const SECOND_SOURCE_GRACE: Duration = Duration::from_secs(5);
 pub const PROJECT_PAGE: &str = "github.com/mmnnwjw/KinNovel";
 const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
+/// 发布签名公钥 (Ed25519)。私钥只在 CI (仓库 Secret `UPDATE_SIGNING_KEY`) 和作者本机。
+const SIGNING_PUBLIC_KEY: &str = "579c991f5684ee31379fdaaed587de2a0ee1147c7e8ee2d757bb03fc2008d9df";
 /// 发布包上限 (现在约 3.5 MB)
 const PACKAGE_LIMIT: usize = 32 * 1024 * 1024;
 
@@ -294,6 +299,46 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let text = text.trim();
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// 签名的内容: 包名 (含版本号, 旧版本的包不能冒充新版本) + sha256。与 `tools/sign_update.py` 一致。
+fn signed_message(package: &str, sha256: &str) -> String {
+    format!("kinnovel-update-v1\n{package}\n{sha256}\n")
+}
+
+/// `signature` = `.sig` 文件内容 (128 位十六进制)
+fn signature_valid(public_key: &str, package: &str, sha256: &str, signature: &str) -> bool {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let (Some(key), Some(sig)) = (hex_bytes::<32>(public_key), hex_bytes::<64>(signature)) else { return false };
+    let Ok(key) = VerifyingKey::from_bytes(&key) else { return false };
+    key.verify_strict(signed_message(package, sha256).as_bytes(), &Signature::from_bytes(&sig)).is_ok()
+}
+
+/// 从各来源取 `.sig` 验签, 有一个通过就行。
+fn check_signature(net: &kn_net::Client, release: &Release, sha256: &str) -> Result<(), String> {
+    let package = package_name(&release.version);
+    let mut errors = Vec::new();
+    for url in &release.urls {
+        let host = url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(url);
+        match net.download(&format!("{url}.sig"), 4096) {
+            Ok(sig) if signature_valid(SIGNING_PUBLIC_KEY, &package, sha256, &String::from_utf8_lossy(&sig)) => return Ok(()),
+            Ok(_) => errors.push(format!("{host}: 签名不符")),
+            Err(e) => errors.push(format!("{host}: 签名 {e}")),
+        }
+    }
+    Err(errors.join("; "))
+}
+
 /// 下载进度 (更新页显示)
 #[derive(Clone, Debug, Default)]
 pub struct DownloadProgress {
@@ -309,7 +354,7 @@ const SOURCE_DEADLINE: Duration = Duration::from_secs(240);
 const SLOW_CHECK_AFTER: Duration = Duration::from_secs(20);
 const MIN_BYTES_PER_SEC: f64 = 12.0 * 1024.0;
 
-/// 下载安装包: 按顺序换地址, 有 sha256 时校验。`progress` 大约每秒收到一次进度。
+/// 下载安装包: 按顺序换地址, 有 sha256 时校验, 再验签名。`progress` 大约每秒收到一次进度。
 pub fn download(net: &kn_net::Client, release: &Release, mut progress: impl FnMut(&DownloadProgress)) -> Result<Vec<u8>, String> {
     let mut errors = Vec::new();
     for url in &release.urls {
@@ -341,10 +386,16 @@ pub fn download(net: &kn_net::Client, release: &Release, mut progress: impl FnMu
                         eprintln!("[update] {host}: sha256 不符 ({actual})");
                         errors.push(format!("{host}: 校验不符"));
                     }
-                    _ => {
-                        eprintln!("[update] 从 {host} 下载了 {} 字节, {:.1} 秒", bytes.len(), started.elapsed().as_secs_f32());
-                        return Ok(bytes);
-                    }
+                    _ => match check_signature(net, release, &actual) {
+                        Ok(()) => {
+                            eprintln!("[update] 从 {host} 下载了 {} 字节, {:.1} 秒, 签名有效", bytes.len(), started.elapsed().as_secs_f32());
+                            return Ok(bytes);
+                        }
+                        Err(e) => {
+                            eprintln!("[update] {host}: 安装包签名无效 ({e})");
+                            errors.push(format!("{host}: 签名无效"));
+                        }
+                    },
                 }
             }
             Err(e) => {
@@ -509,6 +560,32 @@ mod tests {
         assert_eq!(r.changes.len(), 2);
         assert!(latest_of(&[]).is_none());
         assert!(find_sha256("没有哈希").is_none());
+    }
+
+    #[test]
+    fn signatures_bind_package_and_hash() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let public: String = key.verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let sign = |package: &str, sha: &str| -> String {
+            key.sign(signed_message(package, sha).as_bytes()).to_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let sig = sign("KinNovel-v9.0.0.zip", HASH);
+        assert!(signature_valid(&public, "KinNovel-v9.0.0.zip", HASH, &format!("{sig}\n")));
+        // 换了包名 (旧包冒充新版本) / 换了内容 / 别的密钥 / 乱码
+        assert!(!signature_valid(&public, "KinNovel-v9.0.1.zip", HASH, &sig));
+        assert!(!signature_valid(&public, "KinNovel-v9.0.0.zip", &HASH.replace('9', "8"), &sig));
+        assert!(!signature_valid(SIGNING_PUBLIC_KEY, "KinNovel-v9.0.0.zip", HASH, &sig));
+        assert!(!signature_valid(&public, "KinNovel-v9.0.0.zip", HASH, "zz"));
+    }
+
+    /// 与 tools/sign_update.py 的输出一致 (同一个固定种子)
+    #[test]
+    fn signature_format_matches_the_python_signer() {
+        // python: SigningKey(bytes([7]*32)).sign(b"kinnovel-update-v1\nKinNovel-v9.0.0.zip\n" + HASH + b"\n").signature.hex()
+        let public = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+        let sig = include_str!("../tests/fixtures/update_sig_v9.txt");
+        assert!(signature_valid(public, "KinNovel-v9.0.0.zip", HASH, sig));
     }
 
     /// 用 Python zipfile 同样的格式 (deflate) 打一个包: 这里手写一个只含 stored 条目的 zip 加一个 deflate 条目。

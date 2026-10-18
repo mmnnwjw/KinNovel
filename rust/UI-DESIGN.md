@@ -94,7 +94,8 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   "v1.6.2 · date" title; 安装/卸载 sections dropped), the version is always re-fetched on entry, bottom buttons by state (以后再说 + 下载并安装 → 正在下载… with source host and MB → 立即重启).
   Sources (`update.rs`): our update server (Cloudflare R2, `update.mmnnwjw.dpdns.org/releases.json`, same format as
   the GitHub list, uploaded by CI with `tools/r2_publish.py`) and the GitHub release list in parallel (5 s grace for
-  the second), merged, the highest version wins; package update server → GitHub, sha256 checked when known;
+  the second), merged, the highest version wins; package update server → GitHub, sha256 checked when known, then the
+  Ed25519 signature `<zip>.sig` (CI-signed "package name + sha256", public key built in) must verify or nothing is installed;
   a source slower than 12 KB/s after 20 s is dropped. 立即重启 writes /tmp/kinnovel_restart, the launcher re-execs itself.
 - **Update prompt** (`UpdatePrompt`): when the startup check (or an earlier one) knows a newer version not yet prompted
   (`data/update.json` `prompted`), a dialog over the page below (Backdrop::Below) once the top page is a tab page and at

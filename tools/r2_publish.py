@@ -1,14 +1,15 @@
 """把一个 GitHub 发行版同步到自己的更新服务器 (Cloudflare R2 桶 kinnovel-updates, 公开域名 update.mmnnwjw.dpdns.org)。
 
 上传两样东西 (客户端 `rust/crates/kn-app/src/update.rs` 读取):
-- `KinNovel-vX.Y.Z.zip`: 安装包, 文件名带版本号, 内容不会再变, 允许长期缓存。
+- `KinNovel-vX.Y.Z.zip` + `.sig`: 安装包和它的 Ed25519 签名 (`tools/sign_update.py`; 客户端验签不过不装)。
+  缓存一小时 (同一版本偶尔会原地替换)。
 - `releases.json`: 最近 20 个发行版, 格式与 GitHub `GET /repos/{repo}/releases` 相同 (只留客户端用到的字段),
   资产的 `digest` = "sha256:…"。文件名固定, 上传时设 `Cache-Control: no-cache`。
-先传安装包, 再传 releases.json, 所以列表里的版本在服务器上一定已经有包。
+先传安装包和签名, 再传 releases.json, 所以列表里的版本在服务器上一定已经有包。
 安装包必须与 GitHub 资产的 digest 一致 (没有 digest 时用本地算出的)。上传后经公开域名读回来校验。
 
 用法:
-  CI:   python tools/r2_publish.py v1.6.3 --zip build/KinNovel-v1.6.3.zip
+  CI:   python tools/r2_publish.py v1.6.3 --zip build/KinNovel-v1.6.3.zip   (旁边要有 .zip.sig)
         环境变量 R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY, GH_TOKEN (可选, 读 GitHub API)
   本地: python tools/r2_publish.py v1.6.2 --local-secrets   (没给 --zip 时从 GitHub 下载这个版本的资产)
         凭据从 ~/.kinovel-secrets/{S3_API,Access_Key_ID,Secret_Access_Key,GithubToken} 读, 不打印。
@@ -22,6 +23,9 @@ import urllib.request
 
 import boto3
 from botocore.config import Config
+from nacl.signing import VerifyKey
+
+from sign_update import PUBLIC_KEY, message
 
 REPO = 'mmnnwjw/KinNovel'
 BUCKET = 'kinnovel-updates'
@@ -67,14 +71,17 @@ def main():
 
     if args.zip:
         data = open(args.zip, 'rb').read()
+        sig = open(args.zip + '.sig', 'rb').read()
     else:
         data = http_get(asset['browser_download_url'])
+        sig = http_get(asset['browser_download_url'] + '.sig')
     digest = hashlib.sha256(data).hexdigest()
     expected = (asset.get('digest') or '').removeprefix('sha256:')
     if expected and expected != digest:
         sys.exit(f'{name}: sha256 {digest} 与 GitHub 资产 {expected} 不一致')
     if len(data) != asset['size']:
         sys.exit(f'{name}: 大小 {len(data)} 与 GitHub 资产 {asset["size"]} 不一致')
+    VerifyKey(bytes.fromhex(PUBLIC_KEY)).verify(message(name, digest), bytes.fromhex(sig.decode().strip()))
 
     listing = []
     for r in releases:
@@ -88,16 +95,16 @@ def main():
 
     s3 = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=key_id, aws_secret_access_key=secret,
                       region_name='auto', config=Config(signature_version='s3v4'))
-    s3.put_object(Bucket=BUCKET, Key=name, Body=data, ContentType='application/zip',
-                  CacheControl='public, max-age=31536000, immutable')
-    print(f'uploaded {name}: {len(data)} B, sha256 {digest}')
+    s3.put_object(Bucket=BUCKET, Key=name, Body=data, ContentType='application/zip', CacheControl='public, max-age=3600')
+    s3.put_object(Bucket=BUCKET, Key=name + '.sig', Body=sig, ContentType='text/plain', CacheControl='public, max-age=3600')
+    print(f'uploaded {name} + .sig: {len(data)} B, sha256 {digest}')
     s3.put_object(Bucket=BUCKET, Key='releases.json', Body=body, ContentType='application/json; charset=utf-8',
                   CacheControl='no-cache')
     print(f'uploaded releases.json: {len(listing)} releases, {len(body)} B')
 
     # 经公开域名读回来
     got = http_get(f'{PUBLIC}/{name}')
-    if hashlib.sha256(got).hexdigest() != digest:
+    if hashlib.sha256(got).hexdigest() != digest or http_get(f'{PUBLIC}/{name}.sig') != sig:
         sys.exit(f'{PUBLIC}/{name} 读回来的内容不一致')
     got = json.loads(http_get(f'{PUBLIC}/releases.json?t={digest[:8]}'))
     if not any(r['tag_name'] == tag for r in got):
