@@ -25,7 +25,7 @@ API = "https://gitee.com/api/v5"
 REPO = "KinNovel"
 
 
-def call(method, path, token, fields=None, files=None):
+def call(method, path, token, fields=None, files=None, timeout=120):
     url = f"{API}{path}"
     fields = dict(fields or {}, access_token=token)
     if method in ("GET", "DELETE"):
@@ -47,7 +47,7 @@ def call(method, path, token, fields=None, files=None):
         headers = {"Content-Type": "application/json;charset=UTF-8"}
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read()
             return r.status, (json.loads(body) if body.strip() else None)
     except urllib.error.HTTPError as e:
@@ -105,7 +105,19 @@ def release(user, token, tag, zip_path, notes_path=None):
     for f in files if isinstance(files, list) else []:
         if f.get("name") == name:
             call("DELETE", f"{repo}/releases/{rid}/attach_files/{f['id']}", token)
-    status, up = call("POST", f"{repo}/releases/{rid}/attach_files", token, files={"file": (name, blob)})
+    # GitHub 的机器到 Gitee 只有十几 KB/s: 3.7 MB 要几分钟, sendall 的超时按整次发送算
+    for attempt in range(3):
+        try:
+            status, up = call("POST", f"{repo}/releases/{rid}/attach_files", token, files={"file": (name, blob)}, timeout=1800)
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"gitee: upload attempt {attempt + 1} failed: {e}")
+            if attempt == 2:
+                raise
+            _, files = call("GET", f"{repo}/releases/{rid}/attach_files", token)
+            for f in files if isinstance(files, list) else []:
+                if f.get("name") == name:
+                    call("DELETE", f"{repo}/releases/{rid}/attach_files/{f['id']}", token)
     print(f"gitee: release {tag} id={rid}, upload {name} ({len(blob)} B, sha256 {digest}) -> {status}")
     if status >= 300:
         print(up)
