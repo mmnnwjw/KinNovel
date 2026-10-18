@@ -2,9 +2,11 @@
 
   python tools/gitee_release.py ensure-repo
       仓库 gitee.com/<GITEE_USER>/KinNovel 不存在时创建 (公开)。
+  python tools/gitee_release.py wait-tag <tag> [分钟]
+      等标签出现在 Gitee 上 (代码由 Gitee 的 Pull 镜像从 GitHub 拉取, 最短 5 分钟一次), 默认最多等 40 分钟。
   python tools/gitee_release.py release <tag> <zip> [notes.md]
       创建 (或更新) 该标签的发行版: 说明 = notes.md + "SHA256: <zip 的哈希>" (程序用它校验下载),
-      附件 = zip (同名旧附件先删掉)。标签要先推到 Gitee。
+      附件 = zip (同名旧附件先删掉)。标签要先在 Gitee 上 (wait-tag)。
 
 环境变量 GITEE_USER / GITEE_TOKEN (仓库 Secrets)。没设置时什么也不做 (退出码 0), 不影响 GitHub 发布。
 """
@@ -13,6 +15,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,6 +68,21 @@ def ensure_repo(user, token):
         sys.exit(1)
 
 
+def wait_tag(user, token, tag, minutes=40):
+    deadline = time.time() + minutes * 60
+    while True:
+        status, body = call("GET", f"/repos/{user}/{REPO}/tags", token, {"per_page": 100})
+        names = [t.get("name") for t in body] if status == 200 and isinstance(body, list) else []
+        if tag in names:
+            print(f"gitee: tag {tag} is there")
+            return
+        if time.time() > deadline:
+            print(f"gitee: tag {tag} not mirrored after {minutes} min (status {status}); check the pull mirror")
+            sys.exit(1)
+        print(f"gitee: waiting for {tag} ({len(names)} tags so far)")
+        time.sleep(30)
+
+
 def release(user, token, tag, zip_path, notes_path=None):
     blob = open(zip_path, "rb").read()
     digest = hashlib.sha256(blob).hexdigest()
@@ -102,6 +120,8 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "ensure-repo":
         ensure_repo(user, token)
+    elif cmd == "wait-tag" and len(sys.argv) >= 3:
+        wait_tag(user, token, sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 40)
     elif cmd == "release" and len(sys.argv) >= 4:
         release(user, token, sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
     else:

@@ -2,7 +2,7 @@ name: Release
 
 # 推送 vX.Y.Z 标签: 测试 → 构建设备程序 → 打包 → 创建 (或更新) GitHub Release 并上传 zip。
 # 说明文字取 docs/releases/vX.Y.Z.md, 没有就让 GitHub 按提交生成。
-# 之后在 Gitee 镜像上建同样的发行版 (国内连不上 GitHub 时程序从那里更新), 失败不影响 GitHub 发布。
+# Gitee 镜像上的同名发行版由 gitee-release.yml 在这个工作流成功后创建。
 on:
   push:
     tags: ["v*"]
@@ -63,17 +63,3 @@ jobs:
           else
             gh release create "$tag" "$zip" --title "KinNovel ${tag#v}" --generate-notes
           fi
-
-      - name: Publish the Gitee release (mirror for users who cannot reach GitHub)
-        continue-on-error: true
-        env:
-          GITEE_USER: ${{ secrets.GITEE_USER }}
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: |
-          [ -n "$GITEE_TOKEN" ] || { echo "GITEE_TOKEN not set, skipping"; exit 0; }
-          tag="$GITHUB_REF_NAME"
-          python tools/gitee_release.py ensure-repo
-          # checkout 是浅克隆, Gitee 上还没有的祖先提交推不过去
-          git fetch --unshallow origin || true
-          GIT_TERMINAL_PROMPT=0 timeout 2700 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 push --progress "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/KinNovel.git" "refs/tags/$tag:refs/tags/$tag" --force
-          python tools/gitee_release.py release "$tag" "build/KinNovel-$tag.zip" "docs/releases/$tag.md"
