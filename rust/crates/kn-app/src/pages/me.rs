@@ -118,9 +118,9 @@ impl Page<KinNovel> for MePage {
         let row_h = (m.touch as f32 * 1.15) as i32;
         let mut y = bar.bottom() + m.margin as i32 / 3;
 
-        // 账号卡片
-        let has_sign_in = logged_in && matches!(self.info, Some(Ok(_)));
-        let card_h = if has_sign_in { row_h + m.touch as i32 + m.margin as i32 / 3 } else { row_h };
+        // 账号卡片。登录后卡片固定两行高 (加载中/失败时按钮位置不变),
+        // 否则信息到达时下面的列表整体下移, 刚要点的行会错位 (点「退出」点成「关于」)。
+        let card_h = if logged_in { row_h + m.touch as i32 + m.margin as i32 / 3 } else { row_h };
         let card = Rect::new(side, y, cx.width - 2 * m.margin, card_h as u32);
         widgets::card(frame, &theme, &m, card);
         let pad = m.margin as i32 / 2;
@@ -138,36 +138,35 @@ impl Page<KinNovel> for MePage {
                 cx.hits.add(HIT_LOGIN, r).rounded(m.radius);
             }
         } else {
+            // 第二行: 签到 (大) + 退出登录, 任何状态下都在同一位置
+            let out_w = (m.touch as f32 * 2.0) as i32;
+            let gap = m.margin as i32 / 3;
+            let out = Rect::new(card.right() - pad - out_w, card.y + row_h, out_w as u32, m.touch);
+            widgets::button(&mut ink, frame, &theme, &m, out, "退出登录", ButtonStyle::Secondary);
+            cx.hits.add(HIT_LOGOUT, out).rounded(m.radius);
+            let left = Rect::new(card.x + pad, card.y + row_h, (out.x - gap - card.x - pad).max(0) as u32, m.touch);
             match &self.info {
-                None | Some(Err(_)) if self.info_loading => {
-                    ink.text(frame, side + pad, card.y + (row_h - (m.body * 1.25) as i32) / 2, "正在获取账号信息…", m.body, theme.muted);
-                }
-                Some(Err(e)) => {
-                    let text = ink.fit(&format!("获取账号信息失败: {e}"), m.small, (card.w as i32 - 2 * pad) as f32);
-                    ink.text(frame, side + pad, card.y + (row_h - (m.small * 1.25) as i32) / 2, &text, m.small, theme.muted);
-                    let r = Rect::new(card.right() - pad - (m.small * 4.0) as i32, card.y + (row_h - m.touch as i32) / 2, (m.small * 4.0) as u32, m.touch);
-                    widgets::button(&mut ink, frame, &theme, &m, r, "重试", ButtonStyle::Secondary);
-                    cx.hits.add(HIT_RETRY, r).rounded(m.radius);
-                }
                 Some(Ok(info)) => {
                     let title = format!("{} · Lv.{}", info.user_name, info.level);
                     ink.text(frame, side + pad, card.y + (row_h - (m.body * 1.25) as i32) / 2, &title, m.body, theme.foreground);
                     let meta = format!("金币 {} · 连续签到 {} 天", info.coin, info.sign_streak);
                     let nw = ink.width(&meta, m.small).ceil() as i32;
                     ink.text(frame, card.right() - pad - nw, card.y + (row_h - (m.small * 1.25) as i32) / 2, &meta, m.small, theme.muted);
-                    // 签到 (大) + 退出登录
-                    let out_w = (m.touch as f32 * 2.0) as i32;
-                    let gap = m.margin as i32 / 3;
-                    let out = Rect::new(card.right() - pad - out_w, card.y + row_h, out_w as u32, m.touch);
-                    widgets::button(&mut ink, frame, &theme, &m, out, "退出登录", ButtonStyle::Secondary);
-                    cx.hits.add(HIT_LOGOUT, out).rounded(m.radius);
-                    let r = Rect::new(card.x + pad, card.y + row_h, (out.x - gap - card.x - pad).max(0) as u32, m.touch);
                     let signed = info.today_signed || self.signing_in;
                     let label = if info.today_signed { "今日已签到" } else if self.signing_in { "签到中…" } else { "每日签到" };
-                    widgets::button(&mut ink, frame, &theme, &m, r, label, if signed { ButtonStyle::Disabled } else { ButtonStyle::Primary });
-                    cx.hits.add(HIT_SIGN_IN, r).rounded(m.radius).enabled(!signed);
+                    widgets::button(&mut ink, frame, &theme, &m, left, label, if signed { ButtonStyle::Disabled } else { ButtonStyle::Primary });
+                    cx.hits.add(HIT_SIGN_IN, left).rounded(m.radius).enabled(!signed);
                 }
-                None => {}
+                Some(Err(e)) if !self.info_loading => {
+                    let text = ink.fit(&format!("获取账号信息失败: {e}"), m.small, (card.w as i32 - 2 * pad) as f32);
+                    ink.text(frame, side + pad, card.y + (row_h - (m.small * 1.25) as i32) / 2, &text, m.small, theme.muted);
+                    widgets::button(&mut ink, frame, &theme, &m, left, "重试", ButtonStyle::Secondary);
+                    cx.hits.add(HIT_RETRY, left).rounded(m.radius);
+                }
+                _ => {
+                    ink.text(frame, side + pad, card.y + (row_h - (m.body * 1.25) as i32) / 2, "正在获取账号信息…", m.body, theme.muted);
+                    widgets::button(&mut ink, frame, &theme, &m, left, "每日签到", ButtonStyle::Disabled);
+                }
             }
         }
         y = card.bottom() + m.margin as i32 / 3;
@@ -235,6 +234,8 @@ impl Page<KinNovel> for MePage {
 
     fn enter(&mut self, cx: &mut Cx<KinNovel>, _returning: bool) {
         if logged_in(cx) && self.info.is_none() && !self.info_loading {
+            // 先显示上次的信息 (切换标签页时不再闪一下「正在获取」), 后台刷新
+            self.info = cx.app.my_info.clone().map(Ok);
             self.load_info(cx);
         }
     }
@@ -243,7 +244,15 @@ impl Page<KinNovel> for MePage {
         let msg = match msg.downcast::<InfoLoaded>() {
             Ok(loaded) => {
                 self.info_loading = false;
-                self.info = Some(loaded.0);
+                match loaded.0 {
+                    Ok(info) => {
+                        cx.app.my_info = Some(info.clone());
+                        self.info = Some(Ok(info));
+                    }
+                    // 刷新失败但有旧信息: 继续显示旧的
+                    Err(_) if self.info.as_ref().is_some_and(|i| i.is_ok()) => {}
+                    Err(e) => self.info = Some(Err(e)),
+                }
                 cx.request_redraw(RefreshHint::Ui);
                 return;
             }

@@ -77,6 +77,8 @@ pub struct KinNovel {
     unlocked: bool,
     lock_showing: bool,
     lock_pending: bool,
+    /// 上次取到的账号信息: 再进「我的」时先显示它, 后台刷新
+    pub my_info: Option<api::MyInfo>,
 }
 
 impl App for KinNovel {
@@ -180,6 +182,7 @@ impl KinNovel {
             unlocked: false,
             lock_showing: false,
             lock_pending: false,
+            my_info: None,
         }
     }
 
@@ -215,6 +218,7 @@ impl KinNovel {
 
     /// 退出登录: 删掉保存的账号和会话令牌。
     pub fn forget_account(&mut self) {
+        self.my_info = None;
         account::clear(&self.paths);
         if let Err(e) = self.net_client.logout() {
             eprintln!("[account] 清除会话失败: {e}");
