@@ -92,7 +92,8 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - **Update page** (`pages/update.rs`, KUAL 「KinNovel 工具箱 → 检查更新」 = `--update`, or 关于 → 更新): version card (当前 / 最新 · 来源),
   release notes as plain text with a pager (every version newer than the running one, newest first, each under a
   "v1.6.2 · date" title; 安装/卸载 sections dropped), the version is always re-fetched on entry, bottom buttons by state (以后再说 + 下载并安装 → 正在下载… with source host and MB → 立即重启).
-  Sources (`update.rs`): the GitHub release list, the highest version wins; package through GitHub mirrors (only with a
+  Sources (`update.rs`): the GitHub release list (api.github.com and gh-proxy.com in parallel, direct preferred,
+  proxied used when direct fails), the highest version wins; package through GitHub mirrors (only with a
   known sha256) → GitHub;
   a source slower than 12 KB/s after 20 s is dropped. 立即重启 writes /tmp/kinnovel_restart, the launcher re-execs itself.
 - **Update prompt** (`UpdatePrompt`): when the startup check (or an earlier one) knows a newer version not yet prompted

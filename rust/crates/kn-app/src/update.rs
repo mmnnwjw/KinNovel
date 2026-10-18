@@ -5,13 +5,15 @@
 //! 发现新版本时在首页类页面上弹一次提示 (每个版本只弹一次, `prompted`), 「我的 → 关于」一直有提示。
 //!
 //! - 版本信息: GitHub 的发行版列表, 取最高的版本; 比当前新的所有版本的说明都给更新页显示。
+//!   直连 api.github.com 和经 gh-proxy.com 代理同时问, 优先用直连的结果; 直连不通时用代理的
+//!   (这时版本号和 sha256 都来自这个第三方, 校验只防传输损坏, 用户接受了这个折中)。
 //! - 安装包: GitHub 在国内经常连不上, 先经加速镜像下载, 最后才用 GitHub 原始地址。
 //!   加速镜像是第三方服务, 只有拿到了 sha256 (GitHub 资产的 digest) 才用它, 下载后必须校验一致。
 //! 只访问这些主机, 不碰轻书架服务器。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -22,6 +24,10 @@ const GITHUB_LIST: &str = "https://api.github.com/repos/mmnnwjw/KinNovel/release
 const GITHUB_DOWNLOAD: &str = "https://github.com/mmnnwjw/KinNovel/releases/download";
 /// GitHub 加速镜像 (前缀 + 完整的 GitHub 地址)。2026-10 实测可用; 失效了按顺序跳过。
 const MIRRORS: &[&str] = &["https://gh-proxy.com/", "https://ghfast.top/", "https://gh.llkk.cc/"];
+/// 也能代理 api.github.com 的镜像 (2026-10 实测只有它可以; ghfast / llkk 返回 403)
+const API_PROXY: &str = "https://gh-proxy.com/";
+/// 代理先回来时, 再等直连这么久 (直连可信, 优先用; 国内直连常常要等到 30 秒超时)
+const DIRECT_GRACE: Duration = Duration::from_secs(5);
 pub const PROJECT_PAGE: &str = "github.com/mmnnwjw/KinNovel";
 const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
 /// 发布包上限 (现在约 3.5 MB)
@@ -241,9 +247,39 @@ fn fetch_list(net: &kn_net::Client, url: &str, parse: fn(&Value) -> Vec<Listed>)
     Ok(list)
 }
 
+/// 直连和经代理同时问 GitHub, 直连的结果优先。
 fn fetch_latest(net: &kn_net::Client) -> Result<Release, String> {
-    let list = fetch_list(net, GITHUB_LIST, parse_github).inspect_err(|e| eprintln!("[update] GitHub: {e}"))?;
-    latest_of(&list).ok_or_else(|| "没有发布版本".to_string())
+    let (tx, rx) = mpsc::channel();
+    for (direct, url) in [(true, GITHUB_LIST.to_string()), (false, format!("{API_PROXY}{GITHUB_LIST}"))] {
+        let (tx, net) = (tx.clone(), net.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send((direct, fetch_list(&net, &url, parse_github)));
+        });
+    }
+    drop(tx);
+    let mut proxied = None;
+    let mut errors = Vec::new();
+    for _ in 0..2 {
+        let received = if proxied.is_some() { rx.recv_timeout(DIRECT_GRACE).ok() } else { rx.recv().ok() };
+        let Some((direct, result)) = received else { break };
+        let name = if direct { "GitHub" } else { "gh-proxy.com" };
+        match result {
+            Ok(list) if direct => return latest_of(&list).ok_or_else(|| "没有发布版本".to_string()),
+            Ok(list) => proxied = Some(list),
+            Err(e) => {
+                eprintln!("[update] {name}: {e}");
+                errors.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    match proxied {
+        Some(list) => latest_of(&list).map(|mut r| {
+            r.source = "gh-proxy.com".into();
+            r
+        }),
+        None => None,
+    }
+    .ok_or_else(|| if errors.is_empty() { "没有发布版本".to_string() } else { errors.join("; ") })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
