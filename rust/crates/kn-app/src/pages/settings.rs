@@ -80,7 +80,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
             toggle("ignore_japanese", "忽略日文书籍", "", false),
             toggle("ignore_ai", "忽略 AI 翻译", "", false),
             step("cache_limit_mb", "缓存上限 (MB)", "启动时清理", 64.0, 1024.0, 64.0, 0, 192.0),
-            toggle("check_update", "自动检查更新", "每天一次, 访问 GitHub", true),
+            toggle("check_update", "自动检查更新", "每天一次, 访问更新服务器和 GitHub", true),
             Setting { key: "lock_pin", label: "锁屏密码", note: "启动和唤醒时输入 6 位数字", kind: Kind::LockToggle, default: 0.0 },
             Setting { key: "lock_pin", label: "修改锁屏密码", note: "", kind: Kind::LockChange, default: 0.0 },
         ],

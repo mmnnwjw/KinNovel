@@ -4,11 +4,11 @@
 //! `data/update.json` = `{"checked": unix 秒, "latest": "1.3.0", "prompted": "1.3.0"}`:
 //! 发现新版本时在首页类页面上弹一次提示 (每个版本只弹一次, `prompted`), 「我的 → 关于」一直有提示。
 //!
-//! - 版本信息: GitHub 的发行版列表, 取最高的版本; 比当前新的所有版本的说明都给更新页显示。
-//!   直连 api.github.com 和经 gh-proxy.com 代理同时问, 优先用直连的结果; 直连不通时用代理的
-//!   (这时版本号和 sha256 都来自这个第三方, 校验只防传输损坏, 用户接受了这个折中)。
-//! - 安装包: GitHub 在国内经常连不上, 先经加速镜像下载, 最后才用 GitHub 原始地址。
-//!   加速镜像是第三方服务, 只有拿到了 sha256 (GitHub 资产的 digest) 才用它, 下载后必须校验一致。
+//! GitHub 在国内经常连不上, 所以还有自己的更新服务器 (Cloudflare R2 桶 + 自定义域名, 发布时 CI 上传,
+//! `tools/r2_publish.py`):
+//! - 版本信息: 更新服务器的 `releases.json` (与 GitHub 发行版列表同样的格式) 和 GitHub 的发行版列表**同时**查,
+//!   一边先回来后另一边最多再等几秒, 两边合并取最高的版本; 比当前新的所有版本的说明都给更新页显示。
+//! - 安装包: 更新服务器 → GitHub。有 sha256 (资产的 digest) 时下载后必须校验一致。
 //! 只访问这些主机, 不碰轻书架服务器。
 
 use std::collections::BTreeMap;
@@ -22,12 +22,12 @@ use crate::store::{self, atomic_write, Paths};
 
 const GITHUB_LIST: &str = "https://api.github.com/repos/mmnnwjw/KinNovel/releases?per_page=20";
 const GITHUB_DOWNLOAD: &str = "https://github.com/mmnnwjw/KinNovel/releases/download";
-/// GitHub 加速镜像 (前缀 + 完整的 GitHub 地址)。2026-10 实测可用; 失效了按顺序跳过。
-const MIRRORS: &[&str] = &["https://gh-proxy.com/", "https://ghfast.top/", "https://gh.llkk.cc/"];
-/// 也能代理 api.github.com 的镜像 (2026-10 实测只有它可以; ghfast / llkk 返回 403)
-const API_PROXY: &str = "https://gh-proxy.com/";
-/// 代理先回来时, 再等直连这么久 (直连可信, 优先用; 国内直连常常要等到 30 秒超时)
-const DIRECT_GRACE: Duration = Duration::from_secs(5);
+/// 自己的更新服务器: `releases.json` + `KinNovel-vX.Y.Z.zip`
+const UPDATE_SERVER: &str = "https://update.mmnnwjw.dpdns.org";
+/// 更新页「来自 …」里的名字 (域名太长, 放不下)
+const UPDATE_SERVER_NAME: &str = "更新服务器";
+/// 一个来源先回来后, 另一个最多再等这么久 (国内连 GitHub 常常要等到 30 秒超时)
+const SECOND_SOURCE_GRACE: Duration = Duration::from_secs(5);
 pub const PROJECT_PAGE: &str = "github.com/mmnnwjw/KinNovel";
 const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
 /// 发布包上限 (现在约 3.5 MB)
@@ -214,9 +214,17 @@ fn parse_github(v: &Value) -> Vec<Listed> {
         .collect()
 }
 
-/// 发行版列表 → 要安装的版本: 取最高版本, 收集比当前新的所有版本的说明; 安装包地址 镜像 (有 sha256 时) → GitHub。
+/// 发行版列表 → 要安装的版本: 取最高版本, 收集比当前新的所有版本的说明; 安装包地址 更新服务器 → GitHub。
+/// 列表可以是两个来源拼起来的: 同一版本取有 sha256 的那条。
 fn latest_of(list: &[Listed]) -> Option<Release> {
-    let by_version: BTreeMap<(u32, u32, u32), &Listed> = list.iter().filter_map(|l| Some((parse_version(&l.version)?, l))).collect();
+    let mut by_version: BTreeMap<(u32, u32, u32), &Listed> = BTreeMap::new();
+    for l in list {
+        let Some(key) = parse_version(&l.version) else { continue };
+        let slot = by_version.entry(key).or_insert(l);
+        if slot.sha256.is_none() && l.sha256.is_some() {
+            *slot = l;
+        }
+    }
     let (_, latest) = by_version.iter().next_back()?;
     let current = parse_version(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let mut changes: Vec<VersionNotes> = by_version
@@ -228,13 +236,9 @@ fn latest_of(list: &[Listed]) -> Option<Release> {
     if changes.is_empty() {
         changes.push(VersionNotes { version: latest.version.clone(), date: latest.date.clone(), notes: latest.notes.clone() });
     }
-    let github = format!("{GITHUB_DOWNLOAD}/v{0}/{1}", latest.version, package_name(&latest.version));
-    let mut urls = Vec::new();
-    if latest.sha256.is_some() {
-        urls.extend(MIRRORS.iter().map(|m| format!("{m}{github}")));
-    }
-    urls.push(github);
-    Some(Release { version: latest.version.clone(), changes, sha256: latest.sha256.clone(), urls, source: "GitHub".into() })
+    let name = package_name(&latest.version);
+    let urls = vec![format!("{UPDATE_SERVER}/{name}"), format!("{GITHUB_DOWNLOAD}/v{0}/{name}", latest.version)];
+    Some(Release { version: latest.version.clone(), changes, sha256: latest.sha256.clone(), urls, source: String::new() })
 }
 
 fn fetch_list(net: &kn_net::Client, url: &str, parse: fn(&Value) -> Vec<Listed>) -> Result<Vec<Listed>, String> {
@@ -247,39 +251,42 @@ fn fetch_list(net: &kn_net::Client, url: &str, parse: fn(&Value) -> Vec<Listed>)
     Ok(list)
 }
 
-/// 直连和经代理同时问 GitHub, 直连的结果优先。
+/// 同时问更新服务器和 GitHub, 合并结果。
 fn fetch_latest(net: &kn_net::Client) -> Result<Release, String> {
+    // releases.json 上传时设了 no-cache; 再加个时间戳, 以后给域名开了缓存也拿到的是最新的
+    let server = format!("{UPDATE_SERVER}/releases.json?t={}", store::unix_now());
     let (tx, rx) = mpsc::channel();
-    for (direct, url) in [(true, GITHUB_LIST.to_string()), (false, format!("{API_PROXY}{GITHUB_LIST}"))] {
+    for (name, url) in [(UPDATE_SERVER_NAME, server), ("GitHub", GITHUB_LIST.to_string())] {
         let (tx, net) = (tx.clone(), net.clone());
         std::thread::spawn(move || {
-            let _ = tx.send((direct, fetch_list(&net, &url, parse_github)));
+            let _ = tx.send((name, fetch_list(&net, &url, parse_github)));
         });
     }
     drop(tx);
-    let mut proxied = None;
+    let mut list = Vec::new();
+    let mut sources = Vec::new();
     let mut errors = Vec::new();
     for _ in 0..2 {
-        let received = if proxied.is_some() { rx.recv_timeout(DIRECT_GRACE).ok() } else { rx.recv().ok() };
-        let Some((direct, result)) = received else { break };
-        let name = if direct { "GitHub" } else { "gh-proxy.com" };
+        let received = if sources.is_empty() { rx.recv().ok() } else { rx.recv_timeout(SECOND_SOURCE_GRACE).ok() };
+        let Some((name, result)) = received else { break };
         match result {
-            Ok(list) if direct => return latest_of(&list).ok_or_else(|| "没有发布版本".to_string()),
-            Ok(list) => proxied = Some(list),
+            Ok(l) => {
+                list.extend(l);
+                sources.push(name);
+            }
             Err(e) => {
                 eprintln!("[update] {name}: {e}");
                 errors.push(format!("{name}: {e}"));
             }
         }
     }
-    match proxied {
-        Some(list) => latest_of(&list).map(|mut r| {
-            r.source = "gh-proxy.com".into();
+    sources.sort_by_key(|n| *n != UPDATE_SERVER_NAME);
+    latest_of(&list)
+        .map(|mut r| {
+            r.source = sources.join(" + ");
             r
-        }),
-        None => None,
-    }
-    .ok_or_else(|| if errors.is_empty() { "没有发布版本".to_string() } else { errors.join("; ") })
+        })
+        .ok_or_else(|| if errors.is_empty() { "没有发布版本".to_string() } else { errors.join("; ") })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -297,7 +304,7 @@ pub struct DownloadProgress {
 }
 
 /// 一个来源最多用这么久; 开始一段时间后平均速度还低于下限就换下一个
-/// (有的加速镜像会以几 KB/s 的涓流一直传, 读超时触发不了)。
+/// (有的线路会以几 KB/s 的涓流一直传, 读超时触发不了)。
 const SOURCE_DEADLINE: Duration = Duration::from_secs(240);
 const SLOW_CHECK_AFTER: Duration = Duration::from_secs(20);
 const MIN_BYTES_PER_SEC: f64 = 12.0 * 1024.0;
@@ -490,12 +497,16 @@ mod tests {
         assert_eq!(r.sha256.as_deref(), Some(HASH));
         let versions: Vec<_> = r.changes.iter().map(|c| (c.version.as_str(), c.date.as_str())).collect();
         assert_eq!(versions, vec![(next2.as_str(), "2026-10-21"), (next.as_str(), "2026-10-20")]);
-        assert!(r.urls[0].starts_with("https://gh-proxy.com/https://github.com/"));
-        assert!(r.urls.last().unwrap().starts_with("https://github.com/"));
-        // 没有 sha256: 不用加速镜像
-        let plain = json!([{"tag_name": format!("v{next}"), "body": "", "assets": []}]);
-        let r = latest_of(&parse_github(&plain)).unwrap();
-        assert_eq!(r.urls.len(), 1);
+        assert_eq!(r.urls[0], format!("https://update.mmnnwjw.dpdns.org/KinNovel-v{next2}.zip"));
+        assert!(r.urls[1].starts_with("https://github.com/"));
+        // 两个来源合并: 同一版本取有 sha256 的那条, 版本取两边最高
+        let server = json!([{"tag_name": format!("v{next}"), "body": "", "assets": []}]);
+        let mut both = parse_github(&server);
+        both.extend(parse_github(&github));
+        let r = latest_of(&both).unwrap();
+        assert_eq!(r.version, next2);
+        assert_eq!(r.sha256.as_deref(), Some(HASH));
+        assert_eq!(r.changes.len(), 2);
         assert!(latest_of(&[]).is_none());
         assert!(find_sha256("没有哈希").is_none());
     }
