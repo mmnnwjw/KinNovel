@@ -102,7 +102,8 @@ pub trait App: Sized + 'static {
     /// 启动后、首页进入之后调用一次 (例如用 `cx.spawn_app` 开始后台登录, 结果经任务池送回)。
     fn on_start(_cx: &mut Cx<Self>) {}
     /// 每个后台结果处理完后、休眠唤醒后调用: 应用全局想做的导航 (例如保存的账号失效 → 登录页)。不支持 `Exit`。
-    fn take_transition(&mut self) -> Transition<Self> {
+    /// `top` = 当前栈顶页面 (例如只在首页类页面上弹提示)。
+    fn take_transition(&mut self, _top: PageId) -> Transition<Self> {
         Transition::None
     }
 }
@@ -511,7 +512,8 @@ impl<A: App> Stack<A> {
                 }
             }
         }
-        match rt.app.take_transition() {
+        let top = self.top().page.id();
+        match rt.app.take_transition(top) {
             Transition::None | Transition::Exit => {}
             transition => {
                 self.apply(rt, transition);
@@ -869,7 +871,8 @@ pub fn run<A: App>(
                     scheduler.invalidate();
                     rt.app.on_resume();
                     // 应用唤醒后要盖的页面 (例如锁屏) 在第一帧之前压栈, 原页面不会先露出来
-                    match rt.app.take_transition() {
+                    let top = stack.top().page.id();
+                    match rt.app.take_transition(top) {
                         Transition::None | Transition::Exit => {}
                         transition => {
                             stack.apply(&mut rt, transition);

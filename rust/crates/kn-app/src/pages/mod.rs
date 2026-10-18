@@ -29,7 +29,7 @@ pub mod update;
 
 use kn_render::Bitmap;
 use kn_ui::widgets::{self, Ink};
-use kn_ui::{Cx, HitId, Orientation, Page, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, PageId, Transition};
 
 use crate::KinNovel;
 
@@ -53,6 +53,11 @@ pub fn tab_page(tab: Tab) -> Box<dyn Page<KinNovel>> {
         Tab::Discover => Box::new(discover::DiscoverPage::default()),
         Tab::Me => Box::new(me::MePage::default()),
     }
+}
+
+/// 栈顶是否是四个标签页之一 (书架 / 历史 / 发现 / 我的 的页面 id, 见各页面的 `Page::id`)。
+pub fn is_tab_page(id: PageId) -> bool {
+    matches!(id, PageId(100) | PageId(110) | PageId(120) | PageId(130))
 }
 
 /// 画标签栏, 返回它的顶边 y。

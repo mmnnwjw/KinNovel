@@ -90,9 +90,14 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
   The account card has a fixed two-row height once logged in (loading / failed states keep the 签到 + 退出登录 row in place),
   and the last 账号信息 is cached in the app, so the entry list never shifts under the finger when the info arrives.
 - **Update page** (`pages/update.rs`, KUAL 「KinNovel 工具箱 → 检查更新」 = `--update`, or 关于 → 更新): version card (当前 / 最新 · 来源),
-  release notes as plain text with a pager, bottom buttons by state (以后再说 + 下载并安装 → 正在下载… with source host and MB → 立即重启).
-  Sources (`update.rs`): Gitee release API → GitHub API; package from Gitee → GitHub through mirrors (only with a known sha256) → GitHub;
+  release notes as plain text with a pager (every version newer than the running one, newest first, each under a
+  "v1.6.2 · date" title; 安装/卸载 sections dropped), the version is always re-fetched on entry, bottom buttons by state (以后再说 + 下载并安装 → 正在下载… with source host and MB → 立即重启).
+  Sources (`update.rs`): Gitee and GitHub release lists queried in parallel, the highest version wins (a lagging Gitee
+  never installs an old build; the second source gets 5 s after the first answers); package from Gitee → GitHub through mirrors (only with a known sha256) → GitHub;
   a source slower than 12 KB/s after 20 s is dropped. 立即重启 writes /tmp/kinnovel_restart, the launcher re-execs itself.
+- **Update prompt** (`UpdatePrompt`): when the startup check (or an earlier one) knows a newer version not yet prompted
+  (`data/update.json` `prompted`), a dialog over the page below (Backdrop::Below) once the top page is a tab page and at
+  least 5 s after start: 「KinNovel x.y.z 已发布」, 以后再说 / 查看更新 (→ update page). Once per version; off with 自动检查更新.
 - **Uninstall page** (`UninstallPage`, 「卸载 KinNovel」 = `--uninstall`): what gets deleted, 取消 / 卸载 + a confirm dialog;
   writes /tmp/kinnovel_uninstall and exits, the launcher restores the framework and deletes the extension folder.
 - Sleep screen (设置 → 显示 → 休眠显示封面, restart needed): cover of the last-read book fitted above an info band

@@ -9,7 +9,7 @@ use std::any::Any;
 use kn_platform::{GestureKind, InputEvent};
 use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Page, PageId, RefreshHint, Transition};
+use kn_ui::{Backdrop, Cx, HitId, Page, PageId, RefreshHint, Transition};
 
 use crate::update::{self, Release};
 use crate::KinNovel;
@@ -91,11 +91,20 @@ impl UpdatePage {
     }
 }
 
-/// 发行说明 (Markdown) → 纯文本行: 去掉标题井号与粗体星号, 列表项用「·」; 标题前空一行, 标题后不空。
-fn plain_notes(notes: &str) -> Vec<String> {
+/// 发行说明 (Markdown) → 纯文本行 (文字, 是否小标题): 去掉井号与粗体星号, 列表项用「·」; 标题后不空行。
+/// 「安装」「卸载」小节 (写给手动安装的人) 在程序里不显示。
+fn plain_notes(notes: &str) -> Vec<(String, bool)> {
     let mut after_heading = false;
+    let mut in_install = false;
     notes
         .lines()
+        .filter(|l| {
+            if l.starts_with('#') {
+                let title = l.trim_start_matches('#').trim();
+                in_install = title.starts_with("安装") || title.starts_with("卸载");
+            }
+            !in_install
+        })
         .filter(|l| {
             let skip = after_heading && l.trim().is_empty();
             if !skip {
@@ -106,16 +115,17 @@ fn plain_notes(notes: &str) -> Vec<String> {
         .map(str::trim_end)
         .filter(|l| !l.to_ascii_lowercase().starts_with("sha256"))
         .map(|l| {
+            let heading = l.starts_with('#');
             let l = l.trim_start_matches('#').trim_start();
             let l = match l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")) {
                 Some(rest) => format!("· {rest}"),
                 None => l.to_string(),
             };
-            l.replace("**", "").replace('`', "")
+            (l.replace("**", "").replace('`', ""), heading)
         })
-        .fold(Vec::new(), |mut out: Vec<String>, l| {
+        .fold(Vec::new(), |mut out: Vec<(String, bool)>, l| {
             // 连续空行只留一个
-            if !(l.is_empty() && out.last().is_none_or(|p| p.is_empty())) {
+            if !(l.0.is_empty() && out.last().is_none_or(|p| p.0.is_empty())) {
                 out.push(l);
             }
             out
@@ -218,19 +228,44 @@ impl Page<KinNovel> for UpdatePage {
             State::Available(_) => {}
         }
         if let State::Available(r) = &self.state {
-            let mut wrapped = Vec::new();
-            for l in plain_notes(&r.notes) {
-                if l.is_empty() {
-                    wrapped.push(String::new());
-                } else {
-                    wrapped.extend(super::announce::wrap_all(&l, &ink, m.small, width as f32));
+            // (文字, 样式): 0 = 正文, 1 = 版本标题, 2 = 灰字
+            let mut wrapped: Vec<(String, u8)> = Vec::new();
+            if r.changes.len() > 1 {
+                let text = format!("从 {} 更新到 {}, 包含 {} 个版本的改动:", env!("CARGO_PKG_VERSION"), r.version, r.changes.len());
+                wrapped.extend(super::announce::wrap_all(&text, &ink, m.small, width as f32).into_iter().map(|l| (l, 2)));
+                wrapped.push((String::new(), 0));
+            }
+            for (i, change) in r.changes.iter().enumerate() {
+                if i > 0 {
+                    wrapped.push((String::new(), 0));
+                }
+                let title = if change.date.is_empty() { format!("v{}", change.version) } else { format!("v{} · {}", change.version, change.date) };
+                wrapped.push((title, 1));
+                for (l, heading) in plain_notes(&change.notes) {
+                    if l.is_empty() {
+                        wrapped.push((String::new(), 0));
+                    } else {
+                        let kind = if heading { 2 } else { 0 };
+                        wrapped.extend(super::announce::wrap_all(&l, &ink, m.small, width as f32).into_iter().map(|w| (w, kind)));
+                    }
                 }
             }
+            // 分页时页首不留空行
+            let wrapped: Vec<(String, u8)> = wrapped.into_iter().fold(Vec::new(), |mut out, l| {
+                if !(l.0.is_empty() && out.last().is_none_or(|p: &(String, u8)| p.0.is_empty())) {
+                    out.push(l);
+                }
+                out
+            });
             let per_page = ((area_bottom - y - m.touch as i32) / line_h).max(1) as usize;
             let pages = wrapped.len().div_ceil(per_page).max(1);
             self.notes_page = self.notes_page.min(pages - 1);
-            for l in wrapped.iter().skip(self.notes_page * per_page).take(per_page) {
-                ink.text(frame, side, y, l, m.small, theme.foreground);
+            for (l, kind) in wrapped.iter().skip(self.notes_page * per_page).take(per_page) {
+                match kind {
+                    1 => ink.text(frame, side, y + ((m.small - m.body) * 0.6) as i32, l, m.body, theme.foreground),
+                    2 => ink.text(frame, side, y, l, m.small, theme.muted),
+                    _ => ink.text(frame, side, y, l, m.small, theme.foreground),
+                };
                 y += line_h;
             }
             if pages > 1 {
@@ -422,5 +457,105 @@ impl Page<KinNovel> for UninstallPage {
             _ => {}
         }
         Transition::None
+    }
+}
+
+const HIT_PROMPT_LATER: HitId = HitId(8);
+const HIT_PROMPT_VIEW: HitId = HitId(9);
+
+/// 启动检查发现新版本时弹的提示 (盖在书架等首页类页面上, 背景就是下面那页, 只刷新弹窗)。每个版本只弹一次。
+pub struct UpdatePrompt {
+    version: String,
+    backdrop: Option<Bitmap>,
+    backdrop_set: bool,
+}
+
+impl UpdatePrompt {
+    pub fn new(version: String) -> Self {
+        UpdatePrompt { version, backdrop: None, backdrop_set: false }
+    }
+}
+
+impl Page<KinNovel> for UpdatePrompt {
+    fn id(&self) -> PageId {
+        PageId(192)
+    }
+
+    fn flash_on_enter(&self) -> bool {
+        false
+    }
+
+    fn wants_backdrop(&self) -> Backdrop {
+        if self.backdrop_set { Backdrop::None } else { Backdrop::Below }
+    }
+
+    fn set_backdrop(&mut self, backdrop: Option<Bitmap>) {
+        self.backdrop = backdrop;
+        self.backdrop_set = true;
+    }
+
+    fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
+        let theme = cx.theme;
+        let m = cx.app.metrics;
+        if let Some(bg) = self.backdrop.as_ref().filter(|bg| bg.width() == cx.width && bg.height() == cx.height) {
+            frame.blit(bg, bg.bounds(), 0, 0);
+        }
+        let chain = cx.app.ui_fonts.clone();
+        let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
+        let current = format!("当前版本 {}", env!("CARGO_PKG_VERSION"));
+        widgets::dialog(
+            &mut ink,
+            frame,
+            cx.hits,
+            &theme,
+            &m,
+            &format!("KinNovel {} 已发布", self.version),
+            &[current.as_str(), "以后也可在「我的 → 关于」里更新"],
+            &[("以后再说", HIT_PROMPT_LATER, ButtonStyle::Secondary), ("查看更新", HIT_PROMPT_VIEW, ButtonStyle::Primary)],
+        );
+    }
+
+    fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
+        let InputEvent::Gesture(g) = event else { return Transition::None };
+        if g.kind != GestureKind::Tap {
+            return Transition::None;
+        }
+        match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
+            Some(HIT_PROMPT_LATER) => {
+                // 下面那页重画后弹窗区域局部闪刷, 不留深色按钮的残影
+                cx.request_redraw(RefreshHint::Clean);
+                Transition::Back
+            }
+            // 更新页会重新检查一次, 装的是那时最新的版本
+            Some(HIT_PROMPT_VIEW) => Transition::Replace(Box::new(UpdatePage::new(Origin::App))),
+            _ => Transition::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_drop_install_sections() {
+        let notes = "## 新功能
+
+- **徽章**: 灰框
+
+## 安装
+
+下载 zip
+
+卸载时删除
+
+## 改进
+- 更快
+SHA256: abc
+";
+        let lines: Vec<(String, bool)> = plain_notes(notes);
+        let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(texts, vec!["新功能", "· 徽章: 灰框", "", "改进", "· 更快"]);
+        assert!(lines[0].1 && !lines[1].1 && lines[3].1);
     }
 }

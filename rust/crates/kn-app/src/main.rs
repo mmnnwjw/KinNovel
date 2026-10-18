@@ -79,6 +79,10 @@ pub struct KinNovel {
     lock_pending: bool,
     /// KUAL 菜单「KinNovel 工具箱」里的入口 (`--update` / `--uninstall`): 首页换成对应页面, 用一次
     pub start: StartMode,
+    /// 自动检查更新: None = 关闭, Some(true) = 本次启动要在后台检查 (距上次超过一天), Some(false) = 不用查
+    update_check: Option<bool>,
+    /// 发现了还没提示过的新版本: 下次栈顶是首页类页面时弹提示
+    update_prompt: Option<String>,
     /// 上次取到的账号信息: 再进「我的」时先显示它, 后台刷新
     pub my_info: Option<api::MyInfo>,
 }
@@ -127,6 +131,7 @@ impl App for KinNovel {
     /// 有令牌就不动; 没有令牌但保存了账号时, 后台登录。走任务池: 账号被拒时结果送回 UI 线程,
     /// 随后的 `take_transition` 弹出登录页。
     fn on_start(cx: &mut kn_ui::Cx<Self>) {
+        Self::start_update_check(cx);
         let Some(net) = cx.app.net() else { return };
         if net.user().is_some() || !net.has_account() {
             return;
@@ -153,7 +158,13 @@ impl App for KinNovel {
         }
     }
 
-    fn take_transition(&mut self) -> kn_ui::Transition<Self> {
+    fn take_transition(&mut self, top: kn_ui::PageId) -> kn_ui::Transition<Self> {
+        // 新版本提示只盖在书架/历史/发现/我的上, 不打断阅读、锁屏、登录等
+        if self.update_prompt.is_some() && pages::is_tab_page(top) && !self.lock_pending {
+            let version = self.update_prompt.take().unwrap_or_default();
+            update::mark_prompted(&self.paths, &version);
+            return kn_ui::Transition::Push(Box::new(pages::update::UpdatePrompt::new(version)));
+        }
         if self.lock_pending {
             self.lock_pending = false;
             self.lock_showing = true;
@@ -175,6 +186,24 @@ impl App for KinNovel {
 }
 
 impl KinNovel {
+    /// 启动时的自动检查更新: 需要时后台查 (Gitee + GitHub), 查完 (或不用查但之前查到过) 有没提示过的新版本就排队弹提示。
+    /// 在单独的线程里做 (网络最长要等 30 秒, 不占页面的任务池), 并且至少等到启动几秒后才交回,
+    /// 免得书架还没加载完, 弹窗的背景就冻结在空书架上。
+    fn start_update_check(cx: &mut kn_ui::Cx<Self>) {
+        const PROMPT_NOT_BEFORE: Duration = Duration::from_secs(5);
+        let Some(due) = cx.app.update_check else { return };
+        let (paths, net, poster) = (cx.app.paths.clone(), cx.app.net(), cx.app_poster());
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            if let (true, Some(net)) = (due, net) {
+                update::background_check(&paths, &net);
+            }
+            let Some(prompt) = update::unprompted(&paths) else { return };
+            std::thread::sleep(PROMPT_NOT_BEFORE.saturating_sub(started.elapsed()));
+            poster.post(kn_ui::Delivery::App(Box::new(move |app: &mut KinNovel| app.update_prompt = Some(prompt))));
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(paths: Paths, config: Config, ui_fonts: Vec<FontId>, width: u32, height: u32, dpi: u32, light: kn_platform::Frontlight, online: bool) -> Self {
         let night = config.bool("night_mode", false);
@@ -207,6 +236,8 @@ impl KinNovel {
             unlocked: false,
             lock_showing: false,
             lock_pending: false,
+            update_check: None,
+            update_prompt: None,
             my_info: None,
             start: StartMode::Normal,
         }
@@ -330,7 +361,9 @@ fn preview(args: &[String]) {
     // KN_START=update / uninstall: 预览 KUAL 工具箱的页面
     app.start = StartMode::from_args(&["".into(), format!("--{}", std::env::var("KN_START").unwrap_or_default())]);
     // 只读出上次的检查结果 (不联网)
-    update::start(&app.paths, None, false);
+    update::start(&app.paths, false);
+    // KN_TEST_UPDATE_PROMPT=1.7.0: 预览新版本提示弹窗
+    app.update_prompt = std::env::var("KN_TEST_UPDATE_PROMPT").ok();
     let mut ui = kn_ui::Headless::new(app, fonts, w, h).expect("headless");
     let settle = |ui: &mut kn_ui::Headless<KinNovel>| ui.settle(Duration::from_secs(20));
     settle(&mut ui);
@@ -481,7 +514,9 @@ fn run_device(start: StartMode) {
     app.startup_notice = crash_notice;
     app.splash_shown = true;
     app.start = start;
-    update::start(&app.paths, app.net(), app.config.bool("check_update", true));
+    let auto_check = app.config.bool("check_update", true);
+    let due = update::start(&app.paths, auto_check);
+    app.update_check = auto_check.then_some(due);
     // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
     if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {
         std::thread::Builder::new()
