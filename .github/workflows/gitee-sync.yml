@@ -1,0 +1,40 @@
+name: Gitee mirror
+
+# 每次推送 (分支 / 标签) 都把仓库同步到 gitee.com/<GITEE_USER>/KinNovel (参考 mmnnwjw/sync-bot)。
+# 国内连不上 GitHub 时程序从 Gitee 检查更新、下载安装包; 发行版和附件由 release.yml 上传。
+# 需要仓库 Secrets GITEE_USER / GITEE_TOKEN (Gitee 私人令牌, 勾选 projects); 没设置时跳过。
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: gitee-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      GITEE_USER: ${{ secrets.GITEE_USER }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+    steps:
+      - name: Checkout (all branches and tags)
+        if: env.GITEE_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the Gitee repository if missing
+        if: env.GITEE_TOKEN != ''
+        run: python3 tools/gitee_release.py ensure-repo
+
+      - name: Push branches and tags
+        if: env.GITEE_TOKEN != ''
+        run: |
+          remote="https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/KinNovel.git"
+          git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin$' | grep -v '/HEAD$' | while read -r b; do
+            git push "$remote" "refs/remotes/$b:refs/heads/${b#origin/}" --force
+          done
+          git push "$remote" "refs/tags/*:refs/tags/*" --force

@@ -2,6 +2,7 @@
 # KinNovel 启动脚本 (KUAL 通过 /bin/sh 调用; /mnt/us 是 vfat, 没有执行位)。
 # 职责: 单实例锁 → 暂停占用 /dev/fb0 的框架进程 → 运行原生二进制 → 无论如何退出都恢复框架。
 # 暂停的 PID 写入 /tmp/kinnovel_paused_pids, 休眠/唤醒时由程序自己 SIGCONT/SIGSTOP (kn-platform::power)。
+# 参数原样传给程序: KUAL 菜单「KinNovel 工具箱」用 --update (检查更新) / --uninstall (卸载)。
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 APP_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -95,6 +96,11 @@ if grep -q '"sleep_cover": *true' "$SETTINGS_DIR/data/settings.json" "$SETTINGS_
   esac
 fi
 export KN_SLEEP_COVER=$SLEEP_COVER
+# 更新安装到这个目录 (数据目录 KN_APP_DIR 测试时可以在别处)
+export KN_PROGRAM_DIR="$APP_DIR"
+RESTART_MARKER=/tmp/kinnovel_restart
+UNINSTALL_MARKER=/tmp/kinnovel_uninstall
+rm -f "$RESTART_MARKER" "$UNINSTALL_MARKER"
 log "starting KinNovel (native)"
 cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; exit 1; }
 # 重力感应机型 (Oasis / Scribe) 的当前朝向 U/D/L/R (同 KOReader); winmgr 属于框架, 必须在暂停前读
@@ -102,7 +108,7 @@ cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; 
 export KN_ORIENTATION
 pause_fb_users
 usleep 200000 2>/dev/null || sleep 1
-KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" >> "$LOG_FILE" 2>&1
+KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" "$@" >> "$LOG_FILE" 2>&1
 RET=$?
 log "exited with $RET"
 # 程序改过显示驱动的全局状态 (夜间模式的硬件反色) 却没能正常退出时留下这个文件: 恢复, 否则系统界面会一直反色
@@ -122,4 +128,28 @@ case "$RET" in
     fi
     ;;
 esac
+# 更新页「立即重启」: 恢复框架、释放锁, 再用 (刚换上的) 新脚本从头启动。exec 不触发 EXIT trap, 所以手动收尾
+if [ "$RET" = 0 ] && [ -f "$RESTART_MARKER" ]; then
+  rm -f "$RESTART_MARKER"
+  log "restarting after update"
+  trap - INT TERM EXIT
+  resume_fb_users
+  [ "$SLEEP_COVER" = 1 ] && lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
+  rm -f "$BIN_RUN"
+  rm -rf "$LOCK_DIR"
+  exec /bin/sh "$SCRIPT_DIR/kinnovel.sh"
+fi
+# 卸载: 先照常恢复系统界面, 再删除整个扩展目录 (程序确认过; 只删带 KinNovel 的 config.xml 的目录)
+if [ "$RET" = 0 ] && [ -f "$UNINSTALL_MARKER" ]; then
+  rm -f "$UNINSTALL_MARKER"
+  trap - INT TERM EXIT
+  on_exit
+  case "$APP_DIR" in
+    /|/mnt/us|/mnt/us/extensions) exit 1 ;;
+  esac
+  if grep -q '<id>kinnovel</id>' "$APP_DIR/config.xml" 2>/dev/null; then
+    cd /
+    exec rm -rf "$APP_DIR"
+  fi
+fi
 exit $RET

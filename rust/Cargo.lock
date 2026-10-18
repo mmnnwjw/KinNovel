@@ -329,11 +329,13 @@ checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 name = "kn-app"
 version = "1.6.1"
 dependencies = [
+ "crc32fast",
  "kn-net",
  "kn-platform",
  "kn-render",
  "kn-text",
  "kn-ui",
+ "miniz_oxide 0.8.9",
  "serde_json",
  "sha2",
 ]

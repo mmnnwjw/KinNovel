@@ -84,13 +84,18 @@ pub fn request(
     stream.write_all(body)?;
     stream.flush()?;
 
-    let (status, headers, body) = read_response(&mut stream, 8 * 1024 * 1024)?;
+    let (status, headers, body) = read_response(&mut stream, 8 * 1024 * 1024, &mut |_, _| true)?;
     Ok(HttpResponse { status, body, headers })
 }
 
 /// 下载任意 http(s) URL 的完整内容 (字体、封面、插图)。
 /// 跟随最多 3 次重定向; 支持 Content-Length 与 chunked; 超过 `limit` 字节立即失败; 非 200 报错。
 pub fn download(url: &str, limit: usize, timeout: Duration, tls: Arc<ClientConfig>) -> Result<Vec<u8>, NetError> {
+    download_with(url, limit, timeout, tls, &mut |_, _| true)
+}
+
+/// 同 [`download`], 每收到数据调用 `progress(已收到的正文字节, 总长 [知道时])`; 它返回 false 时放弃 (例如太慢)。
+pub fn download_with(url: &str, limit: usize, timeout: Duration, tls: Arc<ClientConfig>, progress: &mut dyn FnMut(usize, Option<usize>) -> bool) -> Result<Vec<u8>, NetError> {
     let mut url = url.to_string();
     for _ in 0..4 {
         let (server, path) = split_url(&url)?;
@@ -104,7 +109,7 @@ pub fn download(url: &str, limit: usize, timeout: Duration, tls: Arc<ClientConfi
         );
         stream.write_all(request.as_bytes())?;
         stream.flush()?;
-        let (status, headers, body) = read_response(&mut stream, limit)?;
+        let (status, headers, body) = read_response(&mut stream, limit, progress)?;
         let header = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
         match status {
             200 => return Ok(body),
@@ -132,7 +137,7 @@ fn split_url(url: &str) -> Result<(String, String), NetError> {
 }
 
 /// 读响应: (状态码, 头, 正文)。正文按 chunked / Content-Length / 读到关闭 三种方式, 都受 limit 约束。
-fn read_response(stream: &mut NetStream, limit: usize) -> Result<(u16, Vec<(String, String)>, Vec<u8>), NetError> {
+fn read_response(stream: &mut NetStream, limit: usize, progress: &mut dyn FnMut(usize, Option<usize>) -> bool) -> Result<(u16, Vec<(String, String)>, Vec<u8>), NetError> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     let header_end = loop {
@@ -163,6 +168,16 @@ fn read_response(stream: &mut NetStream, limit: usize) -> Result<(u16, Vec<(Stri
     }
     let mut raw = buf.split_off(header_end + 4);
     let too_big = || NetError::protocol("下载内容超过上限");
+    // 读一块正文并报告进度 (已收到的原始字节数, chunked 时含块头, 只用于显示和测速)
+    let mut received = raw.len();
+    let mut read_body = |stream: &mut NetStream, tmp: &mut [u8]| -> Result<usize, NetError> {
+        let n = stream.read(tmp)?;
+        received += n;
+        if !progress(received, content_length) {
+            return Err(NetError::network("下载已取消"));
+        }
+        Ok(n)
+    };
     if chunked {
         // 逐块解析; 原始数据不够时继续读
         let mut body = Vec::new();
@@ -172,7 +187,7 @@ fn read_response(stream: &mut NetStream, limit: usize) -> Result<(u16, Vec<(Stri
                 if let Some(i) = find_subslice(&raw[pos..], b"\r\n") {
                     break pos + i;
                 }
-                let n = stream.read(&mut tmp)?;
+                let n = read_body(stream, &mut tmp)?;
                 if n == 0 {
                     return Err(NetError::network("chunked 响应提前结束"));
                 }
@@ -189,7 +204,7 @@ fn read_response(stream: &mut NetStream, limit: usize) -> Result<(u16, Vec<(Stri
                 return Err(too_big());
             }
             while raw.len() < pos + size + 2 {
-                let n = stream.read(&mut tmp)?;
+                let n = read_body(stream, &mut tmp)?;
                 if n == 0 {
                     return Err(NetError::network("chunked 响应提前结束"));
                 }
@@ -207,7 +222,7 @@ fn read_response(stream: &mut NetStream, limit: usize) -> Result<(u16, Vec<(Stri
                 break;
             }
         }
-        let n = stream.read(&mut tmp)?;
+        let n = read_body(stream, &mut tmp)?;
         if n == 0 {
             if content_length.is_some_and(|total| raw.len() < total) {
                 return Err(NetError::network("响应正文不完整"));

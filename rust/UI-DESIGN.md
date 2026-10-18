@@ -86,7 +86,15 @@ Colours: day = white bg / black fg, `muted` 105 for secondary text, `mid` 170 fo
 - 我的 entries: 消息通知 / 积分商城 (logged in) / 公告 / 阅读统计 / 设置 / 存储空间 / 关于 / 退出 (rows `touch × 1.12` so 8 fit).
   阅读统计 = three cards (今天 / 近 7 天 / 累计: time + pages), streak line, 14-day bar chart (today black), top 5 books.
   存储空间 = total + per-kind rows (章节 / 章节字体 / 插图与封面 / 漫画) with 清理, 全部清理; confirm dialog each time.
-  关于 shows 有新版本 x.y.z when the daily GitHub check found one; the dialog has 检查更新.
+  关于 shows 有新版本 x.y.z when the daily check found one; the dialog has 检查更新, or 更新 (→ update page) when a newer version is known.
+  The account card has a fixed two-row height once logged in (loading / failed states keep the 签到 + 退出登录 row in place),
+  and the last 账号信息 is cached in the app, so the entry list never shifts under the finger when the info arrives.
+- **Update page** (`pages/update.rs`, KUAL 「KinNovel 工具箱 → 检查更新」 = `--update`, or 关于 → 更新): version card (当前 / 最新 · 来源),
+  release notes as plain text with a pager, bottom buttons by state (以后再说 + 下载并安装 → 正在下载… with source host and MB → 立即重启).
+  Sources (`update.rs`): Gitee release API → GitHub API; package from Gitee → GitHub through mirrors (only with a known sha256) → GitHub;
+  a source slower than 12 KB/s after 20 s is dropped. 立即重启 writes /tmp/kinnovel_restart, the launcher re-execs itself.
+- **Uninstall page** (`UninstallPage`, 「卸载 KinNovel」 = `--uninstall`): what gets deleted, 取消 / 卸载 + a confirm dialog;
+  writes /tmp/kinnovel_uninstall and exits, the launcher restores the framework and deletes the extension folder.
 - Sleep screen (设置 → 显示 → 休眠显示封面, restart needed): cover of the last-read book fitted above an info band
   (book title, chapter, "KinNovel · 休眠中"); without a cached cover a bordered title card. Full GC16 flash.
 - Comics (`Book.Type == "Comic"`) use the same detail page ("漫画详情", catalog rows show page counts) and open the **comic reader**:

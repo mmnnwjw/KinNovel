@@ -22,6 +22,7 @@ const HIT_CHECK_UPDATE: HitId = HitId(72);
 const HIT_LOGIN: HitId = HitId(73);
 const HIT_LOGOUT: HitId = HitId(74);
 const HIT_DIALOG_LOGOUT: HitId = HitId(62);
+const HIT_OPEN_UPDATE: HitId = HitId(63);
 const TOAST_TOKEN: u32 = 1;
 
 /// 入口列表的行
@@ -194,7 +195,7 @@ impl Page<KinNovel> for MePage {
                 let version = format!("KinNovel {} (Rust)", env!("CARGO_PKG_VERSION"));
                 let update = match (&self.update_check, crate::update::available()) {
                     (Some(None), _) => Some("正在检查更新…".to_string()),
-                    (_, Some(v)) => Some(format!("有新版本 {v}, 可到 Releases 下载")),
+                    (_, Some(v)) => Some(format!("有新版本 {v}")),
                     (Some(Some(Err(e))), None) => Some(format!("检查失败: {e}")),
                     (Some(Some(Ok(_))), None) => Some("已是最新版本".to_string()),
                     (None, None) => None,
@@ -202,7 +203,10 @@ impl Page<KinNovel> for MePage {
                 let mut lines = vec![version.as_str(), "轻书架 Kindle 客户端", "显示: FBInk (GPL-3.0)", crate::update::PROJECT_PAGE];
                 lines.extend(update.as_deref());
                 let checking = matches!(self.update_check, Some(None));
-                let buttons: &[(&str, HitId, ButtonStyle)] = if cx.app.net().is_some() {
+                let buttons: &[(&str, HitId, ButtonStyle)] = if cx.app.net().is_some() && crate::update::available().is_some() {
+                    // 有新版本: 进更新页下载安装
+                    &[("好", HIT_DIALOG_CLOSE, ButtonStyle::Secondary), ("更新", HIT_OPEN_UPDATE, ButtonStyle::Primary)]
+                } else if cx.app.net().is_some() {
                     &[("检查更新", HIT_CHECK_UPDATE, if checking { ButtonStyle::Disabled } else { ButtonStyle::Secondary }), ("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]
                 } else {
                     &[("好", HIT_DIALOG_CLOSE, ButtonStyle::Primary)]
@@ -306,6 +310,10 @@ impl Page<KinNovel> for MePage {
                     let (paths, net) = (cx.app.paths.clone(), cx.app.net());
                     cx.spawn(move || UpdateChecked(crate::update::check_now(&paths, net.as_ref())));
                     cx.request_redraw(RefreshHint::Ui);
+                }
+                HIT_OPEN_UPDATE => {
+                    self.dialog = None;
+                    return Transition::Push(Box::new(super::update::UpdatePage::new(super::update::Origin::App)));
                 }
                 HIT_DIALOG_CLOSE => {
                     self.dialog = None;

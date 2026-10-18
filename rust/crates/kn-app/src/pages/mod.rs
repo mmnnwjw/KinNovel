@@ -25,6 +25,7 @@ pub mod shop;
 pub mod stats;
 pub mod storage;
 pub mod tips;
+pub mod update;
 
 use kn_render::Bitmap;
 use kn_ui::widgets::{self, Ink};

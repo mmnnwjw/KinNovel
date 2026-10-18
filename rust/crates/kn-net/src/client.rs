@@ -177,6 +177,11 @@ impl Client {
         crate::http::download(url, limit, self.0.timeout, crate::stream::tls_config(self.0.strict_tls))
     }
 
+    /// 同 [`Client::download`], 带进度回调 (`progress(已收到, 总长)` 返回 false 时放弃)。
+    pub fn download_with(&self, url: &str, limit: usize, progress: &mut dyn FnMut(usize, Option<usize>) -> bool) -> Result<Vec<u8>, NetError> {
+        crate::http::download_with(url, limit, self.0.timeout, crate::stream::tls_config(self.0.strict_tls), progress)
+    }
+
     pub fn set_server(&self, server: &str) {
         let new_server = server.trim_end_matches('/').to_string();
         if new_server != self.0.hub.server() && self.0.session.has_refresh_token() {

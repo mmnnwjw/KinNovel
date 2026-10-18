@@ -77,8 +77,28 @@ pub struct KinNovel {
     unlocked: bool,
     lock_showing: bool,
     lock_pending: bool,
+    /// KUAL 菜单「KinNovel 工具箱」里的入口 (`--update` / `--uninstall`): 首页换成对应页面, 用一次
+    pub start: StartMode,
     /// 上次取到的账号信息: 再进「我的」时先显示它, 后台刷新
     pub my_info: Option<api::MyInfo>,
+}
+
+/// 程序以哪个页面开始 (启动脚本把 KUAL 菜单项的参数传进来)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartMode {
+    Normal,
+    Update,
+    Uninstall,
+}
+
+impl StartMode {
+    fn from_args(args: &[String]) -> Self {
+        match args.get(1).map(String::as_str) {
+            Some("--update") => StartMode::Update,
+            Some("--uninstall") => StartMode::Uninstall,
+            _ => StartMode::Normal,
+        }
+    }
 }
 
 impl App for KinNovel {
@@ -86,6 +106,11 @@ impl App for KinNovel {
         if self.locked() {
             self.lock_showing = true;
             return Box::new(pages::lock::LockPage::startup());
+        }
+        match std::mem::replace(&mut self.start, StartMode::Normal) {
+            StartMode::Update => return Box::new(pages::update::UpdatePage::new(pages::update::Origin::Kual)),
+            StartMode::Uninstall => return Box::new(pages::update::UninstallPage::default()),
+            StartMode::Normal => {}
         }
         // 第一次启动 (或还没登录): 欢迎页; 登录或「先逛逛」后进书架
         if self.wants_welcome() && !self.welcome_shown {
@@ -183,6 +208,7 @@ impl KinNovel {
             lock_showing: false,
             lock_pending: false,
             my_info: None,
+            start: StartMode::Normal,
         }
     }
 
@@ -300,7 +326,9 @@ fn preview(args: &[String]) {
         601..=758 => 212,
         _ => 300,
     };
-    let app = KinNovel::new(paths, config, ui_fonts, w, h, dpi, kn_platform::Frontlight::detect(None), online);
+    let mut app = KinNovel::new(paths, config, ui_fonts, w, h, dpi, kn_platform::Frontlight::detect(None), online);
+    // KN_START=update / uninstall: 预览 KUAL 工具箱的页面
+    app.start = StartMode::from_args(&["".into(), format!("--{}", std::env::var("KN_START").unwrap_or_default())]);
     // 只读出上次的检查结果 (不联网)
     update::start(&app.paths, None, false);
     let mut ui = kn_ui::Headless::new(app, fonts, w, h).expect("headless");
@@ -381,11 +409,11 @@ fn main() {
         preview(&args[2..]);
         return;
     }
-    run_device();
+    run_device(StartMode::from_args(&args));
 }
 
 #[cfg(target_os = "linux")]
-fn run_device() {
+fn run_device(start: StartMode) {
     use kn_platform::{Display, FbinkDisplay, GestureConfig, InputReader, PowerMonitor};
     use kn_ui::{RefreshPolicy, RefreshScheduler};
 
@@ -452,6 +480,7 @@ fn run_device() {
     let mut app = KinNovel::new(paths, config, ui_fonts, info.width, info.height, info.dpi, light, online);
     app.startup_notice = crash_notice;
     app.splash_shown = true;
+    app.start = start;
     update::start(&app.paths, app.net(), app.config.bool("check_update", true));
     // 测试钩子: 几秒后在后台线程 panic, 验证崩溃记录与框架恢复
     if let Ok(secs) = std::env::var("KN_TEST_PANIC").map(|v| v.parse::<u64>().unwrap_or(5)) {
@@ -477,6 +506,6 @@ fn run_device() {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_device() {
+fn run_device(_start: StartMode) {
     eprintln!("只能在 Kindle 上运行; 主机请用 --preview out.pgm");
 }
