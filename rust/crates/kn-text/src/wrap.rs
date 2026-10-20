@@ -2,18 +2,22 @@
 
 use crate::clean::py_isspace;
 
-// 标点禁则:闭标点不允许出现在行首,开标点不允许出现在行尾
-const LINE_START_FORBIDDEN: &str = "，。、；：？！,.!?;:'\")]】》”’%…—·";
-const LINE_END_FORBIDDEN: &str = "（《【「『“‘([{";
-/// 严格禁则额外的行首禁止字符: Python 版漏掉的中日文闭括号和波浪线。
-const LINE_START_FORBIDDEN_STRICT: &str = "」』）〉〕］｝〗〙～";
-
+// 标点禁则:闭标点不允许出现在行首,开标点不允许出现在行尾 (每个字符都要查, 用 match 不用字符串扫描)
 fn is_line_start_forbidden(c: char, strict: bool) -> bool {
-    LINE_START_FORBIDDEN.contains(c) || (strict && LINE_START_FORBIDDEN_STRICT.contains(c))
+    matches!(
+        c,
+        '，' | '。' | '、' | '；' | '：' | '？' | '！' | ',' | '.' | '!' | '?' | ';' | ':' | '\'' | '"' | ')' | ']' | '】' | '》' | '”' | '’'
+            | '%' | '…' | '—' | '·'
+    ) || (strict && is_line_start_forbidden_strict(c))
+}
+
+/// 严格禁则额外的行首禁止字符: Python 版漏掉的中日文闭括号和波浪线。
+fn is_line_start_forbidden_strict(c: char) -> bool {
+    matches!(c, '」' | '』' | '）' | '〉' | '〕' | '］' | '｝' | '〗' | '〙' | '～')
 }
 
 fn is_line_end_forbidden(c: char) -> bool {
-    LINE_END_FORBIDDEN.contains(c)
+    matches!(c, '（' | '《' | '【' | '「' | '『' | '“' | '‘' | '(' | '[' | '{')
 }
 
 /// 行内字符测宽, 由调用方(真实字体表或测试里的合成宽度函数)实现。
@@ -164,6 +168,19 @@ mod tests {
             } else {
                 size as f32
             }
+        }
+    }
+
+    /// match 版禁则表与原来的字符串表 (Python 版同款) 完全一致。
+    #[test]
+    fn kinsoku_tables_match_the_python_strings() {
+        const START: &str = "，。、；：？！,.!?;:'\")]】》”’%…—·";
+        const END: &str = "（《【「『“‘([{";
+        const START_STRICT: &str = "」』）〉〕］｝〗〙～";
+        for c in (0..0x3_0000u32).filter_map(char::from_u32) {
+            assert_eq!(is_line_start_forbidden(c, false), START.contains(c), "{c:?}");
+            assert_eq!(is_line_start_forbidden(c, true), START.contains(c) || START_STRICT.contains(c), "{c:?}");
+            assert_eq!(is_line_end_forbidden(c), END.contains(c), "{c:?}");
         }
     }
 

@@ -1,31 +1,54 @@
 //! HTML -> Block 列表, 对应 reader.py 的 `sanitize_html` / `extract_blocks`。
 
+use std::borrow::Cow;
+use std::cell::Ref;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use html5ever::driver::ParseOpts;
 use html5ever::tendril::TendrilSink;
-use html5ever::{parse_document, QualName};
+use html5ever::{parse_document, Attribute, QualName};
 use markup5ever_rcdom::{Handle, Node, NodeData, RcDom};
 
 use crate::clean::{clean_text, py_isspace};
-use crate::style::{Align, BlockStyle, Element, InlineStyle};
+use crate::style::{Align, AttrMap, BlockStyle, Element, InlineStyle};
 
-const BLOCK_TAGS: &[&str] = &[
-    "p", "div", "section", "article", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "li",
-    "dt", "dd", "pre", "figcaption", "aside",
-];
-const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
-const SKIP_TAGS: &[&str] = &["script", "style", "iframe", "object", "embed", "svg", "canvas"];
+fn is_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "div" | "section" | "article" | "blockquote" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "dt" | "dd" | "pre"
+            | "figcaption" | "aside"
+    )
+}
+
+fn is_heading_tag(tag: &str) -> bool {
+    matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+fn is_skip_tag(tag: &str) -> bool {
+    matches!(tag, "script" | "style" | "iframe" | "object" | "embed" | "svg" | "canvas")
+}
+
 /// 网页样式模式下额外当作块的元素 (浏览器默认 display:block / table-row)。
-const RICH_BLOCK_TAGS: &[&str] = &[
-    "center", "figure", "header", "footer", "main", "nav", "address", "ul", "ol", "dl", "table", "tr", "caption",
-    "details", "summary", "hgroup",
-];
+fn is_rich_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "center" | "figure" | "header" | "footer" | "main" | "nav" | "address" | "ul" | "ol" | "dl" | "table" | "tr" | "caption"
+            | "details" | "summary" | "hgroup"
+    )
+}
+
 /// 网页样式模式下可以放行内小图 (外字等) 的块。
-const TEXT_BLOCK_TAGS: &[&str] = &["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "td", "th", "figcaption"];
+fn is_text_block_tag(tag: &str) -> bool {
+    matches!(tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "dt" | "dd" | "td" | "th" | "figcaption")
+}
+
 /// 行内小图的最大原始高度 (像素): 更高的仍当插图另起一块。
 const INLINE_IMAGE_MAX: u32 = 96;
+
+/// `append_node` 递归的最大层数。用户上传的章节常有未闭合的 `<span>`/`<font>`, html5ever 不限嵌套深度,
+/// 递归太深会撑爆工作线程的栈; 超过这一层的子树不再分块, 文字收进当前段落。真实章节只有十几到几十层。
+const MAX_DEPTH: usize = 200;
 
 /// 行内对象在块文字里的占位字符 (不计入阅读位置的字符偏移)。
 pub const OBJECT_CHAR: char = '\u{FFFC}';
@@ -180,8 +203,8 @@ fn parse_py_int(s: &str) -> i64 {
     }
 }
 
-fn parse_dim(attrs: &HashMap<String, String>, name: &str) -> u32 {
-    let raw = attrs.get(name).map(|s| s.as_str()).unwrap_or("0");
+fn parse_dim(attrs: &Attrs, name: &str) -> u32 {
+    let raw = attrs.attr(name).unwrap_or("0");
     let raw = if raw.is_empty() { "0" } else { raw };
     let v = parse_py_int(raw);
     v.max(0) as u32
@@ -195,49 +218,82 @@ fn child_struct_path(parent_path: &str, tag: &str, index: usize) -> String {
     }
 }
 
-fn anchor_path(attrs: &HashMap<String, String>, struct_path: &str) -> String {
-    match attrs.get("id") {
+fn anchor_path(attrs: &Attrs, struct_path: &str) -> String {
+    match attrs.attr("id") {
         Some(id) if !id.is_empty() => format!("//*[@id=\"{}\"]", id.replace('"', "\\\"")),
         _ => struct_path.to_string(),
     }
 }
 
-fn tag_name(name: &QualName) -> String {
-    name.local.to_string().to_ascii_lowercase()
+/// 小写标签名; html5ever 解析 HTML 时已经转成小写, 一般不用复制。
+fn tag_name(name: &QualName) -> Cow<'_, str> {
+    let local: &str = &name.local;
+    if local.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(local.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(local)
+    }
 }
 
-fn element_attrs(handle: &Handle) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    if let NodeData::Element { attrs, .. } = &handle.data {
-        for a in attrs.borrow().iter() {
-            out.insert(
-                a.name.local.to_string().to_ascii_lowercase(),
-                a.value.to_string(),
-            );
+/// 元素的属性 (借用 DOM 里的列表, 不复制)。按名字查找不分大小写、同名取最后一个,
+/// 与收集成小写键的 HashMap 结果相同。
+struct Attrs<'a>(Option<Ref<'a, Vec<Attribute>>>);
+
+impl<'a> Attrs<'a> {
+    fn of(handle: &'a Handle) -> Self {
+        match &handle.data {
+            NodeData::Element { attrs, .. } => Attrs(Some(attrs.borrow())),
+            _ => Attrs(None),
         }
     }
-    out
+}
+
+impl AttrMap for Attrs<'_> {
+    fn attr(&self, name: &str) -> Option<&str> {
+        let list = self.0.as_ref()?;
+        list.iter().rev().find(|a| str::eq_ignore_ascii_case(&a.name.local, name)).map(|a| &*a.value)
+    }
+}
+
+/// 没有属性 (兼容模式不看样式)。
+struct NoAttrs;
+
+impl AttrMap for NoAttrs {
+    fn attr(&self, _name: &str) -> Option<&str> {
+        None
+    }
 }
 
 fn is_element(handle: &Handle) -> bool {
     matches!(handle.data, NodeData::Element { .. })
 }
 
+/// 先序遍历 `root` 以下的节点 (含 `root`), 显式栈, 不递归 (病态的深嵌套不会撑爆栈)。
+/// `visit` 返回 false = 不进入这个节点的子节点。
+fn walk_preorder(root: &Handle, mut visit: impl FnMut(&Handle) -> bool) {
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if visit(&node) {
+            stack.extend(node.children.borrow().iter().rev().cloned());
+        }
+    }
+}
+
 /// 在整棵树里查找 id="kinnovel-root" 的元素 (对应 lxml 的
 /// `.//*[@id='kinnovel-root']`)。
 fn find_root(handle: &Handle) -> Option<Handle> {
-    if is_element(handle) {
-        let attrs = element_attrs(handle);
-        if attrs.get("id").map(|s| s.as_str()) == Some("kinnovel-root") {
-            return Some(handle.clone());
+    let mut found = None;
+    walk_preorder(handle, |node| {
+        if found.is_some() {
+            return false;
         }
-    }
-    for child in handle.children.borrow().iter() {
-        if let Some(found) = find_root(child) {
-            return Some(found);
+        if is_element(node) && Attrs::of(node).attr("id") == Some("kinnovel-root") {
+            found = Some(node.clone());
+            return false;
         }
-    }
-    None
+        true
+    });
+    found
 }
 
 /// 解析并返回 (RcDom, 根节点)。注意: markup5ever_rcdom 的 `RcDom::Drop` 会递归清空
@@ -353,25 +409,27 @@ struct Extractor<'a> {
     markers: HashMap<*const Node, u16>,
     /// 被注释标记引用的注释正文: 不排进正文 (网页版同样隐藏, 点击标记时弹出)
     note_targets: HashSet<*const Node>,
+    /// 当前 `append_node` 的递归层数 (见 [`MAX_DEPTH`])
+    depth: usize,
 }
 
 /// 多看格式的注释图标 `<a class="duokan-footnote"><sup><img class="footnote" src="/img/note.png"></sup></a>`:
 /// 网页版把它画成 1em 高的行内小图标 (图标是网页版自己的静态文件)。它不是插图, 当作插图会把段落从中间
 /// 切开、还要去下载。兼容模式改成行内文字标记「[注n]」(n = 本章第几个, 对应章末 aside 里的「注n：…」),
 /// 网页样式模式画成注释图标, 点击弹出注释。
-fn is_footnote_icon(attrs: &HashMap<String, String>, raw_src: &str) -> bool {
-    let class_footnote = attrs.get("class").is_some_and(|c| c.split_ascii_whitespace().any(|c| c.eq_ignore_ascii_case("footnote")));
+fn is_footnote_icon(attrs: &Attrs, raw_src: &str) -> bool {
+    let class_footnote = attrs.attr("class").is_some_and(|c| c.split_ascii_whitespace().any(|c| c.eq_ignore_ascii_case("footnote")));
     let src = raw_src.split(['?', '#']).next().unwrap_or("");
     class_footnote || (!src.contains("://") && src.ends_with("/img/note.png"))
 }
 
-fn image_src(attrs: &HashMap<String, String>) -> String {
+fn image_src(attrs: &Attrs) -> String {
     attrs
-        .get("src")
+        .attr("src")
         .filter(|s| !s.is_empty())
-        .or_else(|| attrs.get("data-system-image-url"))
-        .cloned()
+        .or_else(|| attrs.attr("data-system-image-url"))
         .unwrap_or_default()
+        .to_string()
 }
 
 /// `%XX` 解码 (注释链接的锚点可能是转义过的中文 id)。
@@ -395,46 +453,45 @@ fn percent_decode(s: &str) -> String {
 
 /// 注释正文的纯文字: 块之间、`<br>` 处换行, 每行按正文规则清理。
 fn note_text(node: &Handle) -> String {
-    fn walk(node: &Handle, out: &mut String) {
-        match &node.data {
-            NodeData::Text { contents } => out.push_str(&contents.borrow()),
-            NodeData::Element { name, .. } => {
-                let tag = tag_name(name);
-                if SKIP_TAGS.contains(&tag.as_str()) {
-                    return;
-                }
-                let attrs = element_attrs(node);
-                // 返回正文的链接 (↩︎) 和注释图标不要
-                if attrs.get("class").is_some_and(|c| c.contains("footnote-backref")) {
-                    return;
-                }
-                if tag == "img" {
-                    return;
-                }
-                if tag == "br" {
-                    out.push('\n');
-                    return;
-                }
-                let block = BLOCK_TAGS.contains(&tag.as_str()) || RICH_BLOCK_TAGS.contains(&tag.as_str());
-                if block {
-                    out.push('\n');
-                }
-                for child in node.children.borrow().iter() {
-                    walk(child, out);
-                }
-                if block {
-                    out.push('\n');
-                }
-            }
-            _ => {
-                for child in node.children.borrow().iter() {
-                    walk(child, out);
-                }
-            }
-        }
+    // 显式栈 (不递归); Close = 块元素的子节点处理完, 补一个换行
+    enum Step {
+        Visit(Handle),
+        Close,
     }
     let mut raw = String::new();
-    walk(node, &mut raw);
+    let mut stack = vec![Step::Visit(node.clone())];
+    while let Some(step) = stack.pop() {
+        let Step::Visit(node) = step else {
+            raw.push('\n');
+            continue;
+        };
+        match &node.data {
+            NodeData::Text { contents } => raw.push_str(&contents.borrow()),
+            NodeData::Element { name, .. } => {
+                let tag = tag_name(name);
+                if is_skip_tag(&tag) {
+                    continue;
+                }
+                // 返回正文的链接 (↩︎) 和注释图标不要
+                if Attrs::of(&node).attr("class").is_some_and(|c| c.contains("footnote-backref")) {
+                    continue;
+                }
+                if tag == "img" {
+                    continue;
+                }
+                if tag == "br" {
+                    raw.push('\n');
+                    continue;
+                }
+                if is_block_tag(&tag) || is_rich_block_tag(&tag) {
+                    raw.push('\n');
+                    stack.push(Step::Close);
+                }
+                stack.extend(node.children.borrow().iter().rev().map(|c| Step::Visit(c.clone())));
+            }
+            _ => stack.extend(node.children.borrow().iter().rev().map(|c| Step::Visit(c.clone()))),
+        }
+    }
     raw.split('\n').map(clean_text).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
@@ -442,24 +499,26 @@ fn note_text(node: &Handle) -> String {
 /// 也认 EPUB3 的 `epub:type="noteref"` 和 markdown-it 的 `<sup class="footnote-ref"><a href="#fn1">`。
 /// 目标按 id 查找 (重复的 id 取文档里的第一个, 同 `querySelector`)。
 fn find_notes(root: &Handle) -> (HashMap<*const Node, u16>, HashSet<*const Node>, Vec<String>) {
-    fn walk(node: &Handle, in_ref_sup: bool, ids: &mut HashMap<String, Handle>, anchors: &mut Vec<(Handle, String)>) {
+    let mut ids: HashMap<String, Handle> = HashMap::new();
+    let mut anchors: Vec<(Handle, String)> = Vec::new();
+    // 先序遍历, 显式栈 (不递归); bool = 父元素是 `<sup class="footnote-ref">`
+    let mut stack = vec![(root.clone(), false)];
+    while let Some((node, in_ref_sup)) = stack.pop() {
         let NodeData::Element { name, .. } = &node.data else {
-            for child in node.children.borrow().iter() {
-                walk(child, false, ids, anchors);
-            }
-            return;
+            stack.extend(node.children.borrow().iter().rev().map(|c| (c.clone(), false)));
+            continue;
         };
         let tag = tag_name(name);
-        let attrs = element_attrs(node);
-        if let Some(id) = attrs.get("id").filter(|id| !id.is_empty()) {
-            ids.entry(id.clone()).or_insert_with(|| node.clone());
+        let attrs = Attrs::of(&node);
+        if let Some(id) = attrs.attr("id").filter(|id| !id.is_empty()) {
+            ids.entry(id.to_string()).or_insert_with(|| node.clone());
         }
-        let has_class = |c: &str| attrs.get("class").is_some_and(|v| v.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(c)));
+        let has_class = |c: &str| attrs.attr("class").is_some_and(|v| v.split_ascii_whitespace().any(|x| x.eq_ignore_ascii_case(c)));
         if tag == "a" {
-            if let Some(href) = attrs.get("href").and_then(|h| h.strip_prefix('#')).filter(|h| !h.is_empty()) {
+            if let Some(href) = attrs.attr("href").and_then(|h| h.strip_prefix('#')).filter(|h| !h.is_empty()) {
                 let noteref = has_class("duokan-footnote")
-                    || attrs.get("epub:type").or_else(|| attrs.get("type")).is_some_and(|t| t.contains("noteref"))
-                    || attrs.get("role").is_some_and(|r| r == "doc-noteref")
+                    || attrs.attr("epub:type").or_else(|| attrs.attr("type")).is_some_and(|t| t.contains("noteref"))
+                    || attrs.attr("role").is_some_and(|r| r == "doc-noteref")
                     || in_ref_sup;
                 if noteref {
                     anchors.push((node.clone(), percent_decode(href)));
@@ -467,13 +526,8 @@ fn find_notes(root: &Handle) -> (HashMap<*const Node, u16>, HashSet<*const Node>
             }
         }
         let ref_sup = tag == "sup" && has_class("footnote-ref");
-        for child in node.children.borrow().iter() {
-            walk(child, ref_sup, ids, anchors);
-        }
+        stack.extend(node.children.borrow().iter().rev().map(|c| (c.clone(), ref_sup)));
     }
-    let mut ids = HashMap::new();
-    let mut anchors = Vec::new();
-    walk(root, false, &mut ids, &mut anchors);
 
     let mut markers = HashMap::new();
     let mut targets: HashMap<*const Node, u16> = HashMap::new();
@@ -515,6 +569,7 @@ impl<'a> Extractor<'a> {
         (self.styles.len() - 1) as u16
     }
 
+    #[inline(never)]
     fn flush_text(&mut self, buffer: &mut Buf, offset: usize, kind: BlockKind, level: u8, path: &str, bstyle: &BlockStyle) -> usize {
         // <pre> 也照常折叠空格: 保留连续空格会改变字符偏移, 阅读位置就和网页版、兼容模式对不上了 (换行本来就保留)
         let (text, ids) = if self.rich {
@@ -563,6 +618,7 @@ impl<'a> Extractor<'a> {
     }
 
     /// 块元素的上下文与块样式 (网页样式模式)。`marker` = 列表项标记。
+    #[inline(never)]
     fn block_context(&self, el: &Element, tag: &str, ctx: &Ctx, marker: String) -> (Ctx, BlockStyle) {
         let mut c = ctx.clone();
         el.apply_inline(&mut c.style);
@@ -585,7 +641,7 @@ impl<'a> Extractor<'a> {
         if el.has_class("author") {
             c.inset_right += 1.0;
         }
-        c.in_text = TEXT_BLOCK_TAGS.contains(&tag);
+        c.in_text = is_text_block_tag(tag);
         let (mt, mb) = el.margins();
         let em = c.scale as f32 / 100.0;
         let style = BlockStyle {
@@ -603,11 +659,137 @@ impl<'a> Extractor<'a> {
         (c, style)
     }
 
+    /// `<img>`: 注释图标 / 行内小图进 buffer, 其它插图另起一块。返回新的 offset。
+    /// 单独成函数 (不内联): 这里的临时变量不占递归的 `append_children` 的栈帧。
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn append_image(
+        &mut self,
+        attrs: &Attrs,
+        child_struct: &str,
+        buffer: &mut Buf,
+        mut offset: usize,
+        kind: BlockKind,
+        level: u8,
+        path: &str,
+        ctx: &Ctx,
+        bstyle: &BlockStyle,
+        style_id: u16,
+    ) -> usize {
+        let raw_src = image_src(attrs);
+        if is_footnote_icon(attrs, &raw_src) {
+            if self.rich {
+                buffer.push_object(Inline::Note(ctx.style.note), style_id);
+            } else {
+                // 行内标记: 不切段
+                self.footnotes += 1;
+                buffer.push_str(&format!("[注{}]", self.footnotes), 0, false);
+            }
+            return offset;
+        }
+        let src = absolute_url(self.base_url, &raw_src);
+        let scheme = src.split(':').next().unwrap_or("").to_ascii_lowercase();
+        let scheme_ok = if src.contains(':') {
+            matches!(scheme.as_str(), "http" | "https")
+        } else {
+            true
+        };
+        let width = parse_dim(attrs, "width");
+        let height = parse_dim(attrs, "height");
+        if self.rich && scheme_ok && ctx.in_text {
+            let natural = if width > 0 && height > 0 {
+                Some((width, height))
+            } else {
+                crate::paginate::url_size_hint(&src)
+            };
+            if let Some((w, h)) = natural.filter(|&(_, h)| h <= INLINE_IMAGE_MAX) {
+                buffer.push_object(Inline::Image { url: src, width: w, height: h }, style_id);
+                return offset;
+            }
+        }
+        offset = self.flush_text(buffer, offset, kind, level, path, bstyle);
+        if scheme_ok {
+            self.blocks.push(Block {
+                kind: BlockKind::Image,
+                path: anchor_path(attrs, child_struct),
+                offset,
+                source_url: src,
+                width,
+                height,
+                ..Default::default()
+            });
+        }
+        offset
+    }
+
+    /// `<hr>` 分隔线块 (同 [`Self::append_image`], 不内联)。
+    #[inline(never)]
+    fn push_rule(&mut self, offset: usize, ctx: &Ctx) {
+        self.blocks.push(Block {
+            kind: BlockKind::Rule,
+            path: String::new(),
+            offset,
+            style: BlockStyle { inset_left: ctx.inset_left, inset_right: ctx.inset_right, quote: ctx.quote, ..BlockStyle::default() },
+            ..Default::default()
+        });
+    }
+
+    /// 超过 [`MAX_DEPTH`] 的子树: 不再分块、不再区分样式, 文字 (和 `<br>` 的换行) 按文档顺序收进当前段落。
+    /// 显式栈, 不递归。
+    fn append_flat(&mut self, node: &Handle, buffer: &mut Buf, style_id: u16) {
+        let mut stack: Vec<Handle> = node.children.borrow().iter().rev().cloned().collect();
+        while let Some(n) = stack.pop() {
+            match &n.data {
+                NodeData::Text { contents } => buffer.push_str(&contents.borrow(), style_id, self.rich),
+                NodeData::Element { name, .. } => {
+                    let tag = tag_name(name);
+                    if is_skip_tag(&tag) {
+                        continue;
+                    }
+                    if self.rich && (self.note_targets.contains(&Rc::as_ptr(&n)) || Element::new(&tag, &Attrs::of(&n)).hidden()) {
+                        continue;
+                    }
+                    if tag == "br" {
+                        buffer.push_str("\n", style_id, false);
+                        continue;
+                    }
+                    stack.extend(n.children.borrow().iter().rev().cloned());
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// 对应 `append_node`: 沿 DOM 顺序遍历子节点, 文本节点进 buffer, 块级
     /// 元素先 flush 再递归(自己的 offset 从 0 重新计), 内联元素原地递归共享
     /// buffer/offset, img/br 特殊处理。网页样式模式另外带上 `ctx` (继承的样式) 与 `bstyle` (当前块的样式)。
+    /// 递归超过 [`MAX_DEPTH`] 层时改用 [`Self::append_flat`]。
     #[allow(clippy::too_many_arguments)]
     fn append_node(
+        &mut self,
+        node: &Handle,
+        kind: BlockKind,
+        level: u8,
+        path: &str,
+        struct_path: &str,
+        buffer: &mut Buf,
+        offset: usize,
+        ctx: &Ctx,
+        bstyle: &BlockStyle,
+    ) -> usize {
+        if self.depth >= MAX_DEPTH {
+            let style_id = if self.rich { self.style_id(ctx.style) } else { 0 };
+            self.append_flat(node, buffer, style_id);
+            return offset;
+        }
+        self.depth += 1;
+        let offset = self.append_children(node, kind, level, path, struct_path, buffer, offset, ctx, bstyle);
+        self.depth -= 1;
+        offset
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_children(
         &mut self,
         node: &Handle,
         kind: BlockKind,
@@ -619,14 +801,16 @@ impl<'a> Extractor<'a> {
         ctx: &Ctx,
         bstyle: &BlockStyle,
     ) -> usize {
-        let mut counters: HashMap<String, usize> = HashMap::new();
         let parent_tag = match &node.data {
             NodeData::Element { name, .. } => tag_name(name),
-            _ => String::new(),
+            _ => Cow::Borrowed(""),
         };
-        let parent_attrs = if self.rich { element_attrs(node) } else { HashMap::new() };
+        let parent_attrs = Attrs::of(node);
         let style_id = if self.rich { self.style_id(ctx.style) } else { 0 };
         let children = node.children.borrow();
+        // 同名子元素计数 (XPath 下标); 一个元素的子元素标签种类很少, 线性查找就够
+        let mut counters: Vec<(Cow<str>, usize)> = Vec::new();
+        let count = |counters: &[(Cow<str>, usize)], tag: &str| counters.iter().find(|(t, _)| t == tag).map_or(0, |(_, n)| *n);
         for child in children.iter() {
             match &child.data {
                 NodeData::Text { contents } => {
@@ -634,76 +818,37 @@ impl<'a> Extractor<'a> {
                 }
                 NodeData::Element { name, .. } => {
                     let tag = tag_name(name);
-                    if SKIP_TAGS.contains(&tag.as_str()) {
+                    if is_skip_tag(&tag) {
                         continue;
                     }
-                    let index = counters.get(&tag).copied().unwrap_or(0) + 1;
-                    counters.insert(tag.clone(), index);
+                    let index = match counters.iter_mut().find(|(t, _)| *t == tag) {
+                        Some((_, n)) => {
+                            *n += 1;
+                            *n
+                        }
+                        None => {
+                            counters.push((tag.clone(), 1));
+                            1
+                        }
+                    };
                     let child_struct = child_struct_path(struct_path, &tag, index);
-                    let attrs = element_attrs(child);
-                    let el = Element::new(&tag, &attrs);
+                    let attrs = Attrs::of(child);
+                    // 兼容模式不用样式: 不解析 class/style
+                    let el = Element::new(&tag, if self.rich { &attrs as &dyn AttrMap } else { &NoAttrs });
                     if self.rich && (el.hidden() || self.note_targets.contains(&Rc::as_ptr(child))) {
                         continue;
                     }
 
                     if tag == "img" {
-                        let raw_src = image_src(&attrs);
-                        if is_footnote_icon(&attrs, &raw_src) {
-                            if self.rich {
-                                buffer.push_object(Inline::Note(ctx.style.note), style_id);
-                            } else {
-                                // 行内标记: 不切段
-                                self.footnotes += 1;
-                                buffer.push_str(&format!("[注{}]", self.footnotes), 0, false);
-                            }
-                            continue;
-                        }
-                        let src = absolute_url(self.base_url, &raw_src);
-                        let scheme = src.split(':').next().unwrap_or("").to_ascii_lowercase();
-                        let scheme_ok = if src.contains(':') {
-                            matches!(scheme.as_str(), "http" | "https")
-                        } else {
-                            true
-                        };
-                        let width = parse_dim(&attrs, "width");
-                        let height = parse_dim(&attrs, "height");
-                        if self.rich && scheme_ok && ctx.in_text {
-                            let natural = if width > 0 && height > 0 {
-                                Some((width, height))
-                            } else {
-                                crate::paginate::url_size_hint(&src)
-                            };
-                            if let Some((w, h)) = natural.filter(|&(_, h)| h <= INLINE_IMAGE_MAX) {
-                                buffer.push_object(Inline::Image { url: src, width: w, height: h }, style_id);
-                                continue;
-                            }
-                        }
-                        offset = self.flush_text(buffer, offset, kind, level, path, bstyle);
-                        if scheme_ok {
-                            self.blocks.push(Block {
-                                kind: BlockKind::Image,
-                                path: anchor_path(&attrs, &child_struct),
-                                offset,
-                                source_url: src,
-                                width,
-                                height,
-                                ..Default::default()
-                            });
-                        }
+                        offset = self.append_image(&attrs, &child_struct, buffer, offset, kind, level, path, ctx, bstyle, style_id);
                     } else if tag == "br" {
                         buffer.push_str("\n", style_id, false);
                     } else if self.rich && tag == "hr" {
                         offset = self.flush_text(buffer, offset, kind, level, path, bstyle);
-                        self.blocks.push(Block {
-                            kind: BlockKind::Rule,
-                            path: String::new(),
-                            offset,
-                            style: BlockStyle { inset_left: ctx.inset_left, inset_right: ctx.inset_right, quote: ctx.quote, ..BlockStyle::default() },
-                            ..Default::default()
-                        });
-                    } else if BLOCK_TAGS.contains(&tag.as_str()) || (self.rich && RICH_BLOCK_TAGS.contains(&tag.as_str())) {
+                        self.push_rule(offset, ctx);
+                    } else if is_block_tag(&tag) || (self.rich && is_rich_block_tag(&tag)) {
                         offset = self.flush_text(buffer, offset, kind, level, path, bstyle);
-                        let child_kind = if HEADING_TAGS.contains(&tag.as_str()) {
+                        let child_kind = if is_heading_tag(&tag) {
                             BlockKind::Heading
                         } else if !self.rich && (tag == "aside" || kind == BlockKind::Footnote) {
                             BlockKind::Footnote
@@ -759,7 +904,7 @@ impl<'a> Extractor<'a> {
                             child_ctx.style.note = n;
                         }
                         // 表格同一行的单元格之间空一格
-                        if matches!(tag.as_str(), "td" | "th") && counters.get("td").copied().unwrap_or(0) + counters.get("th").copied().unwrap_or(0) > 1 {
+                        if matches!(&*tag, "td" | "th") && count(&counters, "td") + count(&counters, "th") > 1 {
                             buffer.push_object(Inline::Space(100), style_id);
                         }
                         let before = (buffer.text.len(), buffer.objects.len());
@@ -784,11 +929,11 @@ impl<'a> Extractor<'a> {
 }
 
 /// 列表项标记: `<ol>` 里是序号 (支持 start / value), `<ul>` 里是圆点。
-fn list_marker(parent_tag: &str, parent_attrs: &HashMap<String, String>, attrs: &HashMap<String, String>, index: usize) -> String {
+fn list_marker(parent_tag: &str, parent_attrs: &Attrs, attrs: &Attrs, index: usize) -> String {
     match parent_tag {
         "ol" => {
-            let start = parent_attrs.get("start").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(1);
-            let n = attrs.get("value").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(start + index as i64 - 1);
+            let start = parent_attrs.attr("start").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(1);
+            let n = attrs.attr("value").and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(start + index as i64 - 1);
             format!("{n}.")
         }
         // 圆点画成图形 (系统字体不一定有 •/・)
@@ -798,17 +943,14 @@ fn list_marker(parent_tag: &str, parent_attrs: &HashMap<String, String>, attrs: 
 }
 
 fn plain_text(node: &Handle, out: &mut String) {
-    if let NodeData::Element { name, .. } = &node.data {
-        if tag_name(name) == "br" {
-            out.push('\n');
+    walk_preorder(node, |n| {
+        match &n.data {
+            NodeData::Element { name, .. } if tag_name(name) == "br" => out.push('\n'),
+            NodeData::Text { contents } => out.push_str(&contents.borrow()),
+            _ => {}
         }
-    }
-    if let NodeData::Text { contents } = &node.data {
-        out.push_str(&contents.borrow());
-    }
-    for child in node.children.borrow().iter() {
-        plain_text(child, out);
-    }
+        true
+    });
 }
 
 /// 对应 reader.py 的 `extract_blocks` (兼容模式, 金标准测试用)。
@@ -830,6 +972,7 @@ pub fn extract_document(content: &str, base_url: &str, rich: bool) -> Document {
         styles: vec![InlineStyle::default()],
         markers,
         note_targets,
+        depth: 0,
     };
     let mut buffer = Buf::default();
     let ctx = Ctx::default();

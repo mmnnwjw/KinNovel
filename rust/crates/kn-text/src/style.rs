@@ -5,8 +5,6 @@
 //! 对齐、缩进、行高、上下间距、引用块、列表、上下标、注音、着重号、删除线/下划线、隐藏) 转成块样式与
 //! 行内样式; 颜色、浮动、边框之类在墨水屏上没有意义的属性忽略。
 
-use std::collections::HashMap;
-
 /// 块内文字对齐。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Align {
@@ -100,21 +98,33 @@ impl Default for BlockStyle {
 /// 网页版正文行高 (read.scss `p { line-height: 1.8em }`)。
 pub const WEB_LINE_HEIGHT: f32 = 1.8;
 
+/// 按名字取元素属性 (名字是小写)。
+pub(crate) trait AttrMap {
+    fn attr(&self, name: &str) -> Option<&str>;
+}
+
+#[cfg(test)]
+impl AttrMap for std::collections::HashMap<String, String> {
+    fn attr(&self, name: &str) -> Option<&str> {
+        self.get(name).map(|s| s.as_str())
+    }
+}
+
 /// 一个元素的标签、class 与内联样式声明。
 pub(crate) struct Element<'a> {
     pub tag: &'a str,
-    attrs: &'a HashMap<String, String>,
+    attrs: &'a dyn AttrMap,
     classes: Vec<String>,
     decls: Vec<(String, String)>,
 }
 
 impl<'a> Element<'a> {
-    pub fn new(tag: &'a str, attrs: &'a HashMap<String, String>) -> Self {
+    pub fn new(tag: &'a str, attrs: &'a dyn AttrMap) -> Self {
         let classes = attrs
-            .get("class")
+            .attr("class")
             .map(|c| c.split_ascii_whitespace().map(|c| c.to_ascii_lowercase()).collect())
             .unwrap_or_default();
-        let decls = attrs.get("style").map(|s| parse_decls(s)).unwrap_or_default();
+        let decls = attrs.attr("style").map(parse_decls).unwrap_or_default();
         Element { tag, attrs, classes, decls }
     }
 
@@ -127,7 +137,7 @@ impl<'a> Element<'a> {
     }
 
     pub fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.get(name).map(|s| s.as_str())
+        self.attrs.attr(name)
     }
 
     fn is_heading(&self) -> bool {
@@ -142,7 +152,7 @@ impl<'a> Element<'a> {
     /// 整个元素不显示: `display:none`、`hidden` 属性、网页版隐藏的 `.footnotes` 段。
     pub fn hidden(&self) -> bool {
         self.decl("display") == Some("none")
-            || self.attrs.contains_key("hidden")
+            || self.attrs.attr("hidden").is_some()
             || self.has_class("footnotes")
             || matches!(self.tag, "template" | "noscript" | "head" | "title" | "meta" | "link")
     }
@@ -407,6 +417,8 @@ fn css_em(v: &str) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     fn el<'a>(tag: &'a str, attrs: &'a HashMap<String, String>) -> Element<'a> {
