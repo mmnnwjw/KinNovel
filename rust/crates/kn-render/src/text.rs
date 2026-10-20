@@ -330,11 +330,6 @@ impl Hasher for FxHasher {
 
 pub type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
-/// 字体链的身份 (字体数量很少, 直接拼成 u64: 每个 FontId 8 位, 最多 8 个)。
-fn chain_key(chain: &[FontId]) -> u64 {
-    chain.iter().fold(chain.len() as u64, |k, f| (k << 8) ^ f.0 as u64)
-}
-
 fn quantize_size(size_px: f32) -> u32 {
     (size_px.max(0.0) * 64.0).round() as u32
 }
@@ -346,8 +341,24 @@ pub struct GlyphCache {
     bytes_used: usize,
     tick: u64,
     map: FxMap<(FontId, u32, u32), GlyphEntry>,
-    /// (字体链, 字符) → (负责的字体, 字形 id): 跨调用复用, 省去每次 cmap 查找与回退。
-    chars: FxMap<(u64, char), (FontId, GlyphId)>,
+    /// 字体链 → 编号 (按整条链查, 不会串号; 编号不复用)。
+    chains: FxMap<Vec<FontId>, u32>,
+    next_chain: u32,
+    /// (字体链编号, 字符) → (负责的字体, 字形 id): 跨调用复用, 省去每次 cmap 查找与回退。
+    chars: FxMap<(u32, char), (FontId, GlyphId)>,
+    stats: GlyphStats,
+}
+
+/// 字形缓存的命中统计 (供 KN_DEBUG 打印, 用来定缓存容量)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GlyphStats {
+    pub hits: u64,
+    pub misses: u64,
+    /// 被淘汰的字形数
+    pub evicted: u64,
+    /// 当前缓存的字形数与字节数
+    pub entries: usize,
+    pub bytes: usize,
 }
 
 impl GlyphCache {
@@ -357,8 +368,22 @@ impl GlyphCache {
             bytes_used: 0,
             tick: 0,
             map: FxMap::default(),
+            chains: FxMap::default(),
+            next_chain: 0,
             chars: FxMap::default(),
+            stats: GlyphStats::default(),
         }
+    }
+
+    /// 字体链的编号 (第一次见到时分配)。
+    fn chain_id(&mut self, chain: &[FontId]) -> u32 {
+        if let Some(&id) = self.chains.get(chain) {
+            return id;
+        }
+        let id = self.next_chain;
+        self.next_chain += 1;
+        self.chains.insert(chain.to_vec(), id);
+        id
     }
 
     fn rasterize(fonts: &FontStore, font_id: FontId, gid: GlyphId, size_px: f32, italic: bool) -> GlyphEntry {
@@ -395,22 +420,36 @@ impl GlyphCache {
         }
     }
 
+    /// 超限时一次淘汰最久没用的一批, 降到上限的 75%: 每批 O(n), 之后要再插入约 n/4 个字形才会再淘汰,
+    /// 均摊 O(1) (以前每插一个字形都全表扫描找最旧的)。
     fn evict_if_needed(&mut self) {
-        while self.bytes_used > self.max_bytes {
-            let victim = self
-                .map
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| *k);
-            match victim {
-                Some(key) => {
-                    if let Some(removed) = self.map.remove(&key) {
-                        self.bytes_used -= removed.byte_size();
-                    }
-                }
-                None => break,
-            }
+        if self.bytes_used <= self.max_bytes {
+            return;
         }
+        let goal = self.max_bytes / 4 * 3;
+        let mut ages: Vec<(u64, (FontId, u32, u32))> = self.map.iter().map(|(k, e)| (e.last_used, *k)).collect();
+        let mut start = 0;
+        while self.bytes_used > goal && start < ages.len() {
+            // 按字节比例估计要淘汰几个, 字形大小不一时不够就再来一轮
+            let rest = &mut ages[start..];
+            let excess = (self.bytes_used - goal) as u64;
+            let k = ((rest.len() as u64 * excess).div_ceil(self.bytes_used.max(1) as u64) as usize).clamp(1, rest.len());
+            if k < rest.len() {
+                rest.select_nth_unstable(k);
+            }
+            for &(_, key) in &rest[..k] {
+                if let Some(removed) = self.map.remove(&key) {
+                    self.bytes_used -= removed.byte_size();
+                    self.stats.evicted += 1;
+                }
+            }
+            start += k;
+        }
+    }
+
+    /// 命中统计与当前占用。
+    pub fn stats(&self) -> GlyphStats {
+        GlyphStats { entries: self.map.len(), bytes: self.bytes_used, ..self.stats }
     }
 
     /// 在 (x, baseline_y) 处按样式绘制文字, 颜色 `color`; 返回绘制宽度 (像素)。
@@ -451,7 +490,7 @@ impl GlyphCache {
         let start_x_64 = (x as f64 * 64.0).round() as i64;
         let mut pen_x_64 = start_x_64;
 
-        let ck = chain_key(&style.fonts);
+        let ck = self.chain_id(&style.fonts);
 
         for ch in text.chars() {
             if is_invisible(ch) {
@@ -465,7 +504,10 @@ impl GlyphCache {
             let key = (font_id, gid.to_u32(), size_key);
             self.tick += 1;
             let tick = self.tick;
-            if !self.map.contains_key(&key) {
+            if self.map.contains_key(&key) {
+                self.stats.hits += 1;
+            } else {
+                self.stats.misses += 1;
                 let mut entry = Self::rasterize(fonts, font_id, gid, style.size_px, synth.italic);
                 entry.last_used = tick; // 先标记为最新, 免得插入后立刻被淘汰
                 self.bytes_used += entry.byte_size();
@@ -503,11 +545,21 @@ impl GlyphCache {
             keep
         });
         self.bytes_used -= freed;
-        self.chars.retain(|_, v| v.0 != font);
+        // 含这个字体的链不会再用 (FontId 不复用), 连同它们的字符映射一起丢掉
+        let mut dead = Vec::new();
+        self.chains.retain(|chain, id| {
+            let keep = !chain.contains(&font);
+            if !keep {
+                dead.push(*id);
+            }
+            keep
+        });
+        self.chars.retain(|k, v| v.0 != font && !dead.contains(&k.0));
     }
 
     pub fn clear(&mut self) {
         self.map.clear();
+        self.chains.clear();
         self.chars.clear();
         self.bytes_used = 0;
     }

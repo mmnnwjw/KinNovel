@@ -164,6 +164,88 @@ fn glyph_cache_lru_eviction_by_bytes() {
     assert_eq!(cache.bytes_used(), 0);
 }
 
+fn app_font(name: &str) -> Vec<u8> {
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../kn-app/data").join(name)).expect("read kn-app font")
+}
+
+fn draw(cache: &mut GlyphCache, store: &FontStore, style: &TextStyle, text: &str) -> Vec<u8> {
+    let mut bitmap = kn_render::Bitmap::new(200, 80, 255);
+    cache.draw_text(store, &mut bitmap, 4.0, 60.0, text, style, 0);
+    (0..80).flat_map(|y| bitmap.row(y)[..200].to_vec()).collect()
+}
+
+/// 旧的 chain_key (每个 FontId 8 位) 把 [0] 和 [513, 0] 算成同一个键, 第二条链会沿用第一条链的
+/// 字符映射。现在按整条链区分。
+#[test]
+fn font_chains_with_large_ids_do_not_share_char_mappings() {
+    let emoji = app_font("NotoEmoji-subset.ttf");
+    let symbols = app_font("KinNovelSymbols.ttf");
+    let mut store = FontStore::new();
+    let e = store.load_bytes(emoji).unwrap();
+    assert_eq!(e.0, 0);
+    // 换章时字体加载又卸载, FontId 单调增长
+    for _ in 0..512 {
+        let id = store.load_bytes(symbols.clone()).unwrap();
+        store.unload(id);
+    }
+    let s = store.load_bytes(symbols).unwrap();
+    assert_eq!(s.0, 513);
+    let old_key = |chain: &[u32]| chain.iter().fold(chain.len() as u64, |k, &f| (k << 8) ^ f as u64);
+    assert_eq!(old_key(&[0]), old_key(&[513, 0]));
+
+    let ch = '♡';
+    let a = TextStyle { fonts: vec![e], size_px: 40.0 };
+    let b = TextStyle { fonts: vec![s, e], size_px: 40.0 };
+    assert_eq!(store.pick_font(&a.fonts, ch), e);
+    assert_eq!(store.pick_font(&b.fonts, ch), s);
+
+    let fresh_b = draw(&mut GlyphCache::new(1 << 20), &store, &b, "♡");
+    let mut cache = GlyphCache::new(1 << 20);
+    let drawn_a = draw(&mut cache, &store, &a, "♡");
+    let drawn_b = draw(&mut cache, &store, &b, "♡");
+    assert_ne!(drawn_a, fresh_b, "test fonts must draw the char differently");
+    assert_eq!(drawn_b, fresh_b);
+
+    // 卸载后含该字体的链与映射都清掉, 其它链不受影响
+    cache.forget_font(s);
+    assert_eq!(draw(&mut cache, &store, &a, "♡"), drawn_a);
+}
+
+/// 超限时一批淘汰到约 75%, 最近用过的字形留下; 统计计数正确。
+#[test]
+fn glyph_cache_batch_eviction_keeps_recent_glyphs() {
+    let mut store = FontStore::new();
+    let font = store.load_bytes(app_font("KinNovelSymbols.ttf")).unwrap();
+    let style = TextStyle { fonts: vec![font], size_px: 32.0 };
+    // 符号字体里有的字符
+    let chars: Vec<char> = ('\u{2190}'..='\u{2BFF}').filter(|&c| store.has_char(font, c)).take(200).collect();
+    assert!(chars.len() >= 100, "symbol font coverage: {}", chars.len());
+
+    let mut probe = GlyphCache::new(usize::MAX);
+    let text: String = chars.iter().collect();
+    draw(&mut probe, &store, &style, &text);
+    let total = probe.bytes_used();
+    let st = probe.stats();
+    // 个别字符共用一个字形, 所以第一遍也可能有命中
+    assert_eq!((st.misses + st.hits, st.evicted, st.entries as u64), (chars.len() as u64, 0, st.misses));
+    draw(&mut probe, &store, &style, &text);
+    assert_eq!(probe.stats().hits, st.hits + chars.len() as u64);
+
+    let max = total / 3;
+    let mut cache = GlyphCache::new(max);
+    for &c in &chars {
+        draw(&mut cache, &store, &style, &c.to_string());
+        assert!(cache.bytes_used() <= max);
+    }
+    let st = cache.stats();
+    assert!(st.evicted > 0 && st.entries < chars.len());
+    assert_eq!(st.entries as u64 + st.evicted, st.misses);
+    // 最后画的那个字形一定还在 (再画一次是命中)
+    let hits = st.hits;
+    draw(&mut cache, &store, &style, &chars.last().unwrap().to_string());
+    assert_eq!(cache.stats().hits, hits + 1);
+}
+
 #[test]
 fn woff2_decode_and_load_if_sample_present() {
     let path = woff2_sample_path();
