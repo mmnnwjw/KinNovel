@@ -3,6 +3,10 @@
 上传两样东西 (客户端 `rust/crates/kn-app/src/update.rs` 读取):
 - `KinNovel-vX.Y.Z.zip` + `.sig`: 安装包和它的 Ed25519 签名 (`tools/sign_update.py`; 客户端验签不过不装)。
   客户端下载时带 `?sha256=<内容的哈希>`, 同一版本原地替换后地址也跟着变, 不会取到边缘缓存里的旧包。
+  但 1.6.3 及更早的客户端 (以及 releases.json 里没有 digest 时) 用不带参数的地址, Cloudflare 默认缓存 .zip
+  (曾经在几个小时里继续给出替换前的 1.6.3 包): 原地替换一个已发布的版本后, 要在 Cloudflare 后台
+  Purge 这两个地址的缓存: `https://update.mmnnwjw.dpdns.org/KinNovel-vX.Y.Z.zip` 和 `….zip.sig`。
+  不 purge 也不会装错 (sha256 / 签名对不上时客户端改从 GitHub 下载), 只是更新变慢或失败一次。
 - `releases.json`: 最近 20 个发行版, 格式与 GitHub `GET /repos/{repo}/releases` 相同 (只留客户端用到的字段),
   资产的 `digest` = "sha256:…"。文件名固定, 上传时设 `Cache-Control: no-cache`。
 先传安装包和签名, 再传 releases.json, 所以列表里的版本在服务器上一定已经有包。

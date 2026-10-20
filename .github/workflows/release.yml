@@ -1,26 +1,72 @@
 name: Release
 
-# 推送 vX.Y.Z 标签: 测试 → 构建设备程序 → 打包 → 创建 (或更新) GitHub Release 并上传 zip
-# (安装包旁边带 Ed25519 签名 .zip.sig, tools/sign_update.py, 仓库 Secret UPDATE_SIGNING_KEY)
+# 推送 vX.Y.Z 标签: 测试 (整个 workspace) + 构建设备程序 / 打包 → 签名 (Ed25519 .zip.sig, tools/sign_update.py,
+# 仓库 Secret UPDATE_SIGNING_KEY) → 创建 (或更新) GitHub Release 并上传 zip + .sig
 # → 同步到自己的更新服务器 (R2, tools/r2_publish.py; 需要仓库 Secrets R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY)。
 # 说明文字取 docs/releases/vX.Y.Z.md, 没有就让 GitHub 按提交生成。
+# 每个 Secret 只给用到它的那个作业; 那些作业里的 pip 包锁定版本和哈希 (tools/requirements-*.txt)。
+# actions 都固定到 commit SHA (注释是对应的标签)。
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  # 整个 workspace 的主机测试, 与本机一样: Windows + x86_64-pc-windows-gnu + zig 链接 (rust/build.sh host-test)
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout (with the FBInk submodule)
-        uses: actions/checkout@v4
+      - name: Checkout (with the FBInk / libwebp submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: true
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust (windows-gnu, 同本机)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - name: Install zig (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r tools/requirements-zig.txt'
+
+      - name: Cache cargo-zigbuild
+        id: zigbuild-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild.exe
+          key: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ runner.os }}
+
+      - name: Install cargo-zigbuild
+        if: steps.zigbuild-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+
+      - name: Unit tests (whole workspace)
+        run: sh rust/build.sh host-test
+
+  # 设备程序 + 发布包 (这个作业没有任何 Secret)
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with the FBInk / libwebp submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -29,10 +75,12 @@ jobs:
           rustup toolchain install stable --profile minimal --component llvm-tools
           rustup target add armv7-unknown-linux-musleabihf
 
-      - name: Install zig + cargo-zigbuild
-        run: |
-          python -m pip install ziglang
-          cargo install cargo-zigbuild --locked
+      - name: Install zig (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r tools/requirements-zig.txt'
+
+      # 这里编出来的程序要签名发布: 不用缓存 (缓存可能来自别的分支的运行), 每次从源码装
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
 
       - name: Tag matches the version
         run: |
@@ -42,7 +90,8 @@ jobs:
       - name: Credential scan
         run: python tools/credential_scan.py
 
-      - name: Unit tests (pure-Rust crates)
+      # Linux 上编 libwebp (cfg kn_libwebp) 的路径只有这里测得到; 整个 workspace 在 test 作业里跑
+      - name: Unit tests (pure-Rust crates, Linux)
         working-directory: rust
         run: cargo test -p kn-render -p kn-text -p kn-net -p kn-ime
 
@@ -51,16 +100,70 @@ jobs:
           sh rust/build.sh kindle
           python tools/package_release.py --no-build
 
+      - name: Upload the release zip
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-zip
+          path: build/KinNovel-${{ github.ref_name }}.zip
+          if-no-files-found: error
+
+  # 只有这个作业拿得到签名私钥; 只装 pynacl (锁定哈希), 测试和构建都通过后才签
+  sign:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pynacl (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r tools/requirements-sign.txt'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-zip
+          path: build
+
       - name: Sign the package
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: |
-          python -m pip install pynacl
-          python tools/sign_update.py "build/KinNovel-$GITHUB_REF_NAME.zip"
+        run: python tools/sign_update.py "build/KinNovel-$GITHUB_REF_NAME.zip"
+
+      - name: Upload the signature
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-sig
+          path: build/KinNovel-${{ github.ref_name }}.zip.sig
+          if-no-files-found: error
+
+  github-release:
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-zip
+          path: build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-sig
+          path: build
 
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           tag="$GITHUB_REF_NAME"
           zip="build/KinNovel-$tag.zip"
@@ -72,12 +175,36 @@ jobs:
             gh release create "$tag" "$zip" "$zip.sig" --title "KinNovel ${tag#v}" --generate-notes
           fi
 
+  # 只有这个作业拿得到 R2 凭据 (r2_publish.py 先传 zip + .sig, 再传 releases.json)
+  r2:
+    needs: github-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install boto3 + pynacl (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r tools/requirements-r2.txt'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-zip
+          path: build
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-sig
+          path: build
+
       - name: Publish to the update server (Cloudflare R2)
         env:
           GH_TOKEN: ${{ github.token }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          python -m pip install boto3 pynacl
-          python tools/r2_publish.py "$GITHUB_REF_NAME" --zip "build/KinNovel-$GITHUB_REF_NAME.zip"
+        run: python tools/r2_publish.py "$GITHUB_REF_NAME" --zip "build/KinNovel-$GITHUB_REF_NAME.zip"

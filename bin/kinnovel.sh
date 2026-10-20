@@ -72,8 +72,13 @@ pause_fb_users() {
 }
 
 SLEEP_COVER=0
+GRAYSCALE_MARKER=/tmp/kinnovel_grayscale
+CLEANED=0
 
+# 收尾只做一次 (卸载流程会手动调用, 正常退出由 EXIT trap 调用)
 on_exit() {
+  [ "$CLEANED" = 1 ] && return 0
+  CLEANED=1
   resume_fb_users
   [ "$SLEEP_COVER" = 1 ] && lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
   # 让系统主页重新绘制屏幕
@@ -81,7 +86,19 @@ on_exit() {
   rm -f "$BIN_RUN"
   rm -rf "$LOCK_DIR"
 }
-trap on_exit INT TERM EXIT
+# INT / TERM (sh 等前台的程序结束后才执行 trap): 收尾后立即退出, 不再往下走 (以前会把后面的流程走完,
+# 退出时 EXIT trap 再收尾一次)。先撤掉 EXIT trap, 退出码就是约定的 128 + 信号号。
+on_signal() {
+  log "launcher got signal, exiting with $1"
+  # 收尾会删掉复制出来的程序, 所以反色恢复要在它之前 (正常流程里在程序退出后马上做)
+  [ -f "$GRAYSCALE_MARKER" ] && [ -f "$BIN_RUN" ] && "$BIN_RUN" --restore-display >> "$LOG_FILE" 2>&1
+  on_exit
+  trap - INT TERM EXIT
+  exit "$1"
+}
+trap on_exit EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 # 上次异常退出可能留下被暂停的进程
 resume_fb_users
@@ -112,7 +129,7 @@ KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" "$@" >> "$LOG_FILE" 2>&1
 RET=$?
 log "exited with $RET"
 # 程序改过显示驱动的全局状态 (夜间模式的硬件反色) 却没能正常退出时留下这个文件: 恢复, 否则系统界面会一直反色
-[ -f /tmp/kinnovel_grayscale ] && "$BIN_RUN" --restore-display >> "$LOG_FILE" 2>&1
+[ -f "$GRAYSCALE_MARKER" ] && "$BIN_RUN" --restore-display >> "$LOG_FILE" 2>&1
 # 异常退出: panic 时程序自己写了 last_crash.txt (含消息); 被信号杀死 (段错误等) 时在这里补一个,
 # 下次启动书架页会提示。SIGTERM/SIGINT (正常的 kill / 关机) 不算。
 CRASH_MARKER="$LOG_DIR/last_crash.txt"

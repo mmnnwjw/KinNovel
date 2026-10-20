@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
+
+# actions 都固定到 commit SHA (注释是对应的标签); zig 锁定版本和哈希 (tools/requirements-zig.txt)。
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -11,38 +18,94 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - name: Checkout (with the FBInk submodule)
-        uses: actions/checkout@v4
+      - name: Checkout (with the FBInk / libwebp submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
 
       - name: Install Rust (+ Kindle target)
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools
           rustup target add armv7-unknown-linux-musleabihf
 
-      - name: Install zig + cargo-zigbuild
-        run: |
-          python -m pip install ziglang
-          cargo install cargo-zigbuild --locked
+      - name: Install zig (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r ../tools/requirements-zig.txt'
 
-      - name: Unit tests (pure-Rust crates)
+      - name: Cache cargo-zigbuild
+        id: zigbuild-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild
+          key: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ runner.os }}
+
+      - name: Install cargo-zigbuild
+        if: steps.zigbuild-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+
+      # Linux 上编 libwebp (cfg kn_libwebp) 的路径只有这里测得到; 整个 workspace 在 host-test 作业里跑
+      - name: Unit tests (pure-Rust crates, Linux)
         run: cargo test -p kn-render -p kn-text -p kn-net -p kn-ime
 
       - name: Device binary (armv7 musl, static, FBInk)
         run: sh build.sh kindle
 
       - name: Upload device binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kinnovel-armv7
           path: rust/target/armv7-unknown-linux-musleabihf/release/kinnovel
 
+  # 整个 workspace 的主机测试, 与本机一样: Windows + x86_64-pc-windows-gnu + zig 链接 (rust/build.sh host-test)
+  host-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout (with the FBInk / libwebp submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust (windows-gnu, 同本机)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - name: Install zig (pinned)
+        run: 'python -m pip install --require-hashes --only-binary=:all: -r tools/requirements-zig.txt'
+
+      - name: Cache cargo-zigbuild
+        id: zigbuild-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild.exe
+          key: cargo-zigbuild-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ runner.os }}
+
+      - name: Install cargo-zigbuild
+        if: steps.zigbuild-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+
+      - name: Unit tests (whole workspace)
+        run: sh rust/build.sh host-test
+
   credentials:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Scan for committed credentials
