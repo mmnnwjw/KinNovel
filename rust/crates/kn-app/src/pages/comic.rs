@@ -217,7 +217,7 @@ impl ComicReaderPage {
         let (book_id, chapter_id, entry) = (self.book_id, self.chapter_id, self.entry);
         let local = comic::load_progress(&paths, book_id);
         let seeded = (self.manifest.total() > 0).then(|| self.manifest.clone());
-        cx.spawn(move || -> Result<Loaded, String> {
+        cx.spawn_droppable(move || -> Result<Loaded, String> {
             let started = Instant::now();
             let book = comic::load_book(&paths, net.as_ref(), book_id);
             let mut server = None;
@@ -262,7 +262,7 @@ impl ComicReaderPage {
         let paths = cx.app.paths.clone();
         let net = cx.app.net();
         let chapter_id = self.chapter_id;
-        cx.spawn(move || BatchLoaded { chapter_id, skip, result: comic::fetch_batch(&paths, net.as_ref(), chapter_id, skip, priority).map(|(m, _)| m) });
+        cx.spawn_droppable(move || BatchLoaded { chapter_id, skip, result: comic::fetch_batch(&paths, net.as_ref(), chapter_id, skip, priority).map(|(m, _)| m) });
     }
 
     /// 解码第 `index` 页 (地址未知时先要地址所在的批次)。
@@ -290,7 +290,7 @@ impl ComicReaderPage {
         let focus = self.focus.clone();
         let keep = Self::keep_radius(cx);
         let high = Self::high_quality(cx);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             // 排队期间读者可能已经翻远了: 下载前、解码前各查一次
             let far = || (index as i64 - focus.load(Ordering::Relaxed)).abs() > keep;
             let cancelled = PageLoaded { chapter_id, index, size: (w, h), cancelled: true, result: Ok(None) };
@@ -329,7 +329,7 @@ impl ComicReaderPage {
         let net = cx.app.net();
         let (w, h) = (cx.width, cx.height);
         let high = Self::high_quality(cx);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             let started = Instant::now();
             let manifest = Manifest::load(&paths, next.id)
                 .filter(|m| m.total() > 0 && m.url(0).is_some())

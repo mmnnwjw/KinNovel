@@ -92,7 +92,7 @@ impl MePage {
     fn load_info(&mut self, cx: &mut Cx<KinNovel>) {
         self.info_loading = true;
         let net = cx.app.net();
-        cx.spawn(move || InfoLoaded(api::load_my_info(net.as_ref())));
+        cx.spawn_droppable(move || InfoLoaded(api::load_my_info(net.as_ref())));
     }
 
     fn show_toast(&mut self, cx: &mut Cx<KinNovel>, text: impl Into<String>) {

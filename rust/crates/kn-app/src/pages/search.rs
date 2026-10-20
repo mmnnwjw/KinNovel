@@ -99,7 +99,7 @@ impl SearchPage {
         let (query, mode, comic, page, id) = (self.query.clone(), self.mode, self.comic, self.page, self.request);
         let size = per_page(cx) as i64;
         let filters = Filters::from_config(&cx.app.config);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             let r = if comic {
                 api::search_comics(net.as_ref(), &query, mode, page, size, filters)
             } else {

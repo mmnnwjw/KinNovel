@@ -112,7 +112,7 @@ impl BookDetailPage {
         self.status = Status::Loading;
         let net = cx.app.net();
         let book_id = self.book_id;
-        cx.spawn(move || Loaded(api::load_book_info(net.as_ref(), book_id)));
+        cx.spawn_droppable(move || Loaded(api::load_book_info(net.as_ref(), book_id)));
     }
 }
 
@@ -162,7 +162,7 @@ impl Page<KinNovel> for BookDetailPage {
                     }
                     if Self::shelf_button(cx) && self.on_shelf.is_none() {
                         let (net, id) = (cx.app.net(), self.book_id);
-                        cx.spawn(move || ShelfState(api::shelf_contains(net.as_ref(), id)));
+                        cx.spawn_droppable(move || ShelfState(api::shelf_contains(net.as_ref(), id)));
                     }
                     Status::Ready(info)
                 }
@@ -358,7 +358,7 @@ impl Page<KinNovel> for BookDetailPage {
                 let (net, id, comic) = (cx.app.net(), self.book_id, info.is_comic);
                 match self.on_shelf.take() {
                     // 上次查询失败: 重新查询
-                    None => cx.spawn(move || ShelfState(api::shelf_contains(net.as_ref(), id))),
+                    None => cx.spawn_droppable(move || ShelfState(api::shelf_contains(net.as_ref(), id))),
                     Some(current) => cx.spawn(move || ShelfState(api::shelf_set_book(net.as_ref(), id, comic, !current))),
                 }
                 self.shelf_error = false;

@@ -118,7 +118,7 @@ impl HistoryPage {
         }
         self.status = Status::Loading;
         let net = cx.app.net();
-        cx.spawn(move || IdsLoaded(api::load_history_ids(net.as_ref())));
+        cx.spawn_droppable(move || IdsLoaded(api::load_history_ids(net.as_ref())));
     }
 
     fn load_page(&mut self, cx: &mut Cx<KinNovel>, page: usize) {
@@ -133,7 +133,7 @@ impl HistoryPage {
             return;
         }
         let net = cx.app.net();
-        cx.spawn(move || BooksLoaded {
+        cx.spawn_droppable(move || BooksLoaded {
             kind,
             page,
             result: match kind {

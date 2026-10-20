@@ -272,6 +272,24 @@ impl RefreshScheduler {
         }
     }
 
+    /// 按下反馈: 直接在屏幕副本上把 `rect` (圆角 `radius`) 反相并记入预算, 返回只刷这一块的请求
+    /// (用 `screen()` 作帧提交)。结果与 "拷一份屏幕、反相、`plan(Feedback)`、`commit`" 相同, 但不拷整屏、不做整屏差分。
+    /// 屏幕副本不可信 (首帧前、invalidate 之后) 或区域在屏幕外时返回 None。
+    pub fn press(&mut self, rect: Rect, radius: u32) -> Option<RefreshRequest> {
+        let full = self.full();
+        if !self.screen_valid {
+            return None;
+        }
+        let changed = rect.intersect(&full).filter(|r| !r.is_empty())?;
+        self.screen.invert_rounded(rect, radius);
+        let padded = changed.inflate(REGION_PAD).intersect(&full)?;
+        let full_area = full.area().max(1) as f32;
+        let rect = if padded.area() as f32 / full_area >= FULL_RATIO { full } else { padded };
+        let req = Self::request(rect, self.feedback_waveform(rect), false);
+        self.account(&req, RefreshHint::Feedback);
+        Some(req)
+    }
+
     /// 刷新已成功提交: 更新屏幕帧副本 (只拷贝 req.rect 区域) 与残影预算。
     pub fn commit(&mut self, frame: &Bitmap, req: &RefreshRequest, hint: RefreshHint) {
         let full = self.full();
@@ -281,6 +299,12 @@ impl RefreshScheduler {
         } else {
             self.screen.blit(frame, req.rect, req.rect.x, req.rect.y);
         }
+        self.account(req, hint);
+    }
+
+    /// 提交后的预算与反馈区域记账。
+    fn account(&mut self, req: &RefreshRequest, hint: RefreshHint) {
+        let full = self.full();
         if hint == RefreshHint::Feedback {
             self.feedback = Some(self.feedback.map_or(req.rect, |r| r.union(&req.rect)));
         } else {
@@ -668,6 +692,81 @@ mod tests {
         present(&mut s, &f, RefreshHint::Ui);
         f.fill_rect(Rect::new(100, 100, 160, 96), 0);
         assert!(s.plan(&f, RefreshHint::Ui).iter().any(|r| r.flash));
+    }
+
+    /// 有灰阶内容的屏幕 (反相后每个像素都变)。
+    fn textured(w: u32, h: u32) -> Bitmap {
+        let mut f = Bitmap::new(w, h, 255);
+        for y in 0..h {
+            for (x, v) in f.row_mut(y).iter_mut().enumerate() {
+                *v = ((x as u32 * 7 + y * 13) % 251) as u8;
+            }
+        }
+        f
+    }
+
+    /// 旧的按下反馈路径: 拷整屏、反相、整屏差分、提交。
+    fn press_old(s: &mut RefreshScheduler, rect: Rect, radius: u32) -> Vec<RefreshRequest> {
+        let mut pressed = s.screen().clone();
+        pressed.invert_rounded(rect, radius);
+        let reqs = s.plan(&pressed, RefreshHint::Feedback);
+        for req in &reqs {
+            s.commit(&pressed, req, RefreshHint::Feedback);
+        }
+        reqs
+    }
+
+    #[test]
+    fn press_matches_full_diff_path() {
+        let cases = [
+            (Rect::new(20, 40, 200, 60), 0),
+            (Rect::new(20, 40, 200, 60), 12),
+            (Rect::new(30, 30, 40, 40), 8),
+            // 部分在屏幕外
+            (Rect::new(-10, 560, 120, 80), 6),
+            // 几乎整屏
+            (Rect::new(0, 0, BW, BH - 4), 0),
+        ];
+        for (rect, radius) in cases {
+            let base = textured(BW, BH);
+            let (mut old, mut new) = (RefreshScheduler::new(BW, BH, RefreshPolicy::default()), RefreshScheduler::new(BW, BH, RefreshPolicy::default()));
+            present(&mut old, &base, RefreshHint::Ui);
+            present(&mut new, &base, RefreshHint::Ui);
+            let mut shown_old = kn_platform::MemoryDisplay::new(BW, BH);
+            let mut shown_new = kn_platform::MemoryDisplay::new(BW, BH);
+            use kn_platform::Display;
+            let full = RefreshRequest { rect: Rect::new(0, 0, BW, BH), waveform: Waveform::Gc16, flash: false, swipe: None };
+            shown_old.present(&base, &full).unwrap();
+            shown_new.present(&base, &full).unwrap();
+
+            let reqs_old = press_old(&mut old, rect, radius);
+            let req_new = new.press(rect, radius).expect("press");
+            assert_eq!(reqs_old, vec![req_new], "{rect:?} r{radius}");
+            for req in &reqs_old {
+                shown_old.present(old.screen(), req).unwrap();
+            }
+            shown_new.present(new.screen(), &req_new).unwrap();
+            assert_eq!(old.screen().data(), new.screen().data(), "{rect:?}");
+            assert_eq!(shown_old.screen.data(), shown_new.screen.data(), "{rect:?}");
+            assert_eq!(new.screen().data(), shown_new.screen.data(), "副本与面板一致 {rect:?}");
+            assert!((old.ghost_budget() - new.ghost_budget()).abs() < 1e-6);
+            assert_eq!(old.feedback, new.feedback);
+            // 抬起后重绘 (还原 + 别处有变化) 的计划也一样
+            let mut after = base.clone();
+            after.fill_rect(Rect::new(300, 500, 40, 40), 0);
+            assert_eq!(old.plan(&after, RefreshHint::Ui), new.plan(&after, RefreshHint::Ui), "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn press_needs_a_valid_screen_copy() {
+        let mut s = RefreshScheduler::new(BW, BH, RefreshPolicy::default());
+        assert!(s.press(Rect::new(10, 10, 20, 20), 0).is_none());
+        present(&mut s, &textured(BW, BH), RefreshHint::Ui);
+        assert!(s.press(Rect::new(BW as i32 + 5, 10, 20, 20), 0).is_none());
+        let req = s.press(Rect::new(10, 10, 20, 20), 0).unwrap();
+        assert_eq!(req.waveform, Waveform::A2);
+        assert_eq!(req.rect, Rect::new(6, 6, 28, 28));
     }
 
     #[test]

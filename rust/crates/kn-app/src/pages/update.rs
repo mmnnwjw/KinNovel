@@ -65,15 +65,19 @@ impl UpdatePage {
         let dir = update::program_dir(&cx.app.paths);
         let poster = cx.page_poster();
         self.state = State::Downloading(release.clone(), update::DownloadProgress::default());
-        cx.spawn(move || {
+        // 下载每个来源最长要几分钟: 用自己的线程, 不占页面的任务池; 进度与结果经页面投递器送回
+        let spawned = std::thread::Builder::new().name("kn-update".into()).spawn(move || {
             let result = update::download(&net, &release, |p| poster.post(Progress(p.clone())))
                 .and_then(|zip| update::install(&zip, &release.version, &dir))
                 .map(|n| {
                     eprintln!("[update] 已安装 {} ({n} 个文件) 到 {}", release.version, dir.display());
                     release.version.clone()
                 });
-            Done(result)
+            poster.post(Done(result));
         });
+        if let Err(e) = spawned {
+            cx.page_poster().post(Done(Err(format!("无法启动下载: {e}"))));
+        }
     }
 
     fn leave_label(&self) -> &'static str {

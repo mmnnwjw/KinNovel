@@ -204,7 +204,7 @@ impl Page<KinNovel> for ShelfPage {
         }
         // 从阅读页返回时也重新读: "继续阅读" 要反映刚才的进度
         let paths = cx.app.paths.clone();
-        cx.spawn(move || load(&paths));
+        cx.spawn_local_droppable(move || load(&paths));
         if use_cloud(cx) {
             let net = cx.app.net();
             if net.as_ref().is_some_and(|n| n.server_down()) {
@@ -214,7 +214,7 @@ impl Page<KinNovel> for ShelfPage {
                 return;
             }
             self.cloud_loading = true;
-            cx.spawn(move || CloudLoaded(api::load_shelf(net.as_ref())));
+            cx.spawn_droppable(move || CloudLoaded(api::load_shelf(net.as_ref())));
         } else {
             self.cloud = None;
         }
@@ -259,7 +259,7 @@ impl Page<KinNovel> for ShelfPage {
                     // 重新拉取 (书架以服务器为准)
                     self.cloud_loading = true;
                     let net = cx.app.net();
-                    cx.spawn(move || CloudLoaded(api::load_shelf(net.as_ref())));
+                    cx.spawn_droppable(move || CloudLoaded(api::load_shelf(net.as_ref())));
                     text
                 }
                 Err(e) => format!("保存失败: {e}"),

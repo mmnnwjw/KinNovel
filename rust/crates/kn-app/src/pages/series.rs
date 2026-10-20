@@ -83,7 +83,7 @@ impl SeriesPage {
         let name = self.series_name.clone();
         let size = per_page(cx);
         let filters = Filters::from_config(&cx.app.config);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             let r = api::load_books_by_series(net.as_ref(), &name, page, size, filters);
             Loaded(page, r.map(|p| (p.items, p.page, p.total_pages)))
         });

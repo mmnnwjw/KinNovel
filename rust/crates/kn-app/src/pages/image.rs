@@ -123,7 +123,7 @@ impl ImagePage {
         let paths = cx.app.paths.clone();
         let net = cx.app.net();
         let url = self.url.clone();
-        cx.spawn(move || Decoded {
+        cx.spawn_droppable(move || Decoded {
             original: true,
             result: crate::net::original_image_bytes(&paths, net.as_ref(), &url)
                 .and_then(|bytes| bytes.map(|b| kn_render::decode_gray(&b, None).map_err(|e| e.to_string())).transpose()),
@@ -218,7 +218,7 @@ impl Page<KinNovel> for ImagePage {
         let paths = cx.app.paths.clone();
         let net = cx.app.net();
         let (url, height, comic) = (self.url.clone(), self.height, self.comic);
-        cx.spawn(move || Decoded {
+        cx.spawn_droppable(move || Decoded {
             original: false,
             result: if comic { crate::comic::page_bytes(&paths, net.as_ref(), &url, height) } else { crate::net::image_bytes(&paths, net.as_ref(), &url, height) }
                 .and_then(|bytes| bytes.map(|b| kn_render::decode_gray(&b, None).map_err(|e| e.to_string())).transpose()),

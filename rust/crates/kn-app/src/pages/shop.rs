@@ -60,7 +60,7 @@ impl ShopPage {
         }
         self.status = Status::Loading;
         let net = cx.app.net();
-        cx.spawn(move || Loaded(api::load_shop(net.as_ref())));
+        cx.spawn_droppable(move || Loaded(api::load_shop(net.as_ref())));
     }
 
     fn show_toast(&mut self, cx: &mut Cx<KinNovel>, text: impl Into<String>) {

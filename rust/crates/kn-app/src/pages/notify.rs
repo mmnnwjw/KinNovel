@@ -61,7 +61,7 @@ impl NotificationsPage {
         self.page = page;
         let net = cx.app.net();
         let size = per_page(cx);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             let r = api::load_notifications(net.as_ref(), page, size);
             Loaded(page, r.map(|p| (p.items, p.page, p.total_pages)))
         });

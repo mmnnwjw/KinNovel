@@ -156,7 +156,7 @@ impl DiscoverPage {
         let net = cx.app.net();
         let size = per_page(cx, Sub::Latest) as i64;
         let filters = api::Filters::from_config(&cx.app.config);
-        cx.spawn(move || LatestLoaded(page, api::load_book_list(net.as_ref(), page, size.max(1), None, filters)));
+        cx.spawn_droppable(move || LatestLoaded(page, api::load_book_list(net.as_ref(), page, size.max(1), None, filters)));
     }
 
     fn load_rank(&mut self, cx: &mut Cx<KinNovel>, days: i64) {
@@ -168,7 +168,7 @@ impl DiscoverPage {
         self.rank_kind = days;
         self.rank_page = 0;
         let net = cx.app.net();
-        cx.spawn(move || RankLoaded(days, api::load_rank(net.as_ref(), days)));
+        cx.spawn_droppable(move || RankLoaded(days, api::load_rank(net.as_ref(), days)));
     }
 
     fn load_categories(&mut self, cx: &mut Cx<KinNovel>) {
@@ -178,7 +178,7 @@ impl DiscoverPage {
         }
         self.categories = Fetch::Loading;
         let net = cx.app.net();
-        cx.spawn(move || CategoriesLoaded(api::load_categories(net.as_ref())));
+        cx.spawn_droppable(move || CategoriesLoaded(api::load_categories(net.as_ref())));
     }
 
     fn load_category(&mut self, cx: &mut Cx<KinNovel>, page: i64) {
@@ -193,7 +193,7 @@ impl DiscoverPage {
         let size = per_page(cx, Sub::Category) as i64;
         let id = cat.id;
         let filters = api::Filters::from_config(&cx.app.config);
-        cx.spawn(move || CategoryListLoaded(id, page, api::load_book_list(net.as_ref(), page, size.max(1), Some(id), filters)));
+        cx.spawn_droppable(move || CategoryListLoaded(id, page, api::load_book_list(net.as_ref(), page, size.max(1), Some(id), filters)));
     }
 
     fn load_comic(&mut self, cx: &mut Cx<KinNovel>, page: i64) {
@@ -206,7 +206,7 @@ impl DiscoverPage {
         let net = cx.app.net();
         let size = per_page(cx, Sub::Comic) as i64;
         let order = self.comic_order;
-        cx.spawn(move || ComicLoaded(order, page, api::load_comic_list(net.as_ref(), page, size.max(1), order)));
+        cx.spawn_droppable(move || ComicLoaded(order, page, api::load_comic_list(net.as_ref(), page, size.max(1), order)));
     }
 
     fn switch(&mut self, cx: &mut Cx<KinNovel>, sub: Sub) {

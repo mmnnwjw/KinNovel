@@ -71,13 +71,13 @@ impl StoragePage {
     fn measure(&mut self, cx: &mut Cx<KinNovel>) {
         self.busy = true;
         let paths = cx.app.paths.clone();
-        cx.spawn(move || Sized(measure(&paths)));
+        cx.spawn_local_droppable(move || Sized(measure(&paths)));
     }
 
     fn clear(&mut self, cx: &mut Cx<KinNovel>, which: Option<usize>) {
         self.busy = true;
         let paths = cx.app.paths.clone();
-        cx.spawn(move || {
+        cx.spawn_local(move || {
             let kinds: Vec<usize> = match which {
                 Some(k) => vec![k],
                 None => (0..KINDS.len()).collect(),

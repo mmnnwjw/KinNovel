@@ -18,7 +18,10 @@ use kn_render::{Bitmap, FontStore, GlyphCache, Point};
 
 use crate::hits::Hits;
 use crate::refresh::{RefreshHint, RefreshScheduler};
-use crate::tasks::{Poster, Tasks, Waker};
+use crate::tasks::{Lane, Poster, Submitter, Tasks, Waker};
+
+/// 网络队列的线程数 (本地队列另有 1 个线程, 见 `tasks::Lane`)。
+const NET_WORKERS: usize = 3;
 use crate::theme::Theme;
 
 /// 页面标识 (应用层定义的枚举序号)。
@@ -127,9 +130,42 @@ pub struct Cx<'a, A: App> {
     pub height: u32,
     instance: u64,
     tasks: &'a Tasks<Delivery<A>>,
+    alive: &'a Alive,
     redraw: &'a mut Option<RefreshHint>,
     swipe: &'a mut Option<SwipeDir>,
     timers: &'a mut Timers,
+}
+
+/// 还在页面栈里的实例号 (工作线程开工前查, 见 `Cx::spawn_droppable`)。栈最多 20 层, 用 Vec 即可。
+#[derive(Clone, Default)]
+pub(crate) struct Alive(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+impl Alive {
+    fn set(&self, instances: impl Iterator<Item = u64>) {
+        if let Ok(mut v) = self.0.lock() {
+            v.clear();
+            v.extend(instances);
+        }
+    }
+
+    fn contains(&self, instance: u64) -> bool {
+        self.0.lock().map(|v| v.contains(&instance)).unwrap_or(true)
+    }
+}
+
+/// 把页面任务包成投递; `alive` 为 Some 时 (可丢弃的任务) 开工前页面已出栈就跳过。
+fn page_job<A, F, M>(instance: u64, alive: Option<Alive>, work: F) -> impl FnOnce() -> Option<Delivery<A>> + Send + 'static
+where
+    A: 'static,
+    F: FnOnce() -> M + Send + 'static,
+    M: Any + Send + 'static,
+{
+    move || {
+        if alive.is_some_and(|a| !a.contains(instance)) {
+            return None;
+        }
+        Some(Delivery::Page { instance, msg: Box::new(work()) })
+    }
 }
 
 /// 定时器: (到期时刻, 页面实例, 页面自定义 token)。数量很少 (提示条、轮询), 用 Vec 即可。
@@ -194,14 +230,49 @@ impl<'a, A: App> Cx<'a, A> {
         self.timers.add(std::time::Instant::now() + delay, self.instance, token);
     }
 
-    /// 后台执行 `work`, 其返回值作为消息交给当前页面实例的 `on_message`。
+    /// 后台执行 `work` (网络队列), 其返回值作为消息交给当前页面实例的 `on_message`。
+    /// 页面关掉之后任务照样执行 (进度上传、书架写入等副作用不能丢), 只是结果被丢弃。
     pub fn spawn<F, M>(&self, work: F)
     where
         F: FnOnce() -> M + Send + 'static,
         M: Any + Send + 'static,
     {
-        let instance = self.instance;
-        self.tasks.spawn(move || Delivery::Page { instance, msg: Box::new(work()) });
+        self.tasks.submit(Lane::Net, page_job(self.instance, None, work));
+    }
+
+    /// 同 `spawn`, 但走本地队列: 纯本地的读缓存 / 解析 / 解码 / 排版, 不会被卡在网络上的任务挡住。
+    /// 不要在这里做网络请求 (本地队列只有一个线程)。
+    pub fn spawn_local<F, M>(&self, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        self.tasks.submit(Lane::Local, page_job(self.instance, None, work));
+    }
+
+    /// 可丢弃的 `spawn`: 开工前本页面实例已经出栈就不执行。只用于没有副作用、结果只拿来显示的任务
+    /// (封面 / 插图 / 列表的获取与解码); 已经开始的照样跑完 (结果丢弃)。
+    pub fn spawn_droppable<F, M>(&self, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        self.tasks.submit(Lane::Net, page_job(self.instance, Some(self.alive.clone()), work));
+    }
+
+    /// 可丢弃的 `spawn_local` (规则同 `spawn_droppable`)。
+    pub fn spawn_local_droppable<F, M>(&self, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        self.tasks.submit(Lane::Local, page_job(self.instance, Some(self.alive.clone()), work));
+    }
+
+    /// 可跨线程的提交端, 结果同样交给当前页面实例: 任务里可以接着提交下一步
+    /// (例如本地队列读缓存, 未命中再交给网络队列下载)。线程池已关闭时为 None。
+    pub fn spawner(&self) -> Option<Spawner<A>> {
+        Some(Spawner { instance: self.instance, alive: self.alive.clone(), submitter: self.tasks.submitter()? })
     }
 
     /// 后台执行, 结果回调作用于应用全局状态。
@@ -238,6 +309,47 @@ impl<A> Clone for PagePoster<A> {
 impl<A: 'static> PagePoster<A> {
     pub fn post<M: Any + Send + 'static>(&self, msg: M) {
         self.poster.post(Delivery::Page { instance: self.instance, msg: Box::new(msg) });
+    }
+}
+
+/// 绑定到某个页面实例的跨线程任务提交端 (`Cx::spawner`), 方法与 `Cx` 上的同名方法一致。
+pub struct Spawner<A> {
+    instance: u64,
+    alive: Alive,
+    submitter: Submitter<Delivery<A>>,
+}
+
+impl<A> Clone for Spawner<A> {
+    fn clone(&self) -> Self {
+        Spawner { instance: self.instance, alive: self.alive.clone(), submitter: self.submitter.clone() }
+    }
+}
+
+impl<A: 'static> Spawner<A> {
+    /// 提交到 `lane`; `droppable` 见 `Cx::spawn_droppable`。
+    pub fn spawn_on<F, M>(&self, lane: Lane, droppable: bool, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        let alive = droppable.then(|| self.alive.clone());
+        self.submitter.submit(lane, page_job(self.instance, alive, work));
+    }
+
+    pub fn spawn<F, M>(&self, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        self.spawn_on(Lane::Net, false, work);
+    }
+
+    pub fn spawn_local<F, M>(&self, work: F)
+    where
+        F: FnOnce() -> M + Send + 'static,
+        M: Any + Send + 'static,
+    {
+        self.spawn_on(Lane::Local, false, work);
     }
 }
 
@@ -321,6 +433,8 @@ struct Runtime<A: App> {
     glyphs: GlyphCache,
     hits: Hits,
     tasks: Tasks<Delivery<A>>,
+    /// 栈里的页面实例 (每次进入栈顶页面前同步)
+    alive: Alive,
     redraw: Option<RefreshHint>,
     swipe: Option<SwipeDir>,
     /// 逻辑画面尺寸 (横屏时与 panel 互换)
@@ -342,7 +456,8 @@ impl<A: App> Runtime<A> {
             fonts,
             glyphs: GlyphCache::new(4 * 1024 * 1024),
             hits: Hits::default(),
-            tasks: Tasks::new(2, waker.clone()),
+            tasks: Tasks::with_lanes(NET_WORKERS, 1, waker.clone()),
+            alive: Alive::default(),
             redraw: None,
             swipe: None,
             width: panel.0,
@@ -380,6 +495,7 @@ impl<A: App> Runtime<A> {
             height: self.height,
             instance,
             tasks: &self.tasks,
+            alive: &self.alive,
             redraw: &mut self.redraw,
             swipe: &mut self.swipe,
             timers: &mut self.timers,
@@ -403,6 +519,8 @@ impl<A: App> Stack<A> {
     }
 
     fn enter_top(&mut self, rt: &mut Runtime<A>, returning: bool) {
+        // 所有改动栈的导航最后都走到这里: 先同步在栈实例, 页面在 enter 里提交的可丢弃任务才不会被误跳过
+        rt.alive.set(self.entries.iter().map(|e| e.instance));
         let top = self.top();
         let instance = top.instance;
         // 先换好方向: 页面在 enter 里就能按新的宽高排版
@@ -543,19 +661,67 @@ pub fn render_once<A: App>(
     let mut redraw = None;
     let mut swipe = None;
     let mut timers = Timers::default();
+    let alive = Alive::default();
     let theme = app.theme();
     frame.fill_rect(frame.bounds(), theme.background);
     hits.clear();
     let (width, height) = (frame.width(), frame.height());
-    let mut cx = Cx { app, fonts, glyphs, hits, theme, width, height, instance: 0, tasks: &tasks, redraw: &mut redraw, swipe: &mut swipe, timers: &mut timers };
+    let mut cx = Cx {
+        app,
+        fonts,
+        glyphs,
+        hits,
+        theme,
+        width,
+        height,
+        instance: 0,
+        tasks: &tasks,
+        alive: &alive,
+        redraw: &mut redraw,
+        swipe: &mut swipe,
+        timers: &mut timers,
+    };
     page.render(&mut cx, frame);
 }
 
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 主循环的唤醒 eventfd (-1 = 没有)。信号处理函数往里写, 免得信号落在 STOP 检查之后、poll 之前时 poll 一睡就是一分钟。
+#[cfg(target_os = "linux")]
+static WAKE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+    // 只用 async-signal-safe 的操作: 原子读 + write (不分配、不加锁); errno 原样恢复
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let fd = WAKE_FD.load(std::sync::atomic::Ordering::SeqCst);
+        if fd >= 0 {
+            let errno = *libc::__errno_location();
+            let one: u64 = 1;
+            libc::write(fd, &one as *const u64 as *const libc::c_void, 8);
+            *libc::__errno_location() = errno;
+        }
+    }
+}
+
+/// `run` 期间让信号处理函数能唤醒主循环; drop 时先撤掉 fd, 再关 eventfd。
+struct SignalWake;
+
+impl SignalWake {
+    fn install(waker: &Waker) -> Self {
+        #[cfg(target_os = "linux")]
+        WAKE_FD.store(waker.fd(), std::sync::atomic::Ordering::SeqCst);
+        let _ = waker;
+        SignalWake
+    }
+}
+
+impl Drop for SignalWake {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        WAKE_FD.store(-1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn install_signal_handlers() {
@@ -755,6 +921,7 @@ pub fn run<A: App>(
     install_signal_handlers();
     let info = display.info().clone();
     let waker = Waker::new()?;
+    let _signal_wake = SignalWake::install(&waker);
     let mut rt = Runtime::new(app, fonts, (info.width, info.height), &waker);
     // 启动时已倒拿 (main 按重力感应设好了显示与输入)
     rt.upside_down = display.rotation().quarter_turns() == 2;
@@ -938,13 +1105,13 @@ pub fn run<A: App>(
                     if g.kind == GestureKind::Down {
                         let p = Point { x: g.start.0, y: g.start.1 };
                         if let Some((rect, radius)) = rt.hits.feedback_shape_at(p) {
-                            let mut pressed = scheduler.screen().clone();
-                            pressed.invert_rounded(rect, radius);
-                            for req in scheduler.plan(&pressed, RefreshHint::Feedback) {
-                                if display.present(&pressed, &req).is_ok() {
-                                    scheduler.commit(&pressed, &req, RefreshHint::Feedback);
-                                    feedback_shown = true;
+                            // 只在调度器的屏幕副本上反相这一块并只刷这一块 (不拷整屏、不做整屏差分)
+                            if let Some(req) = scheduler.press(rect, radius) {
+                                if display.present(scheduler.screen(), &req).is_err() {
+                                    // 副本已经反相了, 屏幕上不一定: 下一次整屏刷新
+                                    scheduler.invalidate();
                                 }
+                                feedback_shown = true;
                             }
                         }
                     }
@@ -1088,4 +1255,174 @@ pub fn run<A: App>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    #[derive(Default)]
+    struct TestApp {
+        /// 页面收到的消息 ("页面名:消息")
+        log: Vec<String>,
+    }
+
+    impl App for TestApp {
+        fn home_page(&mut self) -> Box<dyn Page<Self>> {
+            Box::new(TestPage::new("home", |_| {}))
+        }
+        fn theme(&self) -> Theme {
+            Theme::new(false)
+        }
+    }
+
+    type Setup = Box<dyn FnOnce(&Cx<TestApp>)>;
+
+    struct TestPage {
+        name: &'static str,
+        setup: Option<Setup>,
+    }
+
+    impl TestPage {
+        fn new(name: &'static str, setup: impl FnOnce(&Cx<TestApp>) + 'static) -> Self {
+            TestPage { name, setup: Some(Box::new(setup)) }
+        }
+    }
+
+    impl Page<TestApp> for TestPage {
+        fn id(&self) -> PageId {
+            PageId(0)
+        }
+        fn enter(&mut self, cx: &mut Cx<TestApp>, _returning: bool) {
+            if let Some(setup) = self.setup.take() {
+                setup(cx);
+            }
+        }
+        fn render(&mut self, _cx: &mut Cx<TestApp>, _frame: &mut Bitmap) {}
+        fn on_input(&mut self, _cx: &mut Cx<TestApp>, _event: &InputEvent) -> Transition<TestApp> {
+            Transition::None
+        }
+        fn on_message(&mut self, cx: &mut Cx<TestApp>, msg: Box<dyn Any + Send>) {
+            if let Ok(s) = msg.downcast::<&'static str>() {
+                cx.app.log.push(format!("{}:{}", self.name, s));
+            }
+        }
+    }
+
+    /// 卡住的任务 (模拟卡在网络读上): 每 `release` 一次放走一个。
+    fn gate() -> (mpsc::Sender<()>, Arc<Mutex<mpsc::Receiver<()>>>) {
+        let (tx, rx) = mpsc::channel();
+        (tx, Arc::new(Mutex::new(rx)))
+    }
+
+    fn block(rx: &Arc<Mutex<mpsc::Receiver<()>>>) -> impl FnOnce() -> &'static str + Send + 'static {
+        let rx = Arc::clone(rx);
+        move || {
+            let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            "stuck"
+        }
+    }
+
+    fn headless() -> Headless<TestApp> {
+        Headless::new(TestApp::default(), FontStore::new(), 100, 100).unwrap()
+    }
+
+    #[test]
+    fn stuck_net_jobs_do_not_block_local_work() {
+        let mut h = headless();
+        let (release, rx) = gate();
+        h.push(Box::new(TestPage::new("p", move |cx| {
+            for _ in 0..NET_WORKERS + 1 {
+                cx.spawn(block(&rx));
+            }
+            cx.spawn_local(|| "local");
+        })));
+        h.settle(Duration::from_millis(300));
+        assert_eq!(h.app().log, vec!["p:local".to_string()]);
+        for _ in 0..NET_WORKERS + 1 {
+            release.send(()).unwrap();
+        }
+        h.settle(Duration::from_secs(5));
+        assert_eq!(h.app().log.iter().filter(|s| *s == "p:stuck").count(), NET_WORKERS + 1);
+    }
+
+    #[test]
+    fn droppable_jobs_of_gone_pages_are_skipped() {
+        let mut h = headless();
+        let (release, rx) = gate();
+        let ran_keep = Arc::new(AtomicBool::new(false));
+        let ran_drop = Arc::new(AtomicBool::new(false));
+        let ran_local_drop = Arc::new(AtomicBool::new(false));
+        let (keep, drop_, local_drop) = (Arc::clone(&ran_keep), Arc::clone(&ran_drop), Arc::clone(&ran_local_drop));
+        h.push(Box::new(TestPage::new("p", move |cx| {
+            // 两条队列都占满, 下面的任务只能排队
+            for _ in 0..NET_WORKERS {
+                cx.spawn(block(&rx));
+            }
+            cx.spawn_local(block(&rx));
+            cx.spawn_droppable(move || {
+                drop_.store(true, Ordering::SeqCst);
+                "drop"
+            });
+            cx.spawn_local_droppable(move || {
+                local_drop.store(true, Ordering::SeqCst);
+                "local-drop"
+            });
+            // 有副作用的任务 (进度上传之类): 页面走了也要执行
+            cx.spawn(move || {
+                keep.store(true, Ordering::SeqCst);
+                "keep"
+            });
+        })));
+        // 离开页面 (实例出栈), 再放行
+        h.stack.apply(&mut h.rt, Transition::Back);
+        for _ in 0..NET_WORKERS + 1 {
+            release.send(()).unwrap();
+        }
+        h.settle(Duration::from_secs(5));
+        assert!(h.rt.tasks.idle());
+        assert!(ran_keep.load(Ordering::SeqCst));
+        assert!(!ran_drop.load(Ordering::SeqCst));
+        assert!(!ran_local_drop.load(Ordering::SeqCst));
+        // 出栈页面的结果照旧丢弃
+        assert!(h.app().log.is_empty(), "{:?}", h.app().log);
+    }
+
+    #[test]
+    fn droppable_jobs_run_while_page_is_below_top() {
+        let mut h = headless();
+        let (release, rx) = gate();
+        h.push(Box::new(TestPage::new("p", move |cx| {
+            for _ in 0..NET_WORKERS {
+                cx.spawn(block(&rx));
+            }
+            cx.spawn_droppable(|| "drop");
+        })));
+        // 压一层新页面: p 还在栈里, 任务照常执行并送回 p
+        h.push(Box::new(TestPage::new("q", |_| {})));
+        for _ in 0..NET_WORKERS {
+            release.send(()).unwrap();
+        }
+        h.settle(Duration::from_secs(5));
+        assert!(h.app().log.contains(&"p:drop".to_string()), "{:?}", h.app().log);
+    }
+
+    #[test]
+    fn spawner_routes_follow_up_jobs_to_the_page() {
+        let mut h = headless();
+        h.push(Box::new(TestPage::new("p", |cx| {
+            let next = cx.spawner().unwrap();
+            // 本地读缓存未命中 → 交给网络队列
+            cx.spawn_local(move || {
+                next.spawn(|| "downloaded");
+                "miss"
+            });
+        })));
+        h.settle(Duration::from_secs(5));
+        let mut log = h.app().log.clone();
+        log.sort();
+        assert_eq!(log, vec!["p:downloaded".to_string(), "p:miss".to_string()]);
+    }
 }

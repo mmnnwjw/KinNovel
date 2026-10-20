@@ -646,7 +646,7 @@ impl ReaderPage {
             let paths = cx.app.paths.clone();
             let net = cx.app.net();
             let (url, w, h) = (url.clone(), *width as u32, *height as u32);
-            cx.spawn(move || {
+            cx.spawn_droppable(move || {
                 let result = crate::net::image_bytes(&paths, net.as_ref(), &url, h).and_then(|bytes| match bytes {
                     None => Ok(None),
                     Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h)))

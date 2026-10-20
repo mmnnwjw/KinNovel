@@ -66,7 +66,7 @@ impl AnnouncementsPage {
         self.page = page;
         let net = cx.app.net();
         let size = per_page(cx);
-        cx.spawn(move || {
+        cx.spawn_droppable(move || {
             let r = api::load_announcement_list(net.as_ref(), page, size);
             match r {
                 Ok(p) => ListLoaded(page, Ok(p.items), p.page, p.total_pages),
@@ -217,7 +217,7 @@ impl AnnouncementDetailPage {
         self.status = Status::Loading;
         let net = cx.app.net();
         let id = self.id;
-        cx.spawn(move || DetailLoaded(api::load_announcement_detail(net.as_ref(), id)));
+        cx.spawn_droppable(move || DetailLoaded(api::load_announcement_detail(net.as_ref(), id)));
     }
 
     fn body_rows_per_page(&self, cx: &Cx<KinNovel>) -> usize {

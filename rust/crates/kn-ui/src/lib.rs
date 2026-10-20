@@ -9,7 +9,8 @@
 //! - **按下反馈**: 手指按下 (`GestureKind::Down`) 落在带 `feedback` 的命中区域时, 立即把该矩形反相并用 A2 刷新,
 //!   抬起后执行动作并正常重绘 —— 墨水屏上"点了有反应"。
 //! - **单线程状态**: 所有页面状态只在 UI 线程修改, 且就放在页面结构体里。耗时工作交给 `Tasks` 线程池,
-//!   结果按页面实例路由回 `Page::on_message` (页面已关闭则丢弃)。
+//!   结果按页面实例路由回 `Page::on_message` (页面已关闭则丢弃)。线程池分网络与本地两条队列 (`Lane`),
+//!   只拿来显示的任务可用 `spawn_droppable`: 开工前页面已出栈就跳过。
 //! - **主循环**: `poll()` 等待 {输入 fd, 电源 fd, 唤醒 fd}; 超时 = min(下一分钟时钟, 电源看门狗, 有空闲任务时 0)。
 //!   没有事件时调用当前页面的 `on_idle` (如预渲染下一页), 有手指按着时不调用。
 
@@ -21,8 +22,8 @@ mod tasks;
 mod theme;
 pub mod widgets;
 
-pub use app::{render_once, run, App, Backdrop, Cx, Delivery, Headless, Orientation, Page, PageId, PagePoster, Transition};
+pub use app::{render_once, run, App, Backdrop, Cx, Delivery, Headless, Orientation, Page, PageId, PagePoster, Spawner, Transition};
 pub use hits::{HitId, Hits};
 pub use refresh::{RefreshHint, RefreshPolicy, RefreshScheduler};
-pub use tasks::{Poster, Tasks, Waker};
+pub use tasks::{Lane, Poster, Submitter, Tasks, Waker};
 pub use theme::Theme;

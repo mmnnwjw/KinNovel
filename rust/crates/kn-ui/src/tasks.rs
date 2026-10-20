@@ -1,12 +1,14 @@
 //! 后台任务: 固定大小线程池, 结果 (任意 Send 消息 `T`) 回投 UI 线程。
 //!
 //! `Tasks::spawn(work)`: work 在工作线程执行并返回 `T`; UI 线程用 `drain()` 取回。
+//! 两条队列 (`Lane`): 网络 (默认, 几个线程) 与本地 (解析/解码/排版, 单独的线程), 卡住的网络任务挡不住本地任务。
 //! 投递后通过 `Waker` 写唤醒 fd 打断 poll。运行时用 `T = Delivery` 把结果路由到发起任务的页面实例。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-type Job<T> = Box<dyn FnOnce() -> T + Send + 'static>;
+type Job<T> = Box<dyn FnOnce() -> Option<T> + Send + 'static>;
 
 /// 跨线程唤醒主循环 (Linux: eventfd; 其它平台: 无操作, 主循环靠超时轮询)。
 #[derive(Clone)]
@@ -75,78 +77,119 @@ impl Waker {
     }
 }
 
+/// 任务走哪条队列。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// 可能卡在网络上的任务 (默认): 一次 hub 调用在网络不好时能占住线程好几分钟
+    Net,
+    /// 纯本地的解析 / 解码 / 排版 / 读写缓存: 单独的线程, 不被卡住的网络任务挡住
+    Local,
+}
+
+/// 工作线程栈大小。章节 HTML 嵌套很深时解析 / 分块是递归的, 512 KB 曾被撑爆 (P0-1)。
+/// Linux 线程栈按需映射, 实际占用 (RSS) 只随用到的深度增长; 32 位进程里 4 条线程共保留 16 MB 虚拟地址, 可以接受。
+const WORKER_STACK: usize = 4 * 1024 * 1024;
+
+/// 可克隆、可跨线程的任务提交端 (任务里也能接着提交下一步, 例如读缓存未命中再下载)。
+pub struct Submitter<T> {
+    net: mpsc::Sender<Job<T>>,
+    local: mpsc::Sender<Job<T>>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl<T> Clone for Submitter<T> {
+    fn clone(&self) -> Self {
+        Submitter { net: self.net.clone(), local: self.local.clone(), pending: Arc::clone(&self.pending) }
+    }
+}
+
+impl<T: Send + 'static> Submitter<T> {
+    /// 提交到 `lane`; `work` 返回 None 表示跳过 (没有结果要送回)。
+    pub fn submit<F>(&self, lane: Lane, work: F)
+    where
+        F: FnOnce() -> Option<T> + Send + 'static,
+    {
+        let jobs = match lane {
+            Lane::Net => &self.net,
+            Lane::Local => &self.local,
+        };
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        if jobs.send(Box::new(work)).is_err() {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
 pub struct Tasks<T> {
-    jobs: Option<mpsc::Sender<Job<T>>>,
+    submitter: Option<Submitter<T>>,
     results_tx: mpsc::Sender<T>,
     results_rx: mpsc::Receiver<T>,
     waker: Waker,
     workers: Vec<thread::JoinHandle<()>>,
-    /// 已提交但结果尚未送达的任务数
-    pending: Arc<std::sync::atomic::AtomicUsize>,
+    /// 已提交但结果尚未送达 (或已跳过) 的任务数
+    pending: Arc<AtomicUsize>,
 }
 
 impl<T: Send + 'static> Tasks<T> {
-    /// `workers` 个工作线程 (设备上用 2)。
+    /// `workers` 个网络线程 + 1 个本地线程。
     pub fn new(workers: usize, waker: Waker) -> Self {
-        let (jobs_tx, jobs_rx) = mpsc::channel::<Job<T>>();
-        let (results_tx, results_rx) = mpsc::channel::<T>();
-        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
-        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut handles = Vec::new();
-        for index in 0..workers.max(1) {
-            let jobs_rx = Arc::clone(&jobs_rx);
-            let results_tx = results_tx.clone();
-            let waker = waker.clone();
-            let pending = Arc::clone(&pending);
-            let handle = thread::Builder::new()
-                .name(format!("kn-worker-{index}"))
-                // 设备内存有限, 排版/解码不需要默认 2 MB 以上的栈
-                .stack_size(512 * 1024)
-                .spawn(move || loop {
-                    let job = {
-                        let guard = match jobs_rx.lock() {
-                            Ok(guard) => guard,
-                            Err(_) => return,
-                        };
-                        match guard.recv() {
-                            Ok(job) => job,
-                            Err(_) => return,
-                        }
-                    };
-                    // 单个任务 panic 不应拖垮线程池 (release 为 panic=abort, 这里主要保护测试/调试构建)
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-                    let sent = match result {
-                        Ok(result) => results_tx.send(result).is_ok(),
-                        Err(_) => true,
-                    };
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    if !sent {
-                        return;
-                    }
-                    waker.wake();
-                })
-                .expect("spawn worker");
-            handles.push(handle);
-        }
-        Tasks { jobs: Some(jobs_tx), results_tx, results_rx, waker, workers: handles, pending }
+        Self::with_lanes(workers, 1, waker)
     }
 
-    /// 提交后台工作; 返回值会经 `drain()` 交回 UI 线程。
+    /// 网络队列 `net` 个线程, 本地队列 `local` 个线程 (各至少 1 个)。
+    pub fn with_lanes(net: usize, local: usize, waker: Waker) -> Self {
+        let (results_tx, results_rx) = mpsc::channel::<T>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        let mut lane = |name: &str, count: usize| {
+            let (jobs_tx, jobs_rx) = mpsc::channel::<Job<T>>();
+            let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+            for index in 0..count.max(1) {
+                let jobs_rx = Arc::clone(&jobs_rx);
+                let results_tx = results_tx.clone();
+                let waker = waker.clone();
+                let pending = Arc::clone(&pending);
+                let handle = thread::Builder::new()
+                    .name(format!("kn-{name}-{index}"))
+                    .stack_size(WORKER_STACK)
+                    .spawn(move || worker_loop(&jobs_rx, &results_tx, &waker, &pending))
+                    .expect("spawn worker");
+                workers.push(handle);
+            }
+            jobs_tx
+        };
+        let net = lane("net", net);
+        let local = lane("local", local);
+        let submitter = Submitter { net, local, pending: Arc::clone(&pending) };
+        Tasks { submitter: Some(submitter), results_tx, results_rx, waker, workers, pending }
+    }
+
+    /// 提交后台工作 (网络队列); 返回值会经 `drain()` 交回 UI 线程。
     pub fn spawn<F>(&self, work: F)
     where
         F: FnOnce() -> T + Send + 'static,
     {
-        if let Some(jobs) = &self.jobs {
-            self.pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if jobs.send(Box::new(work)).is_err() {
-                self.pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            }
+        self.submit(Lane::Net, move || Some(work()));
+    }
+
+    /// 提交到指定队列; `work` 返回 None 表示跳过。
+    pub fn submit<F>(&self, lane: Lane, work: F)
+    where
+        F: FnOnce() -> Option<T> + Send + 'static,
+    {
+        if let Some(s) = &self.submitter {
+            s.submit(lane, work);
         }
+    }
+
+    /// 提交端 (给任务里继续提交用)。线程池已关闭时为 None。
+    pub fn submitter(&self) -> Option<Submitter<T>> {
+        self.submitter.clone()
     }
 
     /// 没有在途任务 (测试/预览用)。
     pub fn idle(&self) -> bool {
-        self.pending.load(std::sync::atomic::Ordering::SeqCst) == 0
+        self.pending.load(Ordering::SeqCst) == 0
     }
 
     /// 可从任意线程直接投递消息 (例如网络线程)。
@@ -160,12 +203,41 @@ impl<T: Send + 'static> Tasks<T> {
     }
 }
 
+fn worker_loop<T>(jobs_rx: &Mutex<mpsc::Receiver<Job<T>>>, results_tx: &mpsc::Sender<T>, waker: &Waker, pending: &AtomicUsize) {
+    loop {
+        let job = {
+            let guard = match jobs_rx.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            match guard.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
+        };
+        // 单个任务 panic 不应拖垮线程池 (release 为 panic=abort, 这里主要保护测试/调试构建)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        // 跳过的任务 (None) 与 panic 都没有结果要送
+        let sent = match result {
+            Ok(Some(result)) => Some(results_tx.send(result).is_ok()),
+            Ok(None) | Err(_) => None,
+        };
+        pending.fetch_sub(1, Ordering::SeqCst);
+        match sent {
+            Some(false) => return,
+            Some(true) => waker.wake(),
+            None => {}
+        }
+    }
+}
+
 impl<T> Drop for Tasks<T> {
     fn drop(&mut self) {
-        // 关闭任务通道, 空闲的工作线程在 recv 失败后退出。不 join: 正在跑的任务可能卡在网络读
+        // 关闭任务通道, 空闲的工作线程在 recv 失败后退出 (任务里留着的 Submitter 会让通道多活一会儿, 不要紧)。
+        // 不 join: 正在跑的任务可能卡在网络读
         // (每次读最多 30 s, 下载封面时可能连着好几次), 退出时等它会让程序迟迟不退,
         // 而启动脚本要等程序退出才恢复框架 —— 屏幕就一直停在 KinNovel 上。进程退出时线程随之结束。
-        self.jobs.take();
+        self.submitter.take();
         self.workers.clear();
     }
 }
@@ -244,6 +316,73 @@ mod tests {
         let started = Instant::now();
         drop(tasks);
         assert!(started.elapsed() < Duration::from_secs(1), "drop waited {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn stuck_net_jobs_do_not_block_local_jobs() {
+        let tasks: Tasks<u32> = Tasks::with_lanes(2, 1, Waker::new().unwrap());
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        // 两个网络线程都卡住, 再排一个网络任务
+        for i in 0..3u32 {
+            let rx = Arc::clone(&release_rx);
+            tasks.spawn(move || {
+                let _ = rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+                i
+            });
+        }
+        tasks.submit(Lane::Local, || Some(99));
+        assert_eq!(wait_for(&tasks, 1), vec![99]);
+        assert!(!tasks.idle());
+        for _ in 0..3 {
+            release_tx.send(()).unwrap();
+        }
+        let mut rest = wait_for(&tasks, 3);
+        rest.sort();
+        assert_eq!(rest, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn skipped_job_delivers_nothing_and_counts_as_done() {
+        let tasks: Tasks<u32> = Tasks::new(1, Waker::new().unwrap());
+        tasks.submit(Lane::Net, || None);
+        tasks.submit(Lane::Local, || None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tasks.idle() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(tasks.idle());
+        assert!(tasks.drain().is_empty());
+    }
+
+    #[test]
+    fn submitter_can_chain_from_a_job() {
+        let tasks: Tasks<u32> = Tasks::new(1, Waker::new().unwrap());
+        let next = tasks.submitter().unwrap();
+        // 本地任务 "缓存未命中" → 接着交给网络队列
+        tasks.submit(Lane::Local, move || {
+            next.submit(Lane::Net, || Some(2));
+            Some(1)
+        });
+        let mut got = wait_for(&tasks, 2);
+        got.sort();
+        assert_eq!(got, vec![1, 2]);
+    }
+
+    #[test]
+    fn worker_stack_fits_deep_recursion() {
+        // 约 1.5 MB 的递归: 512 KB 的栈会溢出 (P0-1)
+        fn deep(n: u32) -> u32 {
+            let pad = [n as u8; 1024];
+            if n == 0 {
+                pad[0] as u32
+            } else {
+                deep(n - 1) + std::hint::black_box(pad)[1] as u32
+            }
+        }
+        let tasks: Tasks<u32> = Tasks::new(1, Waker::new().unwrap());
+        tasks.submit(Lane::Local, || Some(deep(1536)));
+        assert_eq!(wait_for(&tasks, 1).len(), 1);
     }
 
     #[test]

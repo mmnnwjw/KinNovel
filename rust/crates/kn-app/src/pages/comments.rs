@@ -54,7 +54,7 @@ impl CommentsPage {
         let net = cx.app.net();
         let comment_type = self.comment_type;
         let target_id = self.target_id;
-        cx.spawn(move || Loaded(page, api::load_comments(net.as_ref(), comment_type, target_id, page)));
+        cx.spawn_droppable(move || Loaded(page, api::load_comments(net.as_ref(), comment_type, target_id, page)));
     }
 }
 
