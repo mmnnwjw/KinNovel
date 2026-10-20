@@ -9,7 +9,7 @@
 use std::any::Any;
 
 use kn_platform::{GestureKind, InputEvent, KeyCode};
-use kn_render::{Bitmap, Point, Rect};
+use kn_render::{Bitmap, ImageBudget, ImageError, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
 
@@ -28,7 +28,7 @@ const MAX_FIT_SCALE: f32 = 2.0;
 
 enum Status {
     Loading,
-    Failed(String),
+    Failed(LoadFailure),
     Ready,
 }
 
@@ -38,13 +38,42 @@ enum Original {
     NotRequested,
     Loading,
     Loaded,
-    Unavailable(String),
+    Unavailable(LoadFailure),
+}
+
+#[derive(Debug)]
+enum LoadFailure {
+    TooLarge(ImageBudget),
+    Other(String),
+}
+
+impl LoadFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::TooLarge(ImageBudget::Normal) => "图片过大，继续加载可能内存不足",
+            Self::TooLarge(ImageBudget::LargeOriginal) => "图片仍超过上限，无法加载",
+            Self::Other(message) => message,
+        }
+    }
+
+    fn can_expand(&self) -> bool {
+        matches!(self, Self::TooLarge(ImageBudget::Normal))
+    }
+}
+
+/// 保留尺寸错误的类型, 只有用户按下按钮后才提高这一次解码的额度。
+fn decode_image(result: Result<Option<crate::net::CachedImage>, String>, budget: ImageBudget) -> Result<Option<Bitmap>, LoadFailure> {
+    result.map_err(LoadFailure::Other)?
+        .map(|cached| cached.decode_with_budget(None, budget).map_err(|e| match e {
+            ImageError::TooLarge => LoadFailure::TooLarge(budget),
+            other => LoadFailure::Other(other.to_string()),
+        })).transpose()
 }
 
 /// 后台解码结果。
 struct Decoded {
     original: bool,
-    result: Result<Option<Bitmap>, String>,
+    result: Result<Option<Bitmap>, LoadFailure>,
 }
 
 pub struct ImagePage {
@@ -62,12 +91,13 @@ pub struct ImagePage {
     /// 视野中心 (源图坐标)
     center: (f32, f32),
     toolbar: bool,
+    budget: ImageBudget,
 }
 
 impl ImagePage {
     pub fn new(url: String, height: u32) -> Self {
         let original = if crate::net::has_original_variant(&url) { Original::NotRequested } else { Original::Same };
-        ImagePage { url, comic: false, height, status: Status::Loading, original, src: None, fit: None, zoom: 0, center: (0.0, 0.0), toolbar: true }
+        ImagePage { url, comic: false, height, status: Status::Loading, original, src: None, fit: None, zoom: 0, center: (0.0, 0.0), toolbar: true, budget: ImageBudget::Normal }
     }
 
     /// 漫画页面的放大预览 (从漫画阅读页长按或 "放大" 进入)。
@@ -116,17 +146,43 @@ impl ImagePage {
     }
 
     fn request_original(&mut self, cx: &mut Cx<KinNovel>) {
-        if !matches!(self.original, Original::NotRequested | Original::Unavailable(_)) {
-            return;
+        if let Some(original) = self.begin_request() {
+            self.request_image(cx, original);
+        }
+    }
+
+    fn begin_request(&mut self) -> Option<bool> {
+        if let Status::Failed(error) = &self.status {
+            if error.can_expand() {
+                self.budget = ImageBudget::LargeOriginal;
+            }
+            self.status = Status::Loading;
+            return Some(false);
+        }
+        if !matches!(self.status, Status::Ready) || !matches!(self.original, Original::NotRequested | Original::Unavailable(_)) {
+            return None;
+        }
+        if matches!(&self.original, Original::Unavailable(e) if e.can_expand()) {
+            self.budget = ImageBudget::LargeOriginal;
         }
         self.original = Original::Loading;
+        Some(true)
+    }
+
+    fn request_image(&self, cx: &mut Cx<KinNovel>, original: bool) {
         let paths = cx.app.paths.clone();
         let net = cx.app.net();
         let url = self.url.clone();
+        let (height, comic, budget) = (self.height, self.comic, self.budget);
         cx.spawn_droppable(move || Decoded {
-            original: true,
-            result: crate::net::original_image_bytes(&paths, net.as_ref(), &url)
-                .and_then(|cached| cached.map(|c| c.decode(None).map_err(|e| e.to_string())).transpose()),
+            original,
+            result: decode_image(if original {
+                crate::net::original_image_bytes(&paths, net.as_ref(), &url)
+            } else if comic {
+                crate::comic::page_bytes(&paths, net.as_ref(), &url, height)
+            } else {
+                crate::net::image_source(&paths, net.as_ref(), &url, height)
+            }, budget),
         });
         cx.request_redraw(RefreshHint::Ui);
     }
@@ -163,7 +219,7 @@ impl ImagePage {
             Original::Same | Original::Loaded => "原图".to_string(),
             Original::NotRequested => "预览".to_string(),
             Original::Loading => "原图加载中…".to_string(),
-            Original::Unavailable(e) => format!("原图: {e}"),
+            Original::Unavailable(e) => format!("原图: {}", e.message()),
         };
         if !info.is_empty() {
             info.push_str(" · ");
@@ -183,11 +239,15 @@ impl ImagePage {
         let ready = matches!(self.status, Status::Ready);
         let can_out = ready && self.zoom > 0;
         let can_in = ready && self.zoom + 1 < ZOOMS.len();
-        let (orig_label, can_orig) = match self.original {
-            Original::Same | Original::Loaded => ("已是原图", false),
-            Original::Loading => ("加载中…", false),
-            Original::NotRequested => ("原图", ready),
-            Original::Unavailable(_) => ("重试原图", ready),
+        let (orig_label, can_orig) = if let Status::Failed(error) = &self.status {
+            (if error.can_expand() { "仍要加载" } else { "重新加载" }, true)
+        } else {
+            match &self.original {
+                Original::Same | Original::Loaded => ("已是原图", false),
+                Original::Loading => ("加载中…", false),
+                Original::NotRequested => ("原图", ready),
+                Original::Unavailable(e) => (if e.can_expand() { "仍要加载" } else { "重试原图" }, ready),
+            }
         };
         let style = |on: bool| if on { ButtonStyle::Secondary } else { ButtonStyle::Disabled };
         widgets::button(&mut ink, frame, &theme, &m, cell(0), "返回", ButtonStyle::Secondary);
@@ -215,14 +275,7 @@ impl Page<KinNovel> for ImagePage {
         if returning || !matches!(self.status, Status::Loading) {
             return;
         }
-        let paths = cx.app.paths.clone();
-        let net = cx.app.net();
-        let (url, height, comic) = (self.url.clone(), self.height, self.comic);
-        cx.spawn_droppable(move || Decoded {
-            original: false,
-            result: if comic { crate::comic::page_bytes(&paths, net.as_ref(), &url, height) } else { crate::net::image_source(&paths, net.as_ref(), &url, height) }
-                .and_then(|cached| cached.map(|c| c.decode(None).map_err(|e| e.to_string())).transpose()),
-        });
+        self.request_image(cx, false);
     }
 
     fn on_message(&mut self, cx: &mut Cx<KinNovel>, msg: Box<dyn Any + Send>) {
@@ -233,7 +286,7 @@ impl Page<KinNovel> for ImagePage {
                 self.src = Some(img);
                 self.status = Status::Ready;
             }
-            (false, Ok(None)) => self.status = Status::Failed("图片未缓存 (离线)".into()),
+            (false, Ok(None)) => self.status = Status::Failed(LoadFailure::Other("图片未缓存 (离线)".into())),
             (false, Err(e)) => self.status = Status::Failed(e),
             (true, Ok(Some(img))) => {
                 // 保持视野: 中心按新旧尺寸比例换算, 缩放档位相对适配全屏不变
@@ -246,10 +299,11 @@ impl Page<KinNovel> for ImagePage {
                 self.original = Original::Loaded;
                 self.clamp_center(cx.width, cx.height);
             }
-            (true, Ok(None)) => self.original = Original::Unavailable("离线".into()),
+            (true, Ok(None)) => self.original = Original::Unavailable(LoadFailure::Other("离线，原图未缓存".into())),
             (true, Err(e)) => {
-                eprintln!("[image] 原图 {}: {e}", self.url);
-                self.original = Original::Unavailable("加载失败".into());
+                eprintln!("[image] 原图 {}: {}", self.url, e.message());
+                self.original = Original::Unavailable(e);
+                self.toolbar = true;
             }
         }
         cx.request_redraw(RefreshHint::Ui);
@@ -263,13 +317,13 @@ impl Page<KinNovel> for ImagePage {
             match &self.status {
                 Status::Loading | Status::Failed(_) => {
                     let text = match &self.status {
-                        Status::Failed(e) => format!("插图无法显示: {e}"),
+                        Status::Failed(e) => format!("插图无法显示\n{}", e.message()),
                         _ => "正在加载插图…".to_string(),
                     };
                     let chain = cx.app.ui_fonts.clone();
+                    let r = Rect::new(m.margin as i32, 0, w - 2 * m.margin, Self::toolbar_rect(cx).y.max(0) as u32);
                     let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
-                    let r = Rect::new(m.margin as i32, h as i32 / 2 - m.body as i32, w - 2 * m.margin, (m.body * 1.5) as u32);
-                    ink.text_centered(frame, r, &text, m.body, theme.foreground);
+                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, r, &text, None);
                     self.draw_toolbar(cx, frame);
                     break 'body;
                 }
@@ -342,5 +396,87 @@ impl Page<KinNovel> for ImagePage {
             _ => {}
         }
         Transition::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_keep_the_preview_and_raise_only_its_budget() {
+        let mut page = ImagePage::new("https://example.com/a?size=6000x5000".into(), 1648);
+        page.status = Status::Ready;
+        page.src = Some(Bitmap::new(8, 8, 100));
+        page.original = Original::Unavailable(LoadFailure::Other("网络超时".into()));
+        assert_eq!(page.begin_request(), Some(true));
+        assert_eq!(page.budget, ImageBudget::Normal);
+        assert_eq!(page.begin_request(), None); // 加载中不能重复排队
+
+        page.original = Original::Unavailable(LoadFailure::TooLarge(ImageBudget::Normal));
+        assert_eq!(page.begin_request(), Some(true));
+        assert_eq!(page.budget, ImageBudget::LargeOriginal);
+        assert_eq!(page.src.as_ref().unwrap().get(0, 0), 100);
+        assert_eq!(ImagePage::new("other".into(), 100).budget, ImageBudget::Normal);
+    }
+
+    #[test]
+    fn failed_initial_image_can_retry_even_without_an_original_variant() {
+        let mut page = ImagePage::new("https://example.com/a.jpg".into(), 1648);
+        page.status = Status::Failed(LoadFailure::Other("离线".into()));
+        assert_eq!(page.begin_request(), Some(false));
+        assert_eq!(page.budget, ImageBudget::Normal);
+        assert_eq!(page.begin_request(), None);
+        page.status = Status::Failed(LoadFailure::TooLarge(ImageBudget::Normal));
+        assert_eq!(page.begin_request(), Some(false));
+        assert_eq!(page.budget, ImageBudget::LargeOriginal);
+        assert!(!LoadFailure::TooLarge(ImageBudget::LargeOriginal).can_expand());
+    }
+
+    #[test]
+    fn network_and_decode_errors_are_not_conflated_with_size_errors() {
+        let failure = decode_image(Err("连接超时".into()), ImageBudget::Normal).unwrap_err();
+        assert_eq!(failure.message(), "连接超时");
+        assert!(!failure.can_expand());
+        let failure = decode_image(Ok(Some(crate::net::CachedImage::new(b"invalid".to_vec(), None))), ImageBudget::Normal).unwrap_err();
+        assert_eq!(failure.message(), "不支持的图片格式");
+        assert!(!failure.can_expand());
+    }
+
+    #[test]
+    fn failure_actions_render_and_retry_at_small_and_large_sizes() {
+        use crate::store::{Config, Paths};
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!("kn-image-ui-{}", std::process::id()));
+        for (width, height) in [(600, 800), (1236, 1648), (1648, 1236)] {
+            let paths = Paths { app_dir: dir.clone() };
+            let config = Config::load(paths.settings_file());
+            let mut fonts = kn_render::FontStore::new();
+            // CI 不依赖 Windows 可选的中文字体; 本地导出预览时用实际 UI 字体链。
+            let chain = if std::env::var_os("KN_IMAGE_TEST_PREVIEW").is_some() {
+                crate::load_ui_fonts(&mut fonts, &config)
+            } else {
+                vec![fonts.load_bytes(crate::SYMBOL_FONT.to_vec()).unwrap()]
+            };
+            let app = KinNovel::new(paths, config, chain, width, height, 300, kn_platform::Frontlight::detect(None), false);
+            let mut ui = kn_ui::Headless::new(app, fonts, width, height).unwrap();
+            let mut page = ImagePage::new("https://example.com/uncached.jpg".into(), height);
+            page.status = Status::Failed(LoadFailure::TooLarge(ImageBudget::Normal));
+            ui.push(Box::new(page));
+            let (frame, _) = ui.frame();
+            let m = ui.app().metrics;
+            let point = Point { x: width as i32 - m.margin as i32 - m.touch as i32 / 2, y: height as i32 - m.margin as i32 / 2 - m.touch as i32 / 2 };
+            assert_eq!(ui.hits().at(point), Some(HIT_ORIGINAL));
+            if let Some(out) = std::env::var_os("KN_IMAGE_TEST_PREVIEW") {
+                std::fs::create_dir_all(&out).unwrap();
+                std::fs::write(std::path::Path::new(&out).join(format!("image-failed-{width}x{height}.pgm")), frame.to_pgm()).unwrap();
+            }
+            ui.input(&InputEvent::Gesture(kn_platform::Gesture { kind: GestureKind::Tap, start: (point.x, point.y), end: (point.x, point.y), duration_ms: 80 }));
+            ui.settle(Duration::from_secs(2));
+            ui.frame();
+            assert_eq!(ui.hits().at(point), Some(HIT_ORIGINAL)); // 离线仍能重试
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -247,7 +247,11 @@ impl CachedImage {
     /// 解码为灰度图。缓存文件解码失败 (半截文件、服务器给的错误页) 时删掉它,
     /// 这样 [`RETRY_AFTER`] 后的重试会重新下载, 而不是再读同一份坏字节。
     pub fn decode(&self, target: Option<(u32, u32)>) -> Result<kn_render::Bitmap, kn_render::ImageError> {
-        let result = kn_render::decode_gray(&self.bytes, target);
+        self.decode_with_budget(target, kn_render::ImageBudget::Normal)
+    }
+
+    pub fn decode_with_budget(&self, target: Option<(u32, u32)>, budget: kn_render::ImageBudget) -> Result<kn_render::Bitmap, kn_render::ImageError> {
+        let result = kn_render::decode_gray_with_budget(&self.bytes, target, budget);
         if let (Err(e), Some(file)) = (&result, &self.file) {
             if is_corrupt_image(&self.bytes, e) {
                 eprintln!("[net] 图片缓存 {} 无法解码 ({e}), 删除", file.display());

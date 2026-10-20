@@ -44,6 +44,25 @@ const MAX_PIXELS: u64 = 32 * 1024 * 1024;
 /// 折算: RGB 约 21 M 像素, RGBA 16 M 像素, 4:2:0 渐进式 JPEG 约 21 M 像素。
 const MAX_BUFFER: u64 = 64 * 1024 * 1024;
 
+/// 仅用于用户在全屏预览中明确选择“仍要加载”的一次解码。
+/// 提高单缓冲额度, 原始像素硬上限保持不变; 不影响封面、漫画和其它并行任务。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageBudget {
+    #[default]
+    Normal,
+    LargeOriginal,
+}
+
+impl ImageBudget {
+    fn buffer_bytes(self) -> u64 {
+        match self {
+            Self::Normal => MAX_BUFFER,
+            Self::LargeOriginal => 96 * 1024 * 1024,
+        }
+    }
+}
+
+
 /// RGB → 灰度 (ITU-R BT.601, 整数近似)。
 #[inline]
 fn luma(r: u8, g: u8, b: u8) -> u8 {
@@ -160,11 +179,7 @@ fn jpeg_header(bytes: &[u8]) -> JpegHeader {
     header
 }
 
-fn decode_jpeg(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
-    decode_jpeg_with(bytes, target, true)
-}
-
-fn decode_jpeg_with(bytes: &[u8], target: Option<(u32, u32)>, luma_only: bool) -> Result<Bitmap, ImageError> {
+fn decode_jpeg_with(bytes: &[u8], target: Option<(u32, u32)>, luma_only: bool, max_buffer: u64) -> Result<Bitmap, ImageError> {
     let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
     let header = jpeg_header(bytes);
     let ycbcr = luma_only && header.is_ycbcr();
@@ -188,7 +203,7 @@ fn decode_jpeg_with(bytes: &[u8], target: Option<(u32, u32)>, luma_only: bool) -
         return Err(ImageError::TooLarge);
     }
     // 渐进式的系数按原始尺寸存 (DCT 缩放省不掉), 第一个扫描段就整块分配
-    if info.coding_process == jpeg_decoder::CodingProcess::DctProgressive && header.coefficient_bytes(w0, h0, channels) > MAX_BUFFER {
+    if info.coding_process == jpeg_decoder::CodingProcess::DctProgressive && header.coefficient_bytes(w0, h0, channels) > max_buffer {
         return Err(ImageError::TooLarge);
     }
     if let Some((w, h)) = target {
@@ -199,10 +214,10 @@ fn decode_jpeg_with(bytes: &[u8], target: Option<(u32, u32)>, luma_only: bool) -
     }
     // 缩放后的多通道输出缓冲; 同一上限也交给解码器兜底
     let out = decoder.info().ok_or_else(|| ImageError::Decode("缺少图片信息".into()))?;
-    if out.width as u64 * out.height as u64 * channels > MAX_BUFFER {
+    if out.width as u64 * out.height as u64 * channels > max_buffer {
         return Err(ImageError::TooLarge);
     }
-    decoder.set_max_decoding_buffer_size(MAX_BUFFER as usize);
+    decoder.set_max_decoding_buffer_size(max_buffer as usize);
     let pixels = decoder.decode().map_err(|e| ImageError::Decode(e.to_string()))?;
     let info = decoder.info().ok_or_else(|| ImageError::Decode("缺少图片信息".into()))?;
     if ycbcr && channels == 3 {
@@ -283,14 +298,14 @@ fn webp_plain_vp8(bytes: &[u8]) -> Option<&[u8]> {
     None
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Bitmap, ImageError> {
+fn decode_png(bytes: &[u8], max_buffer: u64) -> Result<Bitmap, ImageError> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     // 调色板/16 位/透明度统一展开成 8 位
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(|e| ImageError::Decode(e.to_string()))?;
     let (w, h) = (reader.info().width, reader.info().height);
     // 展开后的 RGB(A) 缓冲也设限 (RGBA 每像素 4 字节, 32 M 像素就要 128 MB)
-    if w as u64 * h as u64 > MAX_PIXELS || reader.output_buffer_size() as u64 > MAX_BUFFER {
+    if w as u64 * h as u64 > MAX_PIXELS || reader.output_buffer_size() as u64 > max_buffer {
         return Err(ImageError::TooLarge);
     }
     let mut buf = vec![0; reader.output_buffer_size()];
@@ -306,15 +321,15 @@ fn decode_png(bytes: &[u8]) -> Result<Bitmap, ImageError> {
 }
 
 /// WebP: 设备 (Linux) 上用静态编入的 libwebp (NEON, 直接解码到目标尺寸), 其它平台用 image-webp。
-fn decode_webp(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
+fn decode_webp(bytes: &[u8], target: Option<(u32, u32)>, max_buffer: u64) -> Result<Bitmap, ImageError> {
     #[cfg(kn_libwebp)]
     {
-        decode_webp_native(bytes, target)
+        decode_webp_native(bytes, target, max_buffer)
     }
     #[cfg(not(kn_libwebp))]
     {
         let _ = target;
-        decode_webp_with(bytes, true)
+        decode_webp_with(bytes, true, max_buffer)
     }
 }
 
@@ -328,11 +343,11 @@ mod native {
 
 /// libwebp 解码亮度平面 (`target` 给出时用它的缩放器直接解码到等比放进 target 的尺寸)。
 #[cfg(kn_libwebp)]
-fn decode_webp_native(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
+fn decode_webp_native(bytes: &[u8], target: Option<(u32, u32)>, max_buffer: u64) -> Result<Bitmap, ImageError> {
     let (tw, th) = target.map_or((0, 0), |(w, h)| (w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32));
     let (mut w, mut h, mut status) = (0i32, 0i32, 0i32);
     // SAFETY: bytes 在调用期间有效; 返回的缓冲区 (w*h 字节) 由 kn_webp_free 释放, 只在本函数内读取
-    let ptr = unsafe { native::kn_webp_decode_luma(bytes.as_ptr(), bytes.len(), tw, th, MAX_PIXELS, MAX_BUFFER, &mut w, &mut h, &mut status) };
+    let ptr = unsafe { native::kn_webp_decode_luma(bytes.as_ptr(), bytes.len(), tw, th, MAX_PIXELS, max_buffer, &mut w, &mut h, &mut status) };
     if ptr.is_null() {
         return Err(match status {
             -1 => ImageError::TooLarge,
@@ -347,7 +362,7 @@ fn decode_webp_native(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap
 }
 
 #[cfg_attr(kn_libwebp, allow(dead_code))]
-fn decode_webp_with(bytes: &[u8], luma_only: bool) -> Result<Bitmap, ImageError> {
+fn decode_webp_with(bytes: &[u8], luma_only: bool, max_buffer: u64) -> Result<Bitmap, ImageError> {
     if let Some(vp8) = webp_plain_vp8(bytes).filter(|_| luma_only) {
         // image-webp 读完帧头就按宏块对齐分配 Y/U/V 平面, 先自己看尺寸
         if vp8_dimensions(vp8).is_some_and(|(w, h)| (w.div_ceil(16) * 16) as u64 * (h.div_ceil(16) * 16) as u64 > MAX_PIXELS) {
@@ -363,14 +378,14 @@ fn decode_webp_with(bytes: &[u8], luma_only: bool) -> Result<Bitmap, ImageError>
         return from_plane(w, h, &frame.ybuf, stride, 1, Some(&vp8_luma_lut()));
     }
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(|e| ImageError::Decode(e.to_string()))?;
-    decoder.set_memory_limit(MAX_BUFFER as usize);
+    decoder.set_memory_limit(max_buffer as usize);
     let (w, h) = decoder.dimensions();
     if w as u64 * h as u64 > MAX_PIXELS {
         return Err(ImageError::TooLarge);
     }
     let channels = if decoder.has_alpha() { 4 } else { 3 };
     // 解码器内部还有一块同样大小的帧 (有损: RGB, 无损/动图: RGBA), 按输出缓冲设限
-    let size = decoder.output_buffer_size().filter(|&n| n as u64 <= MAX_BUFFER).ok_or(ImageError::TooLarge)?;
+    let size = decoder.output_buffer_size().filter(|&n| n as u64 <= max_buffer).ok_or(ImageError::TooLarge)?;
     let mut buf = vec![0; size];
     // 动图只取第一帧
     decoder.read_image(&mut buf).map_err(|e| ImageError::Decode(e.to_string()))?;
@@ -380,12 +395,18 @@ fn decode_webp_with(bytes: &[u8], luma_only: bool) -> Result<Bitmap, ImageError>
 /// 解码为灰度位图。`target` 给出最终要显示的大致尺寸时, JPEG 会做 DCT 缩放 (结果不小于 target);
 /// 调用方再按需 `fit_within`。
 pub fn decode_gray(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Bitmap, ImageError> {
+    decode_gray_with_budget(bytes, target, ImageBudget::Normal)
+}
+
+/// 按本次请求的额度解码, 不修改全局限制。
+pub fn decode_gray_with_budget(bytes: &[u8], target: Option<(u32, u32)>, budget: ImageBudget) -> Result<Bitmap, ImageError> {
+    let max_buffer = budget.buffer_bytes();
     if bytes.starts_with(&[0xFF, 0xD8]) {
-        decode_jpeg(bytes, target)
+        decode_jpeg_with(bytes, target, true, max_buffer)
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        decode_png(bytes)
+        decode_png(bytes, max_buffer)
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        decode_webp(bytes, target)
+        decode_webp(bytes, target, max_buffer)
     } else {
         Err(ImageError::Unsupported)
     }
@@ -470,8 +491,8 @@ mod tests {
     fn jpeg_luma_matches_rgb_path() {
         let bytes = include_bytes!("../tests/data/color.jpg");
         assert!(jpeg_is_ycbcr(bytes));
-        let fast = decode_jpeg_with(bytes, None, true).unwrap();
-        let full = decode_jpeg_with(bytes, None, false).unwrap();
+        let fast = decode_jpeg_with(bytes, None, true, MAX_BUFFER).unwrap();
+        let full = decode_jpeg_with(bytes, None, false, MAX_BUFFER).unwrap();
         assert_close(&fast, &full, 8);
         // 灰度 JPEG / 无 SOF: 不是 YCbCr
         assert!(!jpeg_is_ycbcr(&[0xFF, 0xD8, 0xFF, 0xD9]));
@@ -494,8 +515,8 @@ mod tests {
     fn webp_luma_matches_rgb_path() {
         let bytes = include_bytes!("../tests/data/color.webp");
         assert!(webp_plain_vp8(bytes).is_some());
-        let fast = decode_webp_with(bytes, true).unwrap();
-        let full = decode_webp_with(bytes, false).unwrap();
+        let fast = decode_webp_with(bytes, true, MAX_BUFFER).unwrap();
+        let full = decode_webp_with(bytes, false, MAX_BUFFER).unwrap();
         assert_close(&fast, &full, 8);
         // 带透明: 不走快速路径 (要合成到白底)
         assert!(webp_plain_vp8(include_bytes!("../tests/data/alpha.webp")).is_none());
@@ -507,8 +528,8 @@ mod tests {
     #[test]
     fn libwebp_matches_image_webp_luma() {
         let bytes = include_bytes!("../tests/data/color.webp");
-        let native = decode_webp_native(bytes, None).unwrap();
-        let reference = decode_webp_with(bytes, true).unwrap();
+        let native = decode_webp_native(bytes, None, MAX_BUFFER).unwrap();
+        let reference = decode_webp_with(bytes, true, MAX_BUFFER).unwrap();
         assert_eq!((native.width(), native.height()), (reference.width(), reference.height()));
         let max_diff = (0..native.height())
             .flat_map(|y| (0..native.width()).map(move |x| (x, y)))
@@ -517,10 +538,10 @@ mod tests {
             .unwrap();
         assert!(max_diff <= 1, "max diff {max_diff}");
         let (w, h) = (native.width() / 3, native.height() / 3);
-        let scaled = decode_webp_native(bytes, Some((w, h))).unwrap();
+        let scaled = decode_webp_native(bytes, Some((w, h)), MAX_BUFFER).unwrap();
         assert!(scaled.width() <= w && scaled.height() <= h && (scaled.width() == w || scaled.height() == h));
-        assert!(decode_webp_native(include_bytes!("../tests/data/alpha.webp"), Some((8, 8))).is_ok());
-        assert!(decode_webp_native(b"RIFF    WEBPVP8 junk", None).is_err());
+        assert!(decode_webp_native(include_bytes!("../tests/data/alpha.webp"), Some((8, 8)), MAX_BUFFER).is_ok());
+        assert!(decode_webp_native(b"RIFF    WEBPVP8 junk", None, MAX_BUFFER).is_err());
     }
 
     fn jpeg_is_ycbcr(bytes: &[u8]) -> bool {
@@ -606,8 +627,8 @@ mod tests {
         assert_eq!(vp8_dimensions(&webp[i..]).map(|(w, h)| w * h > 0), Some(true));
         webp[i + 6..i + 8].copy_from_slice(&0x3FFFu16.to_le_bytes());
         webp[i + 8..i + 10].copy_from_slice(&0x3FFFu16.to_le_bytes());
-        assert!(matches!(decode_webp_with(&webp, true), Err(ImageError::TooLarge)));
-        assert!(matches!(decode_webp_with(&webp, false), Err(ImageError::TooLarge)));
+        assert!(matches!(decode_webp_with(&webp, true, MAX_BUFFER), Err(ImageError::TooLarge)));
+        assert!(matches!(decode_webp_with(&webp, false, MAX_BUFFER), Err(ImageError::TooLarge)));
         assert!(matches!(decode_gray(&webp, None), Err(ImageError::TooLarge)));
     }
 
@@ -620,6 +641,26 @@ mod tests {
             }
         }
         !crc
+    }
+
+    /// 真实越过默认缓冲边界, 用户选择后能解码, 下一次默认调用仍拒绝。
+    #[test]
+    fn large_image_budget_is_per_call_and_keeps_pixel_ceiling() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 4200, 4200);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            encoder.write_header().unwrap().write_image_data(&vec![255; 4200 * 4200 * 4]).unwrap();
+        }
+        assert!(matches!(decode_gray(&bytes, None), Err(ImageError::TooLarge)));
+        let image = decode_gray_with_budget(&bytes, None, ImageBudget::LargeOriginal).unwrap();
+        assert_eq!((image.width(), image.height(), image.get(4199, 4199)), (4200, 4200, 255));
+        assert!(matches!(decode_gray(&bytes, None), Err(ImageError::TooLarge)));
+        for budget in [ImageBudget::Normal, ImageBudget::LargeOriginal] {
+            assert!(matches!(decode_gray_with_budget(&jpeg_with_size(60000, 60000, 0xC0), None, budget), Err(ImageError::TooLarge)));
+        }
     }
 
     #[test]

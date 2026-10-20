@@ -168,6 +168,32 @@ fn app_font(name: &str) -> Vec<u8> {
     std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../kn-app/data").join(name)).expect("read kn-app font")
 }
 
+/// 把已随项目分发的字体放入合法的单字体 TTC, 不依赖主机装了哪款系统字体。
+#[test]
+fn collection_font_matches_standalone_font() {
+    let ttf = app_font("KinNovelSymbols.ttf");
+    let mut ttc = b"ttcf\x00\x01\x00\x00\x00\x00\x00\x01\x00\x00\x00\x10".to_vec();
+    ttc.extend_from_slice(&ttf);
+    let tables = u16::from_be_bytes(ttf[4..6].try_into().unwrap()) as usize;
+    // TTC 表记录里的偏移是相对于整个字体集, 而不是内嵌的 SFNT 头。
+    for index in 0..tables {
+        let offset = 16 + 12 + 16 * index + 8;
+        let old = u32::from_be_bytes(ttc[offset..offset + 4].try_into().unwrap());
+        ttc[offset..offset + 4].copy_from_slice(&(old + 16).to_be_bytes());
+    }
+    let mut fonts = FontStore::new();
+    let standalone = fonts.load_bytes(ttf).unwrap();
+    let collection = fonts.load_bytes(ttc).expect("load first face of TTC");
+    let text = "♡♢♤♧";
+    let plain = TextStyle { fonts: &[standalone], size_px: 32.0 };
+    let packed = TextStyle { fonts: &[collection], size_px: 32.0 };
+    assert!(fonts.has_char(collection, '♡'));
+    assert_eq!(fonts.measure(text, &plain), fonts.measure(text, &packed));
+    let mut glyphs = GlyphCache::new(1024 * 1024);
+    assert_eq!(draw(&mut glyphs, &fonts, &plain, text), draw(&mut glyphs, &fonts, &packed, text));
+    assert!(fonts.load_bytes(b"ttcf\x00\x01\x00\x00".to_vec()).is_err());
+}
+
 fn draw(cache: &mut GlyphCache, store: &FontStore, style: &TextStyle, text: &str) -> Vec<u8> {
     let mut bitmap = kn_render::Bitmap::new(200, 80, 255);
     cache.draw_text(store, &mut bitmap, 4.0, 60.0, text, style, 0);

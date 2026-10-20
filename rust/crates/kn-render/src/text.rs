@@ -80,8 +80,8 @@ struct LoadedFont {
 
 impl LoadedFont {
     fn font_ref(&self) -> FontRef<'_> {
-        // Bytes were validated with FontRef::new at load time, so this cannot fail.
-        FontRef::new(&self.data).expect("font bytes validated at load time")
+        // TTC 使用第一个字体; 字节在加载时已用同样的入口验证。
+        FontRef::from_index(&self.data, 0).expect("font bytes validated at load time")
     }
 }
 
@@ -101,14 +101,14 @@ impl FontStore {
         FontStore { fonts: Vec::new() }
     }
 
-    /// 从文件加载 TTF/OTF/WOFF2 (按文件头 `wOF2` 判断)。WOFF2 解码后的 TTF 字节可由调用方缓存,
+    /// 从文件加载 TTF/OTF/TTC/WOFF2 (TTC 取第一个字体, WOFF2 按文件头 `wOF2` 判断)。WOFF2 解码后的 TTF 字节可由调用方缓存,
     /// 见 `decode_woff2`。
     pub fn load_file(&mut self, path: &Path) -> Result<FontId, TextError> {
         let bytes = std::fs::read(path)?;
         self.load_bytes(bytes)
     }
 
-    /// 从内存加载 (TTF/OTF/WOFF2)。
+    /// 从内存加载 (TTF/OTF/TTC/WOFF2)。
     pub fn load_bytes(&mut self, bytes: Vec<u8>) -> Result<FontId, TextError> {
         let ttf_bytes = if woff2_patched::decode::is_woff2(&bytes) {
             decode_woff2(&bytes)?
@@ -116,7 +116,7 @@ impl FontStore {
             bytes
         };
         // Validate it parses before storing; FontRef borrows, so just check and drop.
-        FontRef::new(&ttf_bytes).map_err(|e| TextError::BadFont(format!("{e:?}")))?;
+        FontRef::from_index(&ttf_bytes, 0).map_err(|e| TextError::BadFont(format!("{e:?}")))?;
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(LoadedFont { data: ttf_bytes });
         Ok(id)
