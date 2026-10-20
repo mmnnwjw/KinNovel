@@ -305,7 +305,7 @@ impl ComicReaderPage {
             let started = Instant::now();
             let result = bytes.and_then(|bytes| match bytes {
                 None => Ok(None),
-                Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h))).map(|img| Some(img.fit_within(w, h).dithered())).map_err(|e| e.to_string()),
+                Some(cached) => cached.decode(Some((w, h))).map(|img| Some(img.fit_within(w, h).dithered())).map_err(|e| e.to_string()),
             });
             if crate::debug() {
                 eprintln!("[comic] 第 {} 页解码 {} ms", index + 1, started.elapsed().as_millis());
@@ -335,8 +335,8 @@ impl ComicReaderPage {
                 .filter(|m| m.total() > 0 && m.url(0).is_some())
                 .or_else(|| comic::fetch_batch(&paths, net.as_ref(), next.id, 0, crate::net::BACKGROUND_PRIORITY).ok().map(|(m, _)| m));
             let first = manifest.as_ref().and_then(|m| m.url(0)).and_then(|url| {
-                let bytes = comic::page_bytes(&paths, net.as_ref(), url, comic::request_height(url, w, h, high)).ok()??;
-                kn_render::decode_gray(&bytes, Some((w, h))).ok().map(|img| img.fit_within(w, h).dithered())
+                let cached = comic::page_bytes(&paths, net.as_ref(), url, comic::request_height(url, w, h, high)).ok()??;
+                cached.decode(Some((w, h))).ok().map(|img| img.fit_within(w, h).dithered())
             });
             eprintln!("[comic] 预取下一话 {}: 清单 {}, 第一页 {}, {} ms", next.id, manifest.is_some(), first.is_some(), started.elapsed().as_millis());
             NextPrefetched { chapter_id: next.id, size: (w, h), manifest, first }

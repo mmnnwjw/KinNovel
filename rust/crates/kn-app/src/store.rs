@@ -27,14 +27,71 @@ pub fn sha256_hex(text: &str) -> String {
     out
 }
 
-/// 先写临时文件再改名, 断电不留半个文件。
+/// 临时文件名里的标记: `<文件名>.tmp-kn<pid>-<序号>`; 1.6.3 及以前是 `<去掉扩展名>.tmp-kn`。
+/// 启动修剪缓存时删掉两种残留 (见 [`is_tmp_leftover`])。
+const TMP_MARK: &str = ".tmp-kn";
+
+/// 用户数据 (`data/` 下的设置、账号、书签、统计、更新状态, 以及阅读进度): 写临时文件、fsync 后再改名,
+/// 断电 / 强制重启后要么是旧内容要么是新内容 (`/mnt/us` 是 vfat, 不 fsync 可能留下 0 字节文件)。
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
+    write_via_tmp(path, bytes, true)
+}
+
+/// 可再下载的缓存 (章节、字体、图片、漫画清单与页面): 同样经临时文件改名, 但不 fsync (vfat 上 fsync 会刷整个块设备)。
+/// 断电后可能留下半截文件, 读取方解析失败时删掉重下 (章节见 `pages/reader.rs`, 字体见 [`load_chapter_font`])。
+pub fn cache_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_via_tmp(path, bytes, false)
+}
+
+fn write_via_tmp(path: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent();
+    if let Some(dir) = dir {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp-kn");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    // 临时文件名唯一: 同一文件可能被两个线程同时写 (过期章节的后台刷新与前台下载)
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!("{TMP_MARK}{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_file_name(name);
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        if durable {
+            f.sync_all()?;
+        }
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        // 改名本身也落盘 (Linux 上目录可以 fsync; 失败无妨, 最坏是断电后还是旧内容)
+        #[cfg(unix)]
+        if durable {
+            if let Some(dir) = dir {
+                if let Ok(d) = std::fs::File::open(dir) {
+                    let _ = d.sync_all();
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// 是不是 [`atomic_write`] / [`cache_write`] 残留的临时文件 (新旧两种命名)。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn is_tmp_leftover(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    match name.rfind(TMP_MARK) {
+        Some(i) => {
+            let rest = &name[i + TMP_MARK.len()..];
+            // 旧: 以 ".tmp-kn" 结尾; 新: ".tmp-kn<pid>-<序号>"
+            rest.is_empty() || rest.split_once('-').is_some_and(|(a, b)| !a.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit()))
+        }
+        None => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -223,7 +280,12 @@ fn as_string(v: Option<&Value>) -> String {
 impl Chapter {
     pub fn parse(bytes: &[u8], with_content: bool) -> Option<Chapter> {
         let root: Value = serde_json::from_slice(bytes).ok()?;
-        let c = root.get("Chapter").unwrap_or(&root);
+        Self::from_value(&root, with_content)
+    }
+
+    /// 同 [`Chapter::parse`], 但输入是已解好的 JSON (刚下载的章节不用再从字节解析一遍)。
+    pub fn from_value(root: &Value, with_content: bool) -> Option<Chapter> {
+        let c = root.get("Chapter").unwrap_or(root);
         let chapters = c
             .get("Chapters")
             .and_then(Value::as_array)
@@ -331,23 +393,73 @@ pub fn unix_now() -> i64 {
 
 /// 读取章节字体并得到可直接加载的 TTF 字节: 优先用解码好的 `.ttf` 旁路缓存, 否则解码 WOFF2 并写回旁路。
 /// 在后台线程调用。
+/// 缓存坏了 (半截文件、解码失败) 时删掉原文件和旁路缓存, 下次打开重新下载 (`net::ensure_font`)。
 pub fn load_chapter_font(file: &Path) -> Result<Vec<u8>, String> {
-    let sidecar = PathBuf::from(format!("{}.ttf", file.display()));
+    let sidecar = font_sidecar(file);
     if let Ok(bytes) = std::fs::read(&sidecar) {
-        if bytes.len() > 12 {
+        if sfnt_complete(&bytes) {
             return Ok(bytes);
         }
+        // 半截的旁路缓存: 删掉, 从 WOFF2 重新解码
+        eprintln!("[font] 解码缓存 {} 不完整, 重新解码", sidecar.display());
+        let _ = std::fs::remove_file(&sidecar);
     }
     let raw = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
     if raw.starts_with(b"wOF2") {
-        let ttf = kn_render::decode_woff2(&raw).map_err(|e| e.to_string())?;
-        if let Err(e) = atomic_write(&sidecar, &ttf) {
+        let ttf = match kn_render::decode_woff2(&raw) {
+            Ok(ttf) if sfnt_complete(&ttf) => ttf,
+            Ok(_) => {
+                forget_chapter_font(file);
+                return Err(format!("{}: 解码结果不完整", file.display()));
+            }
+            Err(e) => {
+                forget_chapter_font(file);
+                return Err(format!("{}: {e}", file.display()));
+            }
+        };
+        if let Err(e) = cache_write(&sidecar, &ttf) {
             eprintln!("[font] 无法写入解码缓存 {}: {e}", sidecar.display());
         }
         Ok(ttf)
-    } else {
+    } else if sfnt_complete(&raw) {
         Ok(raw)
+    } else {
+        forget_chapter_font(file);
+        Err(format!("{}: 字体文件不完整", file.display()))
     }
+}
+
+/// 解码后的 TTF 旁路缓存 `<字体文件>.ttf`。
+pub fn font_sidecar(file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ttf", file.display()))
+}
+
+/// 删掉章节字体与它的旁路缓存 (字体加载失败时调用)。
+pub fn forget_chapter_font(file: &Path) {
+    eprintln!("[font] 字体缓存 {} 损坏, 删除", file.display());
+    let _ = std::fs::remove_file(file);
+    let _ = std::fs::remove_file(font_sidecar(file));
+}
+
+/// TTF/OTF 是否完整: 表目录里每张表都在文件范围内 (截断的文件最后几张表会越界)。
+fn sfnt_complete(bytes: &[u8]) -> bool {
+    let be32 = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    if !matches!(be32(0), Some(0x0001_0000 | 0x4F54_544F | 0x7472_7565)) {
+        // 0x00010000 / 'OTTO' / 'true'
+        return false;
+    }
+    let tables = match bytes.get(4..6) {
+        Some(b) => u16::from_be_bytes([b[0], b[1]]) as usize,
+        None => return false,
+    };
+    tables > 0
+        && (0..tables).all(|i| {
+            let rec = 12 + i * 16;
+            match (be32(rec + 8), be32(rec + 12)) {
+                (Some(offset), Some(len)) => (offset as u64 + len as u64) <= bytes.len() as u64,
+                _ => false,
+            }
+        })
 }
 
 /// 把目录 (递归) 修剪到 `limit` 字节以内: 按修改时间从旧到新删除, 再删掉空子目录。
@@ -394,9 +506,33 @@ pub fn prune_dir(dir: &Path, limit: u64) -> u64 {
 /// 漫画页面图片单独按 `comic_mb` 修剪 (清单与书目很小, 不清理)。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn prune_cache(paths: &Paths, limit_mb: i64, comic_mb: i64) -> u64 {
+    // 先删掉断电 / 崩溃留下的临时文件 (缓存与用户数据目录)
+    let leftovers = remove_tmp_leftovers(&paths.cache_dir()) + remove_tmp_leftovers(&paths.data_dir());
     let per_dir = (limit_mb.max(16) as u64 * 1024 * 1024 / 4).max(1);
     let novel: u64 = ["covers", "fonts", "images", "content"].iter().map(|name| prune_dir(&paths.cache_dir().join(name), per_dir)).sum();
-    novel + prune_dir(&paths.comic_dir().join("pages"), comic_mb.max(16) as u64 * 1024 * 1024)
+    leftovers + novel + prune_dir(&paths.comic_dir().join("pages"), comic_mb.max(16) as u64 * 1024 * 1024)
+}
+
+/// 递归删掉目录里残留的临时文件, 返回删除的字节数。本进程正在写的 (名字里是自己的 pid) 不动:
+/// 修剪在后台线程里跑, 同时可能有下载在写缓存。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn remove_tmp_leftovers(dir: &Path) -> u64 {
+    let own = format!("{TMP_MARK}{}-", std::process::id());
+    let mut removed = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            removed += remove_tmp_leftovers(&path);
+        } else if is_tmp_leftover(&path)
+            && !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(&own))
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += meta.len();
+        }
+    }
+    removed
 }
 
 /// 缓存命中时刷新修改时间, 让修剪顺序成为真正的 LRU。
@@ -457,6 +593,96 @@ mod prune_tests {
         assert_eq!(prune_dir(&dir, 150), 200);
         assert!(!dir.join("a").exists() && !dir.join("b").exists());
         assert!(dir.join("sub/c").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_fonts_are_detected_and_deleted() {
+        let ttf: &[u8] = include_bytes!("../data/KinNovelSymbols.ttf");
+        assert!(sfnt_complete(ttf));
+        assert!(!sfnt_complete(&ttf[..ttf.len() - 1]));
+        assert!(!sfnt_complete(&ttf[..ttf.len() / 2]));
+        assert!(!sfnt_complete(&ttf[..10]));
+        assert!(!sfnt_complete(b""));
+
+        let dir = std::env::temp_dir().join(format!("kn_font_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.ttf");
+        // 半截的旁路缓存被丢弃, 改用原文件
+        std::fs::write(&file, ttf).unwrap();
+        std::fs::write(font_sidecar(&file), &ttf[..ttf.len() / 3]).unwrap();
+        assert_eq!(load_chapter_font(&file).unwrap().len(), ttf.len());
+        assert!(!font_sidecar(&file).exists());
+        // 半截的字体文件: 报错并删掉, 下次重新下载
+        std::fs::write(&file, &ttf[..ttf.len() / 2]).unwrap();
+        assert!(load_chapter_font(&file).is_err());
+        assert!(!file.exists());
+        // 解不开的 WOFF2: 连同旁路一起删
+        std::fs::write(&file, b"wOF2\0\0\0\0garbage").unwrap();
+        std::fs::write(font_sidecar(&file), b"x").unwrap();
+        assert!(load_chapter_font(&file).is_err());
+        assert!(!file.exists() && !font_sidecar(&file).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tmp_leftovers_old_and_new_names_are_removed() {
+        let dir = std::env::temp_dir().join(format!("kn_tmpclean_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("content")).unwrap();
+        let own = format!("x.json.tmp-kn{}-3", std::process::id());
+        let names = ["content/abc.tmp-kn", "content/abc.json.tmp-kn99999999-0", "content/abc.json", "1-2.json", "session.json.tmp-7", "a.tmp-knx", own.as_str()];
+        for name in names {
+            std::fs::write(dir.join(name), b"12345").unwrap();
+        }
+        assert_eq!(remove_tmp_leftovers(&dir), 10);
+        assert!(!dir.join("content/abc.tmp-kn").exists());
+        assert!(!dir.join("content/abc.json.tmp-kn99999999-0").exists());
+        for keep in ["content/abc.json", "1-2.json", "session.json.tmp-7", "a.tmp-knx", own.as_str()] {
+            assert!(dir.join(keep).exists(), "{keep}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writes_leave_no_tmp_files() {
+        let dir = std::env::temp_dir().join(format!("kn_atomic_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        atomic_write(&dir.join("d/a.json"), b"one").unwrap();
+        atomic_write(&dir.join("d/a.json"), b"two").unwrap();
+        cache_write(&dir.join("d/b.jpg"), b"img").unwrap();
+        assert_eq!(std::fs::read(dir.join("d/a.json")).unwrap(), b"two");
+        assert_eq!(std::fs::read(dir.join("d/b.jpg")).unwrap(), b"img");
+        assert_eq!(std::fs::read_dir(dir.join("d")).unwrap().count(), 2);
+        // 写不进去 (目标是目录) 时临时文件也删掉
+        std::fs::create_dir_all(dir.join("d/c.json")).unwrap();
+        assert!(atomic_write(&dir.join("d/c.json"), b"x").is_err());
+        assert_eq!(std::fs::read_dir(dir.join("d")).unwrap().count(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writes_to_one_file_do_not_collide() {
+        let dir = std::env::temp_dir().join(format!("kn_atomic_mt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("c.json");
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        // Windows 上目标被另一个线程改名占用时可能拒绝, 只要求不留半截内容
+                        let _ = cache_write(&file, format!("{{\"v\":{i}}}").as_bytes());
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("{\"v\":") && text.ends_with('}'), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1344,7 +1344,9 @@ fn parse_comments(v: &Value, requested_page: i64) -> CommentsPage {
         .filter_map(|row| {
             let id = i64_of(row, "Id");
             let commentary = commentaries.get(id.to_string().as_str()).unwrap_or(row);
-            Some(comment_from_commentary_full(id, commentary, users, commentaries))
+            // 每条顶层评论一个 seen 集合: 回复引用自己或互相引用 (服务器数据) 时不会无限递归
+            let mut seen = std::collections::HashSet::from([id]);
+            Some(comment_from_commentary_full(id, commentary, users, commentaries, 0, &mut seen))
         })
         .collect();
     let page = { let p = i64_of(v, "Page"); if p > 0 { p } else { requested_page.max(1) } };
@@ -1352,16 +1354,32 @@ fn parse_comments(v: &Value, requested_page: i64) -> CommentsPage {
     CommentsPage { items, page: page.max(1), total_pages: total.max(1) }
 }
 
+/// 回复的最大嵌套层数 (界面只画一层回复; 防止服务器数据里极深的回复链撑爆工作线程栈)。
+const MAX_REPLY_DEPTH: usize = 8;
+
 /// 同 [`comment_from_commentary`], 但 `Replies` 引用的子评论从 `commentaries` 映射解析 (支持递归)。
-fn comment_from_commentary_full(id: i64, commentary: &Value, users: &Value, commentaries: &Value) -> Comment {
+/// `seen` 记录这棵评论树里已出现的 id: 每条评论最多出现一次, 环引用被跳过。
+fn comment_from_commentary_full(
+    id: i64,
+    commentary: &Value,
+    users: &Value,
+    commentaries: &Value,
+    depth: usize,
+    seen: &mut std::collections::HashSet<i64>,
+) -> Comment {
     let user_id = i64_of(commentary, "UserId");
     let user = users.get(user_id.to_string().as_str());
     let user_name = user.map(|u| str_of(u, "UserName")).filter(|s| !s.is_empty()).unwrap_or_else(|| "用户".to_string());
-    let replies = arr_of(commentary, "Replies")
-        .into_iter()
-        .filter_map(|rid| rid.as_i64().or_else(|| rid.as_str().and_then(|s| s.parse().ok())))
-        .filter_map(|rid| commentaries.get(rid.to_string().as_str()).map(|rc| comment_from_commentary_full(rid, rc, users, commentaries)))
-        .collect();
+    let mut replies = Vec::new();
+    if depth < MAX_REPLY_DEPTH {
+        for rid in arr_of(commentary, "Replies") {
+            let Some(rid) = rid.as_i64().or_else(|| rid.as_str().and_then(|s| s.parse().ok())) else { continue };
+            let Some(rc) = commentaries.get(rid.to_string().as_str()) else { continue };
+            if seen.insert(rid) {
+                replies.push(comment_from_commentary_full(rid, rc, users, commentaries, depth + 1, seen));
+            }
+        }
+    }
     Comment { id, user_name, content: html_to_paragraphs(&str_of(commentary, "Content")).join("\n"), created_at: date_part(&str_of(commentary, "CreatedAt")), replies }
 }
 
@@ -1685,6 +1703,55 @@ mod tests {
         assert_eq!(page.items[0].content, "评论内容");
         assert_eq!(page.items[0].replies.len(), 1);
         assert_eq!(page.items[0].replies[0].user_name, "乙");
+    }
+
+    #[test]
+    fn comments_reply_to_itself_is_skipped() {
+        let v = json!({
+            "Users": {},
+            "Commentaries": {"1": {"UserId": 1, "Content": "x", "Replies": [1, 2]}, "2": {"UserId": 1, "Content": "y", "Replies": ["2"]}},
+            "Data": [{"Id": 1}],
+        });
+        let page = parse_comments(&v, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].replies.len(), 1);
+        assert_eq!(page.items[0].replies[0].id, 2);
+        assert!(page.items[0].replies[0].replies.is_empty());
+    }
+
+    #[test]
+    fn comments_reply_cycle_terminates() {
+        // A -> B -> A 互相引用: 每棵树里每条只出现一次
+        let v = json!({
+            "Users": {},
+            "Commentaries": {"1": {"UserId": 1, "Content": "a", "Replies": [2]}, "2": {"UserId": 1, "Content": "b", "Replies": [1]}},
+            "Data": [{"Id": 1}, {"Id": 2}],
+        });
+        let page = parse_comments(&v, 1);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].replies.len(), 1);
+        assert!(page.items[0].replies[0].replies.is_empty());
+        assert_eq!(page.items[1].id, 2);
+        assert_eq!(page.items[1].replies[0].id, 1);
+        assert!(page.items[1].replies[0].replies.is_empty());
+    }
+
+    #[test]
+    fn comments_deep_reply_chain_is_capped() {
+        let n = 100_000i64;
+        let mut commentaries = serde_json::Map::new();
+        for i in 1..=n {
+            commentaries.insert(i.to_string(), json!({"UserId": 1, "Content": "c", "Replies": [i + 1]}));
+        }
+        let v = json!({"Users": {}, "Commentaries": Value::Object(commentaries), "Data": [{"Id": 1}]});
+        let page = parse_comments(&v, 1);
+        let mut depth = 0;
+        let mut c = &page.items[0];
+        while let Some(r) = c.replies.first() {
+            depth += 1;
+            c = r;
+        }
+        assert_eq!(depth, MAX_REPLY_DEPTH);
     }
 
     #[test]

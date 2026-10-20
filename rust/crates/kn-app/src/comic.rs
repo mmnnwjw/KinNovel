@@ -19,6 +19,7 @@ use kn_net::Client;
 use serde_json::{json, Value};
 
 use crate::api::{self, ChapterRef, ComicBatch};
+use crate::net::CachedImage;
 use crate::store::{self, Paths};
 
 /// 每次向服务器要几张图的地址 (与网页版一致)。
@@ -74,7 +75,7 @@ impl ComicBook {
         let chapters: Vec<Value> =
             self.chapters.iter().map(|c| json!({"id": c.id, "sort_num": c.sort_num, "title": c.title, "page_count": c.page_count})).collect();
         let v = json!({"id": self.id, "title": self.title, "chapters": chapters});
-        if let Err(e) = store::atomic_write(&paths.comic_book_file(self.id), v.to_string().as_bytes()) {
+        if let Err(e) = store::cache_write(&paths.comic_book_file(self.id), v.to_string().as_bytes()) {
             eprintln!("[comic] 书目缓存写入失败: {e}");
         }
     }
@@ -186,7 +187,7 @@ impl Manifest {
             "chapter_id": self.chapter_id, "book_id": self.book_id, "book_name": self.book_name,
             "title": self.title, "sort_num": self.sort_num, "images": self.images,
         });
-        if let Err(e) = store::atomic_write(&paths.comic_chapter_file(self.chapter_id), v.to_string().as_bytes()) {
+        if let Err(e) = store::cache_write(&paths.comic_chapter_file(self.chapter_id), v.to_string().as_bytes()) {
             eprintln!("[comic] 清单缓存写入失败: {e}");
         }
     }
@@ -262,24 +263,25 @@ pub fn request_height(url: &str, screen_w: u32, screen_h: u32, high: bool) -> u3
 }
 
 /// 页面图片字节: 先查缓存, 缺失时按缩放后的 URL 下载并写缓存。离线且未缓存返回 Ok(None)。
-pub fn page_bytes(paths: &Paths, net: Option<&Client>, url: &str, height: u32) -> Result<Option<Vec<u8>>, String> {
+/// 用 [`CachedImage::decode`] 解码: 坏的缓存文件会被删掉, 再翻到这页时重新下载。
+pub fn page_bytes(paths: &Paths, net: Option<&Client>, url: &str, height: u32) -> Result<Option<CachedImage>, String> {
     if let Some(bytes) = api::fixture_file(url) {
-        return Ok(Some(bytes));
+        return Ok(Some(CachedImage::new(bytes, None)));
     }
     let file = paths.comic_image_file(url, height);
     if let Ok(bytes) = std::fs::read(&file) {
         store::touch(&file);
-        return Ok(Some(bytes));
+        return Ok(Some(CachedImage::new(bytes, Some(file))));
     }
     let Some(net) = net else { return Ok(None) };
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Ok(None);
     }
     let bytes = net.download(&crate::net::scaled_image_url(url, height), IMAGE_LIMIT).map_err(|e| e.to_string())?;
-    if let Err(e) = store::atomic_write(&file, &bytes) {
+    if let Err(e) = store::cache_write(&file, &bytes) {
         eprintln!("[comic] 图片缓存写入失败: {e}");
     }
-    Ok(Some(bytes))
+    Ok(Some(CachedImage::new(bytes, Some(file))))
 }
 
 #[cfg(test)]

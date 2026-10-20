@@ -367,7 +367,11 @@ impl ReaderPage {
                     }
                     chapter_font = Some(id);
                 }
-                Err(e) => self.note = format!("章节字体无法解析: {e}"),
+                Err(e) => {
+                    // 删掉坏的缓存, 下次打开重新下载
+                    store::forget_chapter_font(&path);
+                    self.note = format!("章节字体无法解析: {e}");
+                }
             },
             (Some(path), None) => {
                 // 与已加载的章节字体相同, 直接复用
@@ -647,9 +651,10 @@ impl ReaderPage {
             let net = cx.app.net();
             let (url, w, h) = (url.clone(), *width as u32, *height as u32);
             cx.spawn_droppable(move || {
-                let result = crate::net::image_bytes(&paths, net.as_ref(), &url, h).and_then(|bytes| match bytes {
+                let result = crate::net::image_source(&paths, net.as_ref(), &url, h).and_then(|cached| match cached {
                     None => Ok(None),
-                    Some(bytes) => kn_render::decode_gray(&bytes, Some((w, h)))
+                    Some(cached) => cached
+                        .decode(Some((w, h)))
                         .map(|img| Some(img.fit_within(w, h).dithered()))
                         .map_err(|e| e.to_string()),
                 });
@@ -919,8 +924,8 @@ impl ReaderPage {
         let (book_id, sort_num) = (self.book_id, self.sort_num);
         cx.spawn(move || -> Result<Loaded, String> {
             let started = Instant::now();
-            let bytes = crate::net::chapter_bytes(&paths, net.as_ref(), book_id, sort_num, &convert)?;
-            let chapter = Chapter::parse(&bytes, true).ok_or("章节数据损坏")?;
+            // 缓存坏了的话 load_chapter 会删掉它并 (在线时) 重新下载
+            let chapter = crate::net::load_chapter(&paths, net.as_ref(), book_id, sort_num, &convert, true)?;
             let doc = kn_text::extract_document(&chapter.content, store::SITE_BASE, true);
             let (blocks, notes) = (doc.blocks, doc.notes);
             let font_path = match &chapter.font {
@@ -929,7 +934,17 @@ impl ReaderPage {
             };
             let font_bytes = match &font_path {
                 Some(p) if Some(p) == loaded_font.as_ref() => None,
-                Some(p) => Some(store::load_chapter_font(p)),
+                Some(p) => {
+                    let existed = p.exists();
+                    Some(store::load_chapter_font(p).or_else(|e| match net.as_ref() {
+                        // 缓存的字体坏了 (已被删掉): 在线就重新下载一次
+                        Some(n) if existed && !p.exists() => {
+                            crate::net::ensure_font(&paths, Some(n), &api, &chapter.font).ok_or(e)?;
+                            store::load_chapter_font(p)
+                        }
+                        _ => Err(e),
+                    }))
+                }
                 None => None,
             };
             let local = store::load_progress(&paths.progress_file(book_id, sort_num, &convert));
