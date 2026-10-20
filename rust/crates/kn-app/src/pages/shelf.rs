@@ -8,7 +8,9 @@
 //! 否则列出本地缓存里有章节的书, 点进去是该书已缓存的章节。
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use kn_platform::{GestureKind, InputEvent};
 use kn_render::{Bitmap, Point, Rect};
@@ -22,7 +24,7 @@ use super::shelf_edit::{FolderNamePage, MovePickerPage};
 use super::Tab;
 use crate::api::{self, ShelfData, ShelfEntry, ShelfRef};
 use crate::covers::CoverCache;
-use crate::store::{self, Chapter, LastRead};
+use crate::store::{self, CachedChapter, LastRead};
 use crate::KinNovel;
 
 const HIT_CONTINUE: HitId = HitId(1);
@@ -45,35 +47,60 @@ const ROW_BASE: u32 = 1000;
 struct CachedBook {
     book_id: i64,
     name: String,
-    chapters: Vec<Chapter>,
+    chapters: Vec<CachedChapter>,
 }
 
+/// 继续阅读卡片的数据 (每次进入书架都重新读: 要反映刚才的进度)。
 struct Loaded {
     last: Option<LastRead>,
     /// 继续阅读卡片的封面: 记录里的封面地址, 没有就用第一章的卷首图
     last_cover: String,
-    books: Vec<CachedBook>,
 }
 
-fn load(paths: &store::Paths) -> Loaded {
+/// 本地缓存里的书 (只在本地模式、或云端书架加载失败退回本地时扫描)。
+struct LocalBooks(Vec<CachedBook>);
+
+/// 最近一次从章节里找到的卷首图 (书 id, 地址): 卡片每次进入书架都要, 不必每次都排版第一章。
+static FIRST_IMAGE: Mutex<Option<(i64, String)>> = Mutex::new(None);
+
+fn load(paths: &store::Paths, convert: &str) -> Loaded {
+    let last = store::load_last_read(paths);
+    let last_cover = match &last {
+        Some(l) if !l.cover.is_empty() => l.cover.clone(),
+        Some(l) => crate::sleep::known_cover(l.book_id).or_else(|| first_image(paths, l.book_id, convert)).unwrap_or_default(),
+        None => String::new(),
+    };
+    Loaded { last, last_cover }
+}
+
+fn first_image(paths: &store::Paths, book_id: i64, convert: &str) -> Option<String> {
+    let mut memo = FIRST_IMAGE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((id, url)) = memo.as_ref() {
+        if *id == book_id {
+            return Some(url.clone());
+        }
+    }
+    let url = store::first_image_of_book(paths, book_id, convert)?;
+    *memo = Some((book_id, url.clone()));
+    Some(url)
+}
+
+/// 扫描章节缓存, 按书归组 (书 id 顺序, 最近读的书排第一)。
+fn scan_books(paths: &store::Paths) -> Vec<CachedBook> {
     let mut by_book: BTreeMap<i64, CachedBook> = BTreeMap::new();
-    for (c, _) in store::list_cached_chapters(paths) {
+    for c in store::list_cached_chapters(paths) {
         let entry = by_book.entry(c.book_id).or_insert_with(|| CachedBook { book_id: c.book_id, name: c.book_name.clone(), chapters: Vec::new() });
         entry.chapters.push(c);
     }
-    let last = store::load_last_read(paths);
     let mut books: Vec<CachedBook> = by_book.into_values().collect();
-    // 最近读的书排第一
-    if let Some(l) = &last {
+    if let Some(l) = store::load_last_read(paths) {
         books.sort_by_key(|b| b.book_id != l.book_id);
     }
-    let last_cover = match &last {
-        Some(l) if !l.cover.is_empty() => l.cover.clone(),
-        Some(l) => crate::sleep::known_cover(l.book_id).or_else(|| store::first_image_of_book(paths, l.book_id)).unwrap_or_default(),
-        None => String::new(),
-    };
-    Loaded { last, last_cover, books }
+    books
 }
+
+/// 从别的页面返回书架时, 这么久之内加载过的云端书架直接复用, 不发请求 (写回过的除外, 见 `api::forget_shelf`)。
+const CLOUD_REUSE: Duration = Duration::from_secs(60);
 
 /// 继续阅读卡片的高度与其中封面的位置 (卡片内边距之内, 宽高比 0.72)。
 fn continue_layout(m: &kn_ui::widgets::Metrics, rect: Rect) -> Rect {
@@ -104,10 +131,15 @@ enum Confirm {
 #[derive(Default)]
 pub struct ShelfPage {
     data: Option<Loaded>,
+    /// 本地缓存的书; None = 还没扫描
+    books: Option<Vec<CachedBook>>,
+    books_loading: bool,
     page: usize,
     /// `None` = 本地缓存模式 (离线或未登录); `Some` = 云端书架 (加载中时为空 Err 占位由 loading 标志区分)
     cloud: Option<Result<ShelfData, String>>,
     cloud_loading: bool,
+    /// 当前文件夹层的条目 (云端书架或文件夹变化时重算, 不在每帧算)
+    entries: Vec<ShelfEntry>,
     covers: CoverCache,
     /// 当前所在的文件夹路径 (空 = 根)
     folder: Vec<String>,
@@ -194,29 +226,39 @@ impl Page<KinNovel> for ShelfPage {
 
     /// 本地数据读完、云端书架也回来了 (成功或失败)
     fn ready(&self) -> bool {
-        self.data.is_some() && !self.cloud_loading
+        self.data.is_some() && !self.cloud_loading && !self.books_loading
     }
 
-    fn enter(&mut self, cx: &mut Cx<KinNovel>, _returning: bool) {
+    fn enter(&mut self, cx: &mut Cx<KinNovel>, returning: bool) {
         if let Some(text) = cx.app.startup_notice.take() {
             self.notice = Some(text);
             cx.after(std::time::Duration::from_secs(8), NOTICE_TOKEN);
         }
         // 从阅读页返回时也重新读: "继续阅读" 要反映刚才的进度
         let paths = cx.app.paths.clone();
-        cx.spawn_local_droppable(move || load(&paths));
+        let convert = cx.app.config.convert();
+        cx.spawn_local_droppable(move || load(&paths, &convert));
         if use_cloud(cx) {
             let net = cx.app.net();
             if net.as_ref().is_some_and(|n| n.server_down()) {
                 // 服务器刚刚还不可用: 直接显示本地缓存, 到探测时间后下次进入书架再试
                 self.cloud_loading = false;
-                self.cloud = Some(Err("服务器暂不可用".into()));
+                self.set_cloud(cx, Err("服务器暂不可用".into()));
                 return;
             }
-            self.cloud_loading = true;
-            cx.spawn_droppable(move || CloudLoaded(api::load_shelf(net.as_ref())));
+            // 刚看完书 / 从详情回来: 一分钟内加载过、之后没写回过, 就不再请求
+            if returning {
+                if let Some(data) = api::recent_shelf(CLOUD_REUSE) {
+                    self.cloud_loading = false;
+                    self.set_cloud(cx, Ok(data));
+                    return;
+                }
+            }
+            self.load_cloud(cx);
         } else {
             self.cloud = None;
+            self.entries.clear();
+            self.scan_books(cx);
         }
     }
 
@@ -237,16 +279,19 @@ impl Page<KinNovel> for ShelfPage {
             }
             Err(other) => other,
         };
+        let msg = match msg.downcast::<LocalBooks>() {
+            Ok(books) => {
+                self.books_loading = false;
+                self.books = Some(books.0);
+                cx.request_redraw(RefreshHint::Ui);
+                return;
+            }
+            Err(other) => other,
+        };
         let msg = match msg.downcast::<CloudLoaded>() {
             Ok(cloud) => {
                 self.cloud_loading = false;
-                if let Ok(data) = &cloud.0 {
-                    // 别处删掉的文件夹: 退回到还存在的那一层
-                    while self.folder.last().is_some_and(|f| !data.has_folder(f)) {
-                        self.folder.pop();
-                    }
-                }
-                self.cloud = Some(cloud.0);
+                self.set_cloud(cx, cloud.0);
                 cx.request_redraw(RefreshHint::Ui);
                 return;
             }
@@ -256,10 +301,8 @@ impl Page<KinNovel> for ShelfPage {
             self.saving = false;
             let text = match done.0 {
                 Ok(text) => {
-                    // 重新拉取 (书架以服务器为准)
-                    self.cloud_loading = true;
-                    let net = cx.app.net();
-                    cx.spawn_droppable(move || CloudLoaded(api::load_shelf(net.as_ref())));
+                    // 重新拉取 (书架以服务器为准; 写回时已作废了可复用的书架, 书目元数据仍用缓存)
+                    self.load_cloud(cx);
                     text
                 }
                 Err(e) => format!("保存失败: {e}"),
@@ -346,7 +389,7 @@ impl Page<KinNovel> for ShelfPage {
         match g.kind {
             GestureKind::Long if self.showing_cloud(cx) && !self.saving => {
                 let entry = match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
-                    Some(HitId(id)) if id >= ROW_BASE => self.entries().into_iter().nth((id - ROW_BASE) as usize),
+                    Some(HitId(id)) if id >= ROW_BASE => self.entries.get((id - ROW_BASE) as usize).cloned(),
                     _ => None,
                 };
                 if entry.is_some() {
@@ -365,6 +408,7 @@ impl Page<KinNovel> for ShelfPage {
                 }
                 if hit == HIT_FOLDER_UP {
                     self.folder.pop();
+                    self.refresh_entries();
                     self.page = 0;
                     cx.request_redraw(RefreshHint::Ui);
                     return Transition::None;
@@ -379,17 +423,18 @@ impl Page<KinNovel> for ShelfPage {
                     },
                     HIT_PREV => self.turn(cx, -1),
                     HIT_NEXT => self.turn(cx, 1),
-                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.entries().into_iter().nth((id - ROW_BASE) as usize) {
+                    HitId(id) if id >= ROW_BASE && cloud_mode => match self.entries.get((id - ROW_BASE) as usize).cloned() {
                         Some(ShelfEntry::Book(b)) => Transition::Push(Box::new(BookDetailPage::new(b.id))),
                         Some(ShelfEntry::Folder { id, .. }) => {
                             self.folder.push(id);
+                            self.refresh_entries();
                             self.page = 0;
                             cx.request_redraw(RefreshHint::Ui);
                             Transition::None
                         }
                         None => Transition::None,
                     },
-                    HitId(id) if id >= ROW_BASE => match self.data.as_ref().and_then(|d| d.books.get((id - ROW_BASE) as usize)) {
+                    HitId(id) if id >= ROW_BASE => match self.books.as_ref().and_then(|b| b.get((id - ROW_BASE) as usize)) {
                         Some(b) => Transition::Push(Box::new(CachedBookPage::new(b.clone()))),
                         None => Transition::None,
                     },
@@ -415,7 +460,7 @@ impl ShelfPage {
         let in_folder = cloud_mode && !self.folder.is_empty();
         let show_continue = !in_folder && self.data.as_ref().is_some_and(|d| d.last.is_some());
         if cloud_mode && matches!(self.cloud, Some(Ok(_))) {
-            let entries = self.entries();
+            let entries = &self.entries;
             let list_bottom = tabs_top - m.pager_h() as i32;
             let mut y = m.header_h() as i32 + m.margin as i32 / 2;
             if show_continue {
@@ -482,7 +527,7 @@ impl ShelfPage {
             }
             y += (m.small * 1.6) as i32;
             frame.fill_rect(Rect::new(side, y - 2, cx.width - 2 * m.margin, 2), theme.foreground);
-            let entries = self.entries();
+            let entries = &self.entries;
             match &self.cloud {
                 None if self.cloud_loading => {
                     let area = Rect::new(0, y, cx.width, (tabs_top - y).max(0) as u32);
@@ -552,17 +597,21 @@ impl ShelfPage {
         ink.text(frame, side, y, &label, m.small, theme.muted);
         y += (m.small * 1.6) as i32;
         frame.fill_rect(Rect::new(side, y - 2, cx.width - 2 * m.margin, 2), theme.foreground);
-        let data = self.data.as_ref().expect("checked");
-        if data.books.is_empty() {
+        let Some(books) = &self.books else {
+            let area = Rect::new(0, y, cx.width, (tabs_top - y).max(0) as u32);
+            widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "加载中…", None);
+            return;
+        };
+        if books.is_empty() {
             let area = Rect::new(0, y, cx.width, (tabs_top - y).max(0) as u32);
             widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, area, "还没有缓存的书", None);
             return;
         }
         let row_h = m.row_h();
         let per_page = rows_fit(list_bottom - y, row_h);
-        let pages = data.books.len().div_ceil(per_page);
+        let pages = books.len().div_ceil(per_page);
         self.page = self.page.min(pages - 1);
-        for (row, (index, book)) in data.books.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
+        for (row, (index, book)) in books.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
             let r = Rect::new(0, y + row as i32 * row_h as i32, cx.width, row_h);
             let first = book.chapters.first().map_or(0, |c| c.sort_num);
             let last = book.chapters.last().map_or(0, |c| c.sort_num);
@@ -576,12 +625,41 @@ impl ShelfPage {
         }
     }
 
-    /// 当前文件夹层的条目 (云端书架已加载时)。
-    fn entries(&self) -> Vec<ShelfEntry> {
-        match &self.cloud {
+    /// 重算当前文件夹层的条目 (云端书架已加载时)。
+    fn refresh_entries(&mut self) {
+        self.entries = match &self.cloud {
             Some(Ok(data)) => data.level(self.folder.last().map(String::as_str)),
             _ => Vec::new(),
+        };
+    }
+
+    /// 拉取云端书架 (结果是 [`CloudLoaded`])。
+    fn load_cloud(&mut self, cx: &mut Cx<KinNovel>) {
+        self.cloud_loading = true;
+        let net = cx.app.net();
+        cx.spawn_droppable(move || CloudLoaded(api::load_shelf(net.as_ref())));
+    }
+
+    /// 换上新的云端书架 (或加载失败)。失败时退回本地缓存, 这时才扫描本地的书。
+    fn set_cloud(&mut self, cx: &mut Cx<KinNovel>, cloud: Result<ShelfData, String>) {
+        match &cloud {
+            Ok(data) => {
+                // 别处删掉的文件夹: 退回到还存在的那一层
+                while self.folder.last().is_some_and(|f| !data.has_folder(f)) {
+                    self.folder.pop();
+                }
+            }
+            Err(_) => self.scan_books(cx),
         }
+        self.cloud = Some(cloud);
+        self.refresh_entries();
+    }
+
+    /// 后台扫描本地章节缓存 (结果是 [`LocalBooks`])。
+    fn scan_books(&mut self, cx: &mut Cx<KinNovel>) {
+        self.books_loading = true;
+        let paths = cx.app.paths.clone();
+        cx.spawn_local_droppable(move || LocalBooks(scan_books(&paths)));
     }
 
     /// 执行确认过的书架操作 (后台: 拉取最新的表、改一项、整表写回)。
@@ -603,9 +681,9 @@ impl ShelfPage {
 
     fn turn(&mut self, cx: &mut Cx<KinNovel>, delta: i64) -> Transition<KinNovel> {
         let has_rows = if self.showing_cloud(cx) {
-            !self.entries().is_empty()
+            !self.entries.is_empty()
         } else {
-            self.data.as_ref().is_some_and(|d| !d.books.is_empty())
+            self.books.as_ref().is_some_and(|b| !b.is_empty())
         };
         let next = self.page as i64 + delta;
         if next >= 0 && has_rows {
@@ -621,17 +699,24 @@ impl ShelfPage {
 pub struct CachedBookPage {
     book: CachedBook,
     page: usize,
+    /// 列表下标 → 「读到第 N 页」: 画到哪行才读那一章的进度文件 (不在每帧读), 每次进入页面清空
+    progress: HashMap<usize, String>,
 }
 
 impl CachedBookPage {
     fn new(book: CachedBook) -> Self {
-        CachedBookPage { book, page: 0 }
+        CachedBookPage { book, page: 0, progress: HashMap::new() }
     }
 }
 
 impl Page<KinNovel> for CachedBookPage {
     fn id(&self) -> PageId {
         PageId(101)
+    }
+
+    fn enter(&mut self, _cx: &mut Cx<KinNovel>, _returning: bool) {
+        // 从阅读页返回: 进度变了
+        self.progress.clear();
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
@@ -649,10 +734,10 @@ impl Page<KinNovel> for CachedBookPage {
         let convert = cx.app.config.convert();
         for (row, (index, c)) in self.book.chapters.iter().enumerate().skip(self.page * per_page).take(per_page).enumerate() {
             let r = Rect::new(0, bar.bottom() + row as i32 * row_h as i32, cx.width, row_h);
-            let meta = store::load_progress(&cx.app.paths.progress_file(c.book_id, c.sort_num, &convert))
-                .map(|p| format!("读到第 {} 页", p.page + 1))
-                .unwrap_or_default();
-            widgets::list_row(&mut ink, frame, &theme, &m, r, &format!("第 {} 章 · {}", c.sort_num, c.title), "", &meta);
+            let meta = self.progress.entry(index).or_insert_with(|| {
+                store::load_progress(&cx.app.paths.progress_file(c.book_id, c.sort_num, &convert)).map(|p| format!("读到第 {} 页", p.page + 1)).unwrap_or_default()
+            });
+            widgets::list_row(&mut ink, frame, &theme, &m, r, &format!("第 {} 章 · {}", c.sort_num, c.title), "", meta);
             cx.hits.add(HitId(ROW_BASE + index as u32), r);
         }
         if pages > 1 {

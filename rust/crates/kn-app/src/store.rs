@@ -542,18 +542,104 @@ pub fn touch(path: &Path) {
     }
 }
 
-/// 缓存目录里的章节 (书名、章节名、序号), 供离线书架使用。按书名、序号排序。
 /// 一本书缓存的第一章 (序号 1) 里的第一张图 (卷首图, 通常就是封面); 没缓存或没有图返回 None。
-pub fn first_image_of_book(paths: &Paths, book_id: i64) -> Option<String> {
-    let (_, file) = list_cached_chapters(paths).into_iter().find(|(c, _)| c.book_id == book_id && c.sort_num == 1)?;
-    let chapter = Chapter::parse(&std::fs::read(file).ok()?, true)?;
+/// 直接按文件名找 (当前的繁简转换优先, 再试其余几种), 不扫描整个缓存目录。
+pub fn first_image_of_book(paths: &Paths, book_id: i64, convert: &str) -> Option<String> {
+    let mut converts = vec![convert];
+    converts.extend(["", "t2s", "s2t"].into_iter().filter(|c| *c != convert));
+    let chapter = converts.into_iter().find_map(|c| {
+        let ch = Chapter::parse(&std::fs::read(paths.chapter_file(book_id, 1, c)).ok()?, true)?;
+        (ch.book_id == book_id && ch.sort_num == 1).then_some(ch)
+    })?;
     kn_text::extract_blocks(&chapter.content, SITE_BASE)
         .into_iter()
         .find(|b| b.kind == kn_text::BlockKind::Image && !b.source_url.is_empty())
         .map(|b| b.source_url)
 }
 
-pub fn list_cached_chapters(paths: &Paths) -> Vec<(Chapter, PathBuf)> {
+/// 书架列表用的章节信息 (缓存文件里只取这几项)。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CachedChapter {
+    pub book_id: i64,
+    pub sort_num: i64,
+    pub title: String,
+    pub book_name: String,
+}
+
+/// 章节缓存里书架要的字段 (原始 JSON 值, 取值规则与 [`Chapter::from_value`] 相同)。
+#[derive(Default)]
+struct HeadFields {
+    book_id: Option<Value>,
+    sort_num: Option<Value>,
+    title: Option<Value>,
+    book_name: Option<Value>,
+}
+
+/// 响应根对象: 有 `Chapter` 键时字段取自它, 否则取自根 (同 `root.get("Chapter").unwrap_or(root)`)。
+struct ChapterHead {
+    root: HeadFields,
+    chapter: Option<HeadFields>,
+}
+
+/// 只取 [`HeadFields`] 的解析器; 其余键 (正文 `Content`、目录 `Chapters` 等) 用 `IgnoredAny` 跳过, 只扫描不分配。
+struct HeadVisitor {
+    root: bool,
+}
+
+impl<'de> serde::de::Visitor<'de> for HeadVisitor {
+    type Value = ChapterHead;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("章节对象")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ChapterHead, A::Error> {
+        let mut head = ChapterHead { root: HeadFields::default(), chapter: None };
+        while let Some(key) = map.next_key::<String>()? {
+            let f = &mut head.root;
+            match key.as_str() {
+                "Chapter" if self.root => head.chapter = Some(map.next_value_seed(HeadVisitor { root: false })?.root),
+                "BookId" => f.book_id = Some(map.next_value()?),
+                "SortNum" => f.sort_num = Some(map.next_value()?),
+                "Title" => f.title = Some(map.next_value()?),
+                "BookName" => f.book_name = Some(map.next_value()?),
+                _ => {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(head)
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for HeadVisitor {
+    type Value = ChapterHead;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<ChapterHead, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl CachedChapter {
+    /// 从缓存文件的字节里取书架要的字段。不是合法的 JSON 对象时返回 None, 与 [`Chapter::parse`] 一样跳过;
+    /// 结果与 `Chapter::parse(bytes, false)` 的对应字段相同。
+    pub fn parse(bytes: &[u8]) -> Option<CachedChapter> {
+        use serde::de::DeserializeSeed;
+        let mut de = serde_json::Deserializer::from_slice(bytes);
+        let head = HeadVisitor { root: true }.deserialize(&mut de).ok()?;
+        de.end().ok()?;
+        let f = head.chapter.unwrap_or(head.root);
+        Some(CachedChapter {
+            book_id: as_i64(f.book_id.as_ref()),
+            sort_num: as_i64(f.sort_num.as_ref()),
+            title: as_string(f.title.as_ref()),
+            book_name: as_string(f.book_name.as_ref()),
+        })
+    }
+}
+
+/// 缓存目录里的章节 (书名、章节名、序号), 供离线书架使用。按书 id、序号排序。
+pub fn list_cached_chapters(paths: &Paths) -> Vec<CachedChapter> {
     let mut out = Vec::new();
     let Ok(dir) = std::fs::read_dir(paths.cache_dir().join("content")) else {
         return out;
@@ -563,13 +649,13 @@ pub fn list_cached_chapters(paths: &Paths) -> Vec<(Chapter, PathBuf)> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(ch) = std::fs::read(&path).ok().and_then(|b| Chapter::parse(&b, false)) {
+        if let Some(ch) = std::fs::read(&path).ok().and_then(|b| CachedChapter::parse(&b)) {
             if ch.book_id > 0 {
-                out.push((ch, path));
+                out.push(ch);
             }
         }
     }
-    out.sort_by(|a, b| (a.0.book_id, a.0.sort_num).cmp(&(b.0.book_id, b.0.sort_num)));
+    out.sort_by(|a, b| (a.book_id, a.sort_num).cmp(&(b.book_id, b.sort_num)));
     out
 }
 
@@ -713,6 +799,102 @@ mod tests {
         c.set("font_size", Value::from(52));
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(text, "{\n  \"zeta\": 1,\n  \"font_size\": 52,\n  \"alpha\": \"中文\"\n}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 书架扫描用的轻量解析与完整解析取到的字段一致 (包括各种不规整的输入)。
+    #[test]
+    fn cached_chapter_head_matches_full_parse() {
+        let cases: &[&str] = &[
+            r#"{"Chapter":{"BookId":7,"Id":70,"SortNum":3,"Title":"第三章","BookName":"书","Content":"<p>正文\"\\u4e2d</p>","Chapters":["a","b"]},"ReadPosition":{"ChapterId":70}}"#,
+            r#"{"ReadPosition":null,"Chapter":{"Content":"x","BookId":"12","SortNum":"4","Title":null,"BookName":5}}"#,
+            r#"{"BookId":9,"SortNum":1,"Title":"根上的","BookName":"根","Content":"y"}"#,
+            r#"{"Chapter":{"BookId":1,"Chapter":{"BookId":2},"SortNum":2.5}}"#,
+            r#"{"Chapter":{"BookId":1,"SortNum":1},"Chapter":{"BookId":3,"SortNum":6,"Title":"后一个"}}"#,
+            r#"{"Chapter":{"BookId":1,"Title":"t"},"BookId":99}"#,
+            r#"{"BookId":1,"BookId":2}"#,
+            r#"{}"#,
+        ];
+        for text in cases {
+            let full = Chapter::parse(text.as_bytes(), false).expect(text);
+            let head = CachedChapter::parse(text.as_bytes()).expect(text);
+            assert_eq!(head, CachedChapter { book_id: full.book_id, sort_num: full.sort_num, title: full.title, book_name: full.book_name }, "{text}");
+        }
+        // 两边都不认的输入
+        for bad in [&b"{\"Chapter\":{\"BookId\":1}"[..], b"{\"BookId\":1} x", b"", b"[1,2]", b"{\"Chapter\":{\"BookId\":1,\"Content\":\"abc}}"] {
+            assert!(Chapter::parse(bad, false).is_none_or(|c| c.book_id == 0));
+            assert!(CachedChapter::parse(bad).is_none_or(|c| c.book_id == 0));
+        }
+    }
+
+    /// 合成的章节缓存: `books` 本书, 每本 `per_book` 章, 正文约 `content_kb` KB。
+    fn synthetic_cache(dir: &Path, books: i64, per_book: i64, content_kb: usize) -> Paths {
+        let paths = Paths { app_dir: dir.to_path_buf() };
+        let para = "<p>　　这是一段用来凑长度的正文，里面有“引号”和\\n转义。</p>";
+        let content: String = std::iter::repeat_n(para, content_kb * 1024 / para.len() + 1).collect();
+        for book in 1..=books {
+            let titles: Vec<String> = (1..=per_book.max(40)).map(|i| format!("第{i}章 标题")).collect();
+            for sort in 1..=per_book {
+                let body = if sort == 1 { format!("<img src=\"https://img.example/{book}.jpg\">{content}") } else { content.clone() };
+                let v = serde_json::json!({
+                    "Chapter": {"Id": book * 1000 + sort, "BookId": 30000 + book, "SortNum": sort, "Title": format!("第{sort}章"),
+                                "BookName": format!("书{book}"), "Content": body, "Font": "/font/x.woff2", "Chapters": titles},
+                    "ReadPosition": {"ChapterId": 0, "Position": ""},
+                });
+                std::fs::create_dir_all(paths.cache_dir().join("content")).unwrap();
+                std::fs::write(paths.chapter_file(30000 + book, sort, ""), serde_json::to_vec(&v).unwrap()).unwrap();
+            }
+        }
+        paths
+    }
+
+    #[test]
+    fn scan_and_first_image_read_the_cache() {
+        let dir = std::env::temp_dir().join(format!("kn-scan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = synthetic_cache(&dir, 3, 4, 2);
+        // 损坏的文件和非 json 文件跳过
+        std::fs::write(paths.cache_dir().join("content/broken.json"), b"{\"Chapter\":{\"BookId\":5").unwrap();
+        std::fs::write(paths.cache_dir().join("content/x.tmp"), b"{}").unwrap();
+        let list = list_cached_chapters(&paths);
+        assert_eq!(list.len(), 12);
+        assert_eq!(list[0], CachedChapter { book_id: 30001, sort_num: 1, title: "第1章".into(), book_name: "书1".into() });
+        assert!(list.windows(2).all(|w| (w[0].book_id, w[0].sort_num) < (w[1].book_id, w[1].sort_num)));
+        assert_eq!(first_image_of_book(&paths, 30002, "").as_deref(), Some("https://img.example/2.jpg"));
+        // 当前设置是繁转简, 但只缓存了不转换的版本
+        assert_eq!(first_image_of_book(&paths, 30003, "t2s").as_deref(), Some("https://img.example/3.jpg"));
+        assert_eq!(first_image_of_book(&paths, 30009, ""), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 计时: `cargo test -p kn-app --release -- --ignored --nocapture scan_timing`
+    #[test]
+    #[ignore]
+    fn scan_timing() {
+        let dir = std::env::temp_dir().join(format!("kn-scan-bench-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 300 章, 每章正文约 30 KB (约一万汉字), 目录 100 项
+        let paths = synthetic_cache(&dir, 3, 100, 30);
+        let full = || {
+            let mut n = 0;
+            for e in std::fs::read_dir(paths.cache_dir().join("content")).unwrap().flatten() {
+                n += Chapter::parse(&std::fs::read(e.path()).unwrap(), false).is_some() as usize;
+            }
+            n
+        };
+        for round in 0..3 {
+            let t = std::time::Instant::now();
+            let a = full();
+            let full_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let t = std::time::Instant::now();
+            let b = list_cached_chapters(&paths).len();
+            let head_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let t = std::time::Instant::now();
+            let reads: usize = std::fs::read_dir(paths.cache_dir().join("content")).unwrap().flatten().map(|e| std::fs::read(e.path()).unwrap().len()).sum();
+            let read_ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(a, b);
+            println!("round {round}: {b} 章 {} MB: 完整解析 {full_ms:.1} ms, 只取字段 {head_ms:.1} ms, 只读文件 {read_ms:.1} ms", reads / 1_000_000);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

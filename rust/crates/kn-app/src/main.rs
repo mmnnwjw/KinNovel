@@ -272,11 +272,14 @@ impl KinNovel {
             eprintln!("[account] 保存失败: {e}");
         }
         self.net_client.set_account(Some((account.email, account.password_hash)));
+        // 换了账号: 书架不能沿用上一个账号的
+        api::forget_shelf();
     }
 
     /// 退出登录: 删掉保存的账号和会话令牌。
     pub fn forget_account(&mut self) {
         self.my_info = None;
+        api::forget_shelf();
         account::clear(&self.paths);
         if let Err(e) = self.net_client.logout() {
             eprintln!("[account] 清除会话失败: {e}");

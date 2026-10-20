@@ -16,6 +16,8 @@ kn-text.workspace = true
 kn-net = { path = "../kn-net" }
 # preserve_order: 写回 config.json 时保持 Python 版的键顺序
 serde_json = { workspace = true, features = ["preserve_order"] }
+# 书架扫描章节缓存时只解析需要的字段 (正文用 IgnoredAny 跳过)
+serde.workspace = true
 sha2.workspace = true
 # 应用内更新: 解压发布包 (raw deflate + CRC 校验)
 miniz_oxide = "0.8"

@@ -424,14 +424,25 @@ fn last_parent(item: &Value) -> Option<String> {
 impl ShelfData {
     /// 某一层 (None = 根) 的条目, 按 index 排序; 元数据缺失的书跳过。
     pub fn level(&self, folder: Option<&str>) -> Vec<ShelfEntry> {
-        let mut items: Vec<&Value> = self.raw.iter().filter(|it| it.is_object() && last_parent(it).as_deref() == folder).collect();
+        // 一遍算出: 这一层的条目, 以及每个文件夹直接装了几项 (以前每个文件夹各扫一遍全表)
+        let mut items: Vec<&Value> = Vec::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for it in &self.raw {
+            let parent = last_parent(it);
+            if it.is_object() && parent.as_deref() == folder {
+                items.push(it);
+            }
+            if let Some(p) = parent {
+                *counts.entry(p).or_default() += 1;
+            }
+        }
         items.sort_by_key(|it| index_key(it));
         let mut seen = std::collections::HashSet::new();
         items
             .into_iter()
             .filter_map(|it| match folder_id(it) {
                 Some(id) => {
-                    let count = self.raw.iter().filter(|x| last_parent(x).as_deref() == Some(id.as_str())).count();
+                    let count = counts.get(&id).copied().unwrap_or(0);
                     let title = str_of(it, "title");
                     Some(ShelfEntry::Folder { title: if title.is_empty() { "文件夹".into() } else { title }, id, count })
                 }
@@ -501,6 +512,15 @@ fn fetch_shelf(net: Option<&Client>) -> Result<Value, String> {
 }
 
 fn save_shelf(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
+    // 写回后书架页必须重新拉取 (书架页、书籍详情页、文件夹编辑页的写回都经过这里);
+    // 写回前后各作废一次: 写回期间完成的加载拿到的可能还是旧表
+    forget_shelf();
+    let result = save_shelf_now(net, items);
+    forget_shelf();
+    result
+}
+
+fn save_shelf_now(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
     if fake_mode() {
         *FAKE_SHELF.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "data": items }));
         return Ok(());
@@ -510,15 +530,97 @@ fn save_shelf(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
     net.save_book_shelf(Value::Array(items), "20260921").map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// 云端书架 (含文件夹; 书籍元数据一次取齐)。
+/// 书目元数据缓存多久: 进入书架时只给缓存里没有 (或过期) 的书请求 `GetBookListByIds`。
+const BOOK_META_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// 书架的内存缓存 (进程内, 不落盘)。
+#[derive(Default)]
+struct ShelfCache {
+    /// 书 id → (取到的时间, 元数据; None = 请求过但服务器没返回, 例如已下架)
+    books: std::collections::HashMap<i64, (std::time::Instant, Option<BookItem>)>,
+    /// 最近一次加载成功的书架与时间 (从别的页面返回书架时短时间内直接复用)
+    last: Option<(std::time::Instant, ShelfData)>,
+    /// 每次写回 / 换账号加一: 写回之前发出的加载不能再记成「最近一次」
+    generation: u64,
+}
+
+type CacheLock = std::sync::Mutex<ShelfCache>;
+
+fn shelf_cache() -> &'static CacheLock {
+    static CACHE: std::sync::OnceLock<CacheLock> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn lock_cache(cache: &CacheLock) -> std::sync::MutexGuard<'_, ShelfCache> {
+    cache.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 书架改过 (写回、登录、退出登录): 下次进入书架重新拉取。书目元数据不受影响, 照样复用。
+pub fn forget_shelf() {
+    forget_shelf_in(shelf_cache());
+}
+
+fn forget_shelf_in(cache: &CacheLock) {
+    let mut c = lock_cache(cache);
+    c.last = None;
+    c.generation += 1;
+}
+
+/// 不到 `max_age` 之前加载过、之后没写回过的书架。
+pub fn recent_shelf(max_age: std::time::Duration) -> Option<ShelfData> {
+    recent_shelf_in(shelf_cache(), std::time::Instant::now(), max_age)
+}
+
+fn recent_shelf_in(cache: &CacheLock, now: std::time::Instant, max_age: std::time::Duration) -> Option<ShelfData> {
+    let c = lock_cache(cache);
+    c.last.as_ref().filter(|(at, _)| now.saturating_duration_since(*at) < max_age).map(|(_, data)| data.clone())
+}
+
+/// 云端书架 (含文件夹)。每次都拉 `GetBookShelf`; 书籍元数据只请求缓存里没有 (或过期) 的。
 pub fn load_shelf(net: Option<&Client>) -> Result<ShelfData, String> {
-    let raw = shelf_items(&fetch_shelf(net)?);
+    load_shelf_in(shelf_cache(), std::time::Instant::now(), || fetch_shelf(net), |ids| load_books_by_ids_any(net, ids))
+}
+
+/// [`load_shelf`] 的实现 (缓存与两个请求由调用方给出, 测试用)。请求期间不持有锁。
+fn load_shelf_in(
+    cache: &CacheLock,
+    now: std::time::Instant,
+    fetch: impl FnOnce() -> Result<Value, String>,
+    fetch_books: impl FnOnce(&[i64]) -> Result<Vec<BookItem>, String>,
+) -> Result<ShelfData, String> {
+    let generation = lock_cache(cache).generation;
+    let raw = shelf_items(&fetch()?);
     let ids: Vec<i64> = {
         let mut seen = std::collections::HashSet::new();
         raw.iter().filter_map(shelf_book_id).filter(|id| seen.insert(*id)).collect()
     };
-    let books = if ids.is_empty() { Vec::new() } else { load_books_by_ids_any(net, &ids)? };
-    Ok(ShelfData { raw, books: books.into_iter().map(|b| (b.id, b)).collect() })
+    let fresh = |at: &std::time::Instant| now.saturating_duration_since(*at) < BOOK_META_TTL;
+    let missing: Vec<i64> = {
+        let c = lock_cache(cache);
+        ids.iter().copied().filter(|id| !c.books.get(id).is_some_and(|(at, _)| fresh(at))).collect()
+    };
+    let fetched = if missing.is_empty() { Vec::new() } else { fetch_books(&missing)? };
+    let mut c = lock_cache(cache);
+    c.books.retain(|_, (at, _)| fresh(at));
+    for id in &missing {
+        c.books.insert(*id, (now, None));
+    }
+    for b in fetched {
+        c.books.insert(b.id, (now, Some(b)));
+    }
+    let mut books = std::collections::HashMap::new();
+    for id in &ids {
+        if let Some((_, Some(b))) = c.books.get(id) {
+            // 缓存里的书这次没有重新解析: 补记封面地址 (休眠封面用, 那边的表会淘汰旧项)
+            crate::sleep::note_cover(b.id, &b.cover);
+            books.insert(*id, b.clone());
+        }
+    }
+    let data = ShelfData { raw, books };
+    if c.generation == generation {
+        c.last = Some((now, data.clone()));
+    }
+    Ok(data)
 }
 
 /// "2026-10-11T03:40:00.000Z" (UTC)
@@ -1506,6 +1608,73 @@ mod tests {
         let inner = s.level(Some("f1"));
         assert!(matches!(inner.as_slice(), [ShelfEntry::Book(b)] if b.id == 9));
         assert_eq!(s.folder_title("f1"), "存档");
+    }
+
+    /// 嵌套文件夹的计数只算直接装着的项 (一遍计数与以前逐个扫描的结果一致)。
+    #[test]
+    fn shelf_folder_counts_are_direct_children() {
+        let v = json!({"data": [
+            {"id": "a", "type": "FOLDER", "index": 0, "parents": []},
+            {"id": "b", "type": "FOLDER", "index": 0, "parents": ["a"]},
+            {"id": 1, "type": "NOVEL", "index": 1, "parents": ["a"]},
+            {"id": 2, "type": "NOVEL", "index": 0, "parents": ["a", "b"]},
+            {"id": 3, "type": "NOVEL", "index": 1, "parents": ["a", "b"]},
+            {"id": "c", "type": "FOLDER", "index": 1, "parents": []},
+        ]});
+        let s = ShelfData { raw: shelf_items(&v), books: Default::default() };
+        let counts = |level: Vec<ShelfEntry>| level.into_iter().filter_map(|e| if let ShelfEntry::Folder { id, count, .. } = e { Some((id, count)) } else { None }).collect::<Vec<_>>();
+        assert_eq!(counts(s.level(None)), vec![("a".to_string(), 2), ("c".to_string(), 0)]);
+        assert_eq!(counts(s.level(Some("a"))), vec![("b".to_string(), 2)]);
+    }
+
+    /// 书目元数据按 id 缓存: 第二次进入书架只给新出现的书请求; 过期后重新请求; 写回后不再复用整张书架。
+    #[test]
+    fn shelf_metadata_is_cached_by_id() {
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
+        let cache = CacheLock::default();
+        let t0 = Instant::now();
+        let shelf = |ids: &[i64]| json!({"data": ids.iter().enumerate().map(|(i, id)| json!({"id": id, "type": "NOVEL", "index": i, "parents": []})).collect::<Vec<_>>()});
+        let requested: RefCell<Vec<Vec<i64>>> = RefCell::new(Vec::new());
+        // 服务器: 99 已下架 (不返回)
+        let books = |ids: &[i64]| {
+            requested.borrow_mut().push(ids.to_vec());
+            Ok(ids.iter().filter(|&&id| id != 99).map(|&id| BookItem { id, title: format!("b{id}"), ..Default::default() }).collect())
+        };
+        let titles = |d: &ShelfData| d.level(None).into_iter().map(|e| if let ShelfEntry::Book(b) = e { b.title } else { String::new() }).collect::<Vec<_>>();
+
+        let d = load_shelf_in(&cache, t0, || Ok(shelf(&[1, 2, 99])), books).unwrap();
+        assert_eq!(titles(&d), ["b1", "b2"]);
+        assert!(recent_shelf_in(&cache, t0 + Duration::from_secs(30), Duration::from_secs(60)).is_some());
+        assert!(recent_shelf_in(&cache, t0 + Duration::from_secs(61), Duration::from_secs(60)).is_none());
+
+        // 一分钟后: 新加了 3, 只请求 3 (99 记着没有, 不再请求)
+        let d = load_shelf_in(&cache, t0 + Duration::from_secs(60), || Ok(shelf(&[3, 1, 2, 99])), books).unwrap();
+        assert_eq!(titles(&d), ["b3", "b1", "b2"]);
+        // 全都在缓存里: 不请求元数据
+        load_shelf_in(&cache, t0 + Duration::from_secs(90), || Ok(shelf(&[3, 1])), books).unwrap();
+        assert_eq!(*requested.borrow(), vec![vec![1, 2, 99], vec![3]]);
+
+        // 过期: 1、2、99 重新请求, 3 还新鲜
+        load_shelf_in(&cache, t0 + BOOK_META_TTL + Duration::from_secs(1), || Ok(shelf(&[1, 2, 3, 99])), books).unwrap();
+        assert_eq!(requested.borrow().last().unwrap(), &vec![1, 2, 99]);
+
+        // 写回之后: 不复用整张书架; 写回前发出、之后才完成的加载也不算数
+        forget_shelf_in(&cache);
+        assert!(recent_shelf_in(&cache, t0 + BOOK_META_TTL + Duration::from_secs(2), Duration::from_secs(60)).is_none());
+        let now = t0 + BOOK_META_TTL + Duration::from_secs(3);
+        load_shelf_in(&cache, now, || {
+            forget_shelf_in(&cache);
+            Ok(shelf(&[1]))
+        }, books)
+        .unwrap();
+        assert!(recent_shelf_in(&cache, now, Duration::from_secs(60)).is_none());
+
+        // 元数据请求失败: 整个加载失败 (与以前一样), 缓存不变
+        let n = requested.borrow().len();
+        assert!(load_shelf_in(&cache, now, || Ok(shelf(&[1, 4])), |_| Err("断网".to_string())).is_err());
+        assert_eq!(requested.borrow().len(), n);
+        assert!(load_shelf_in(&cache, now, || Err("断网".to_string()), books).is_err());
     }
 
     #[test]
