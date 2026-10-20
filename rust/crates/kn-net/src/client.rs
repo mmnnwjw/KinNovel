@@ -456,7 +456,7 @@ impl Client {
         let token = self.0.session.get_str("Token").filter(|s| !s.is_empty());
         let updated = self.0.session.get("TokenUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
         if let Some(t) = &token {
-            if now_epoch_secs() - updated < 25.0 {
+            if now_epoch_secs() - updated < token_reuse_secs(t) {
                 return Ok(Some(t.clone()));
             }
         }
@@ -516,12 +516,7 @@ impl Client {
     fn cache_set(&self, key: String, value: Value, ttl: Duration) {
         let mut cache = self.0.cache.lock().unwrap();
         cache.insert(key, CacheEntry { expires: Instant::now() + ttl, value });
-        if cache.len() > 128 {
-            let drop_keys: Vec<String> = cache.keys().take(64).cloned().collect();
-            for k in drop_keys {
-                cache.remove(&k);
-            }
-        }
+        evict_cache(&mut cache, Instant::now());
     }
 
     pub fn invoke(&self, method: &str, params: Value, priority: i32, cache_ttl: Duration) -> Result<Value, NetError> {
@@ -954,8 +949,10 @@ fn get_access_token(inner: &Arc<Inner>) -> Result<Option<String>, NetError> {
         let _guard = inner.refresh_lock.lock().unwrap();
         let token = inner.session.get_str("Token").filter(|s| !s.is_empty());
         let updated = inner.session.get("TokenUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        if token.is_some() && now_epoch_secs() - updated < 25.0 {
-            return Ok(token);
+        if let Some(t) = &token {
+            if now_epoch_secs() - updated < token_reuse_secs(t) {
+                return Ok(token);
+            }
         }
     }
     if !inner.session.has_refresh_token() {
@@ -972,6 +969,54 @@ fn get_access_token(inner: &Arc<Inner>) -> Result<Option<String>, NetError> {
             }
         }
     }
+}
+
+const CACHE_MAX: usize = 128;
+const CACHE_KEEP: usize = 64;
+
+/// 超过 `CACHE_MAX` 条时先删过期的, 还多就按到期时间删最早到期的, 留 `CACHE_KEEP` 条。
+fn evict_cache(cache: &mut HashMap<String, CacheEntry>, now: Instant) {
+    if cache.len() <= CACHE_MAX {
+        return;
+    }
+    cache.retain(|_, e| e.expires > now);
+    if cache.len() <= CACHE_KEEP {
+        return;
+    }
+    let mut by_expiry: Vec<(Instant, String)> = cache.iter().map(|(k, e)| (e.expires, k.clone())).collect();
+    by_expiry.sort_unstable();
+    let excess = cache.len() - CACHE_KEEP;
+    for (_, k) in by_expiry.into_iter().take(excess) {
+        cache.remove(&k);
+    }
+}
+
+/// 不是 JWT 或缺少时间字段时, 访问令牌拿到后复用的秒数 (与 api.py 相同)。
+const TOKEN_REUSE_FALLBACK_SECS: f64 = 25.0;
+
+/// 访问令牌从 `TokenUpdatedAt` (本机时间) 起可复用多少秒。JWT 取它自己的有效期
+/// `exp - nbf` (没有 nbf 用 iat) 再提前 5 秒, 只用差值, 不和本机时钟比 (Kindle
+/// 的时钟可能偏差几分钟)。2026-10 服务器的令牌有效期是 30 秒 → 25 秒, 与原来一致。
+/// 解不出时用原来的 25 秒; 服务器提前作废时还有 401 → 刷新 → 重试兜底。
+fn token_reuse_secs(token: &str) -> f64 {
+    jwt_lifetime_secs(token).map(|life| (life - 5.0).max(0.0)).unwrap_or(TOKEN_REUSE_FALLBACK_SECS)
+}
+
+/// JWT 载荷里的 `exp - nbf` (或 `exp - iat`), 不验签名。
+fn jwt_lifetime_secs(token: &str) -> Option<f64> {
+    use base64::Engine;
+    let mut parts = token.split('.');
+    let (_header, payload, _sig) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let payload = payload.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_f64()?;
+    let start = claims.get("nbf").and_then(Value::as_f64).or_else(|| claims.get("iat").and_then(Value::as_f64))?;
+    let life = exp - start;
+    (life.is_finite() && life > 0.0).then_some(life)
 }
 
 fn refresh_access_token_inner(inner: &Arc<Inner>) -> Result<Option<String>, NetError> {
@@ -1045,6 +1090,78 @@ mod tests {
         let a = json!({"b": 1, "a": 2});
         let b = json!({"a": 2, "b": 1});
         assert_eq!(canonical_json(&a), canonical_json(&b));
+    }
+
+    fn jwt(claims: &Value) -> String {
+        use base64::Engine;
+        let enc = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        format!("{}.{}.c2ln", enc(&json!({"alg": "HS256", "typ": "JWT"})), enc(claims))
+    }
+
+    #[test]
+    fn token_reuse_follows_jwt_lifetime() {
+        // 服务器现在的令牌: nbf..exp 30 秒 → 复用 25 秒
+        assert_eq!(token_reuse_secs(&jwt(&json!({"nbf": 1_000, "exp": 1_030, "iat": 1_000}))), 25.0);
+        // 更长的有效期 (只看差值, 本机时钟无关; 已过期的旧时间戳也一样)
+        assert_eq!(token_reuse_secs(&jwt(&json!({"iat": 100, "exp": 3_700}))), 3_595.0);
+        // nbf 优先于 iat
+        assert_eq!(token_reuse_secs(&jwt(&json!({"nbf": 10, "iat": 0, "exp": 70}))), 55.0);
+        // 快到期 / 极短: 不复用
+        assert_eq!(token_reuse_secs(&jwt(&json!({"nbf": 0, "exp": 3}))), 0.0);
+    }
+
+    #[test]
+    fn token_reuse_falls_back_to_25_seconds() {
+        for token in [
+            "opaque-token".to_string(),
+            "a.b.c".to_string(),
+            "a.!!!.c".to_string(),
+            jwt(&json!({"exp": 2_000_000_000})),
+            jwt(&json!({"nbf": 100})),
+            jwt(&json!({"nbf": 100, "exp": 50})),
+            jwt(&json!({"nbf": "x", "exp": 130})),
+            format!("{}.x", jwt(&json!({"nbf": 0, "exp": 30}))),
+        ] {
+            assert_eq!(token_reuse_secs(&token), 25.0, "{token}");
+        }
+    }
+
+    #[test]
+    fn token_reuse_tolerates_padding() {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::URL_SAFE.encode(json!({"nbf": 0, "exp": 30}).to_string());
+        assert_eq!(token_reuse_secs(&format!("e30.{payload}.sig")), 25.0);
+        let payload = base64::engine::general_purpose::URL_SAFE.encode(json!({"nbf": 0, "exp": 600}).to_string());
+        assert!(payload.ends_with('='), "测试数据应带填充");
+        assert_eq!(token_reuse_secs(&format!("e30.{payload}.sig")), 595.0);
+    }
+
+    #[test]
+    fn cache_eviction_drops_expired_then_soonest() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        let entry = |secs: u64| CacheEntry { expires: now + Duration::from_secs(secs), value: Value::Null };
+        for i in 0..CACHE_MAX as u64 {
+            cache.insert(format!("k{i}"), entry(10 + i));
+        }
+        cache.insert("newest".into(), entry(10_000));
+        evict_cache(&mut cache, now);
+        assert_eq!(cache.len(), CACHE_KEEP);
+        assert!(cache.contains_key("newest"));
+        assert!(cache.contains_key(&format!("k{}", CACHE_MAX - 1)));
+        assert!(!cache.contains_key("k0"));
+
+        // 过期的先删, 删完不超过上限就不再动未过期的
+        let mut cache = HashMap::new();
+        for i in 0..100 {
+            cache.insert(format!("old{i}"), CacheEntry { expires: now, value: Value::Null });
+        }
+        for i in 0..40 {
+            cache.insert(format!("live{i}"), entry(1));
+        }
+        evict_cache(&mut cache, now);
+        assert_eq!(cache.len(), 40);
+        assert!(cache.keys().all(|k| k.starts_with("live")));
     }
 
     #[test]

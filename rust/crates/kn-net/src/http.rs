@@ -39,6 +39,15 @@ impl ServerUrl {
     pub fn ws_scheme(&self) -> &'static str {
         if self.secure { "wss" } else { "ws" }
     }
+
+    /// `Host` 头: 非默认端口时带上端口 (RFC 7230 §5.4)。
+    pub fn host_header(&self) -> String {
+        if self.port == if self.secure { 443 } else { 80 } {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 pub struct HttpResponse {
@@ -74,7 +83,7 @@ pub fn request(
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
 
-    let mut request_text = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\n", url.host);
+    let mut request_text = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\n", url.host_header());
     for (k, v) in headers {
         request_text.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -105,7 +114,7 @@ pub fn download_with(url: &str, limit: usize, timeout: Duration, tls: Arc<Client
         stream.set_write_timeout(Some(timeout)).ok();
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: KinNovel/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-            parsed.host
+            parsed.host_header()
         );
         stream.write_all(request.as_bytes())?;
         stream.flush()?;
@@ -115,16 +124,68 @@ pub fn download_with(url: &str, limit: usize, timeout: Duration, tls: Arc<Client
             200 => return Ok(body),
             301 | 302 | 303 | 307 | 308 => {
                 let location = header("location").ok_or_else(|| NetError::protocol("重定向缺少 Location"))?;
-                url = if location.starts_with("http://") || location.starts_with("https://") {
-                    location
-                } else {
-                    format!("{server}{}", if location.starts_with('/') { location } else { format!("/{location}") })
-                };
+                url = resolve_location(&server, &path, location.trim());
             }
             _ => return Err(NetError::api(format!("下载失败 (HTTP {status})"), status as i32)),
         }
     }
     Err(NetError::protocol("重定向次数过多"))
+}
+
+/// 按当前地址 (`server` = "scheme://host[:port]", `path` = "/a/b?q") 解析重定向的
+/// `Location` (RFC 3986 §5.2): 绝对地址、`//host/..`、`/..`、相对路径 (含 `./` `../`)、`?q`。
+fn resolve_location(server: &str, path: &str, location: &str) -> String {
+    let lower = location.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return location.to_string();
+    }
+    if let Some(rest) = location.strip_prefix("//") {
+        let scheme = server.split("://").next().unwrap_or("https");
+        return format!("{scheme}://{rest}");
+    }
+    let location = location.split('#').next().unwrap_or("");
+    let base_path = path.split(['?', '#']).next().unwrap_or("/");
+    if location.is_empty() {
+        return format!("{server}{path}");
+    }
+    if location.starts_with('?') {
+        return format!("{server}{base_path}{location}");
+    }
+    let (loc_path, query) = match location.find('?') {
+        Some(i) => location.split_at(i),
+        None => (location, ""),
+    };
+    let merged = if loc_path.starts_with('/') {
+        loc_path.to_string()
+    } else {
+        let dir = &base_path[..base_path.rfind('/').map(|i| i + 1).unwrap_or(0)];
+        format!("{}{loc_path}", if dir.is_empty() { "/" } else { dir })
+    };
+    format!("{server}{}{query}", remove_dot_segments(&merged))
+}
+
+/// RFC 3986 §5.2.4, 输入以 `/` 开头。
+fn remove_dot_segments(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let segments: Vec<&str> = path.split('/').skip(1).collect();
+    for (i, seg) in segments.iter().enumerate() {
+        let last = i + 1 == segments.len();
+        match *seg {
+            "." => {
+                if last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                out.pop();
+                if last {
+                    out.push("");
+                }
+            }
+            s => out.push(s),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 /// "https://host[:port]/path?q" → ("https://host[:port]", "/path?q")
@@ -211,7 +272,9 @@ fn read_response(stream: &mut NetStream, limit: usize, progress: &mut dyn FnMut(
                 raw.extend_from_slice(&tmp[..n]);
             }
             body.extend_from_slice(&raw[pos..pos + size]);
-            pos += size + 2;
+            // 用过的原始数据马上丢掉, 峰值内存不再是正文的两倍
+            raw.drain(..pos + size + 2);
+            pos = 0;
         }
         return Ok((status, headers, body));
     }
@@ -281,6 +344,93 @@ mod tests {
             s.write_all(&response).unwrap();
         });
         format!("http://127.0.0.1:{port}/img/a.jpg?size=10x10&height=256")
+    }
+
+    /// 依次接受 `responses.len()` 个连接, 第 i 个回 `responses[i]` (其中的 `{port}` 换成端口);
+    /// 收到的请求头经 channel 送回。
+    fn serve_seq(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let (mut req, mut buf) = (Vec::new(), [0u8; 4096]);
+                while find_subslice(&req, b"\r\n\r\n").is_none() {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&req).to_string());
+                s.write_all(response.replace("{port}", &port.to_string()).as_bytes()).unwrap();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx)
+    }
+
+    #[test]
+    fn host_header_carries_non_default_port() {
+        let (server, rx) = serve_seq(vec!["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".into()]);
+        assert_eq!(download(&format!("{server}/x"), 100, Duration::from_secs(5), tls()).unwrap(), b"ok");
+        let port = server.rsplit(':').next().unwrap();
+        assert!(rx.recv().unwrap().contains(&format!("\r\nHost: 127.0.0.1:{port}\r\n")));
+        assert_eq!(ServerUrl::parse("https://api.lightnovel.life").unwrap().host_header(), "api.lightnovel.life");
+        assert_eq!(ServerUrl::parse("http://h:80").unwrap().host_header(), "h");
+        assert_eq!(ServerUrl::parse("https://h:8443").unwrap().host_header(), "h:8443");
+    }
+
+    #[test]
+    fn redirects_resolve_against_the_current_url() {
+        let redirect = |loc: &str| format!("HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n");
+        let (server, rx) = serve_seq(vec![
+            redirect("c.jpg?v=2"),
+            redirect("../up/d.jpg"),
+            redirect("/root/e.jpg"),
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone".into(),
+        ]);
+        let body = download(&format!("{server}/img/a/b.jpg?x=1"), 100, Duration::from_secs(5), tls()).unwrap();
+        assert_eq!(body, b"done");
+        let lines: Vec<String> = rx.iter().take(4).map(|r| r.lines().next().unwrap().to_string()).collect();
+        assert_eq!(lines, [
+            "GET /img/a/b.jpg?x=1 HTTP/1.1",
+            "GET /img/a/c.jpg?v=2 HTTP/1.1",
+            "GET /img/up/d.jpg HTTP/1.1",
+            "GET /root/e.jpg HTTP/1.1",
+        ]);
+    }
+
+    #[test]
+    fn resolve_location_forms() {
+        let s = "https://img.example:8443";
+        assert_eq!(resolve_location(s, "/a/b?q", "http://other/x"), "http://other/x");
+        assert_eq!(resolve_location(s, "/a/b?q", "HTTPS://Other/x"), "HTTPS://Other/x");
+        assert_eq!(resolve_location(s, "/a/b?q", "//cdn.example/y.jpg"), "https://cdn.example/y.jpg");
+        assert_eq!(resolve_location("http://h", "/a/b", "//cdn/y"), "http://cdn/y");
+        assert_eq!(resolve_location(s, "/a/b?q", "/z"), "https://img.example:8443/z");
+        assert_eq!(resolve_location(s, "/a/b?q", "c"), "https://img.example:8443/a/c");
+        assert_eq!(resolve_location(s, "/a/b?q", "./c/"), "https://img.example:8443/a/c/");
+        assert_eq!(resolve_location(s, "/a/b?q", "../../../c"), "https://img.example:8443/c");
+        assert_eq!(resolve_location(s, "/a/b?q", ".."), "https://img.example:8443/");
+        assert_eq!(resolve_location(s, "/a/b?q", "?r=1"), "https://img.example:8443/a/b?r=1");
+        assert_eq!(resolve_location(s, "/a/b?q", "c#frag"), "https://img.example:8443/a/c");
+        assert_eq!(resolve_location(s, "/", "c?x=/y"), "https://img.example:8443/c?x=/y");
+    }
+
+    /// 很多小块 + 块头在读缓冲边界上: 解码结果不变 (每块之后丢掉原始数据)。
+    #[test]
+    fn download_many_chunks() {
+        let mut expected = Vec::new();
+        let mut raw = String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        for i in 0..3000 {
+            let chunk: String = std::iter::repeat((b'a' + (i % 26) as u8) as char).take(1 + i % 37).collect();
+            raw.push_str(&format!("{:x}\r\n{chunk}\r\n", chunk.len()));
+            expected.extend_from_slice(chunk.as_bytes());
+        }
+        raw.push_str("0\r\n\r\n");
+        let (server, _rx) = serve_seq(vec![raw]);
+        let body = download(&format!("{server}/big"), 1 << 20, Duration::from_secs(5), tls()).unwrap();
+        assert_eq!(body, expected);
     }
 
     fn tls() -> Arc<ClientConfig> {

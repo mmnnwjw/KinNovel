@@ -337,12 +337,12 @@ impl SignalRClient {
             }
             let mut handshake_done = false;
             while let Some(pos) = buf.iter().position(|&b| b == RECORD_SEPARATOR) {
-                let raw: Vec<u8> = buf.drain(..=pos).collect();
-                let text = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
-                let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                let record = parse_record(&buf[..pos]);
+                buf.drain(..=pos);
+                let parsed: Value = match record {
+                    None => continue,
+                    Some(r) => r.unwrap_or(Value::Null),
+                };
                 if let Some(err) = parsed.get("error").and_then(Value::as_str) {
                     let _ = socket.close(None);
                     return Err(NetError::network(format!("SignalR 握手失败: {err}")));
@@ -406,10 +406,17 @@ impl SignalRClient {
             let mut stop = self.keepalive_signal.stop.lock().unwrap();
             *stop = false;
         }
-        *handle = Some(std::thread::Builder::new()
+        // 内存紧张时建线程会失败: 记日志, 不保活 (空闲连接下次调用时重连)
+        match std::thread::Builder::new()
             .name("kn-net-signalr-keepalive".into())
             .spawn(move || strong.keepalive_loop())
-            .expect("spawn keepalive thread"));
+        {
+            Ok(h) => *handle = Some(h),
+            Err(e) => {
+                eprintln!("[net] 无法启动保活线程, 不保活: {e}");
+                *handle = None;
+            }
+        }
     }
 
     fn keepalive_loop(&self) {
@@ -527,14 +534,12 @@ impl SignalRClient {
         }
         let mut messages = Vec::new();
         while let Some(pos) = state.record_buffer.iter().position(|&b| b == RECORD_SEPARATOR) {
-            let raw: Vec<u8> = state.record_buffer.drain(..=pos).collect();
-            let text = String::from_utf8_lossy(&raw[..raw.len() - 1]).trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Value>(&text) {
-                Ok(v) => messages.push(v),
-                Err(_) => messages.push(json!({"type": -1, "raw": text})),
+            let parsed = parse_record(&state.record_buffer[..pos]);
+            state.record_buffer.drain(..=pos);
+            match parsed {
+                None => {}
+                Some(Ok(v)) => messages.push(v),
+                Some(Err(text)) => messages.push(json!({"type": -1, "raw": text})),
             }
         }
         Ok(messages)
@@ -576,8 +581,8 @@ impl SignalRClient {
                 }
             };
             state.last_used = Some(Instant::now());
-            for message in &messages {
-                self.handle_server_message(&mut state, message);
+            for mut message in messages {
+                self.handle_server_message(&mut state, &message);
                 if message.get("type").and_then(Value::as_i64) == Some(7) {
                     let err = message.get("error").and_then(Value::as_str).unwrap_or("服务器关闭连接");
                     let msg = err.to_string();
@@ -592,21 +597,22 @@ impl SignalRClient {
                         let status = if error.to_lowercase().contains("unauthorized") { 401 } else { 500 };
                         return Err(NetError::api(error.to_string(), status));
                     }
-                    let envelope = message.get("result").cloned().unwrap_or(Value::Null);
+                    // 按值取走 (章节响应是几百 KB 的 base64, 不复制)
+                    let mut envelope = message.get_mut("result").map(Value::take).unwrap_or(Value::Null);
                     if !envelope.is_object() {
                         return self.decode_response(envelope);
                     }
-                    let success = envelope_value(&envelope, "success").map(|v| v != Value::Bool(false)).unwrap_or(true);
+                    let success = envelope_take(&mut envelope, "success").map(|v| v != Value::Bool(false)).unwrap_or(true);
                     if !success {
-                        let text = envelope_value(&envelope, "msg")
+                        let text = envelope_take(&mut envelope, "msg")
                             .and_then(|v| v.as_str().map(str::to_string))
                             .unwrap_or_else(|| "请求失败".to_string());
-                        let status = envelope_value(&envelope, "status")
+                        let status = envelope_take(&mut envelope, "status")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(500) as i32;
                         return Err(NetError::api(text, status));
                     }
-                    let response = envelope_value(&envelope, "response").unwrap_or(Value::Null);
+                    let response = envelope_take(&mut envelope, "response").unwrap_or(Value::Null);
                     return self.decode_response(response);
                 }
             }
@@ -669,14 +675,31 @@ impl SignalRClient {
     }
 }
 
-fn envelope_value(envelope: &Value, key: &str) -> Option<Value> {
-    let obj = envelope.as_object()?;
+/// 取走 `envelope` 里名为 `key` 的值 (原样 / 全小写 / 全大写 / 首字母大写, 先找到的为准),
+/// 留下 `Null`。每个键只取一次。
+fn envelope_take(envelope: &mut Value, key: &str) -> Option<Value> {
+    let obj = envelope.as_object_mut()?;
     for candidate in [key.to_string(), key.to_lowercase(), key.to_uppercase(), capitalize(key)] {
-        if let Some(v) = obj.get(&candidate) {
-            return Some(v.clone());
+        if let Some(v) = obj.get_mut(&candidate) {
+            return Some(v.take());
         }
     }
     None
+}
+
+/// 一条 SignalR 记录 (不含 0x1E 分隔符): 空白记录为 `None`; 解析失败时给出
+/// 修剪过的文本。先直接从字节解析; 失败时按原来的方式 (有损 UTF-8 + Unicode 修剪) 再试,
+/// 结果与原来完全一致: 能直接解析的字节必是合法 UTF-8, 两端只有 JSON 空白。
+fn parse_record(raw: &[u8]) -> Option<Result<Value, String>> {
+    if let Ok(v) = serde_json::from_slice::<Value>(raw) {
+        return Some(Ok(v));
+    }
+    let text = String::from_utf8_lossy(raw);
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(serde_json::from_str::<Value>(text).map_err(|_| text.to_string()))
 }
 
 fn capitalize(s: &str) -> String {
@@ -705,6 +728,8 @@ fn translate_ws_err(err: tungstenite::Error) -> NetError {
         Error::ConnectionClosed | Error::AlreadyClosed => NetError::network("WebSocket 连接已关闭"),
         Error::Capacity(_) => NetError::protocol("WebSocket 消息超过上限"),
         Error::Protocol(p) => NetError::protocol(p.to_string()),
+        // 升级请求被拒 (令牌过期): 与协商的 401 一样, 由 Client 刷新令牌后重试
+        Error::Http(resp) if resp.status().as_u16() == 401 => NetError::api("WebSocket 连接未授权", 401),
         other => NetError::network(other.to_string()),
     }
 }
@@ -762,10 +787,42 @@ mod tests {
     }
 
     #[test]
-    fn envelope_value_matches_any_case() {
-        let envelope = json!({"Success": true, "msg": "ok"});
-        assert_eq!(envelope_value(&envelope, "success"), Some(Value::Bool(true)));
-        assert_eq!(envelope_value(&envelope, "Msg"), Some(Value::String("ok".into())));
-        assert_eq!(envelope_value(&envelope, "missing"), None);
+    fn envelope_take_matches_any_case() {
+        let mut envelope = json!({"Success": true, "msg": "ok"});
+        assert_eq!(envelope_take(&mut envelope, "success"), Some(Value::Bool(true)));
+        assert_eq!(envelope_take(&mut envelope, "Msg"), Some(Value::String("ok".into())));
+        assert_eq!(envelope_take(&mut envelope, "missing"), None);
+        // 原样的键优先于其它写法
+        let mut envelope = json!({"response": 1, "Response": 2});
+        assert_eq!(envelope_take(&mut envelope, "response"), Some(json!(1)));
+    }
+
+    /// 与原来 `from_utf8_lossy(..).trim()` + `from_str` 的结果逐条一致。
+    #[test]
+    fn parse_record_matches_the_old_lossy_path() {
+        fn old(raw: &[u8]) -> Option<Result<Value, String>> {
+            let text = String::from_utf8_lossy(raw).trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(serde_json::from_str::<Value>(&text).map_err(|_| text))
+        }
+        let cases: Vec<&[u8]> = vec![
+            b"",
+            b"  \r\n\t",
+            b"{}",
+            b" {\"type\":6} \n",
+            b"{\"type\":3,\"result\":\"abc\"}",
+            "\u{3000}{\"a\":1}\u{a0}".as_bytes(),
+            "\u{feff}{}".as_bytes(),
+            b"{\"a\":\"\xff\xfe\"}",
+            b"\xff{}",
+            b"not json",
+            b"{\"a\":1} trailing",
+            "\u{3000}".as_bytes(),
+        ];
+        for raw in cases {
+            assert_eq!(parse_record(raw), old(raw), "{raw:?}");
+        }
     }
 }

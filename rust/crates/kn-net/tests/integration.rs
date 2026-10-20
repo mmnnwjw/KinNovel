@@ -251,6 +251,43 @@ fn access_token_refresh_on_401_then_retries() {
     assert_eq!(seen_tokens.lock().unwrap().len(), 2, "expected one failed + one retried invocation");
 }
 
+/// A token the client still believes valid is refused with HTTP 401 while
+/// connecting (at negotiate, or at the WebSocket upgrade): one refresh, one
+/// retry, success.
+fn connect_401_recovers(gate_upgrade: bool) {
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let refreshes_clone = refreshes.clone();
+    let server = FakeServer::start(FakeServerConfig {
+        refresh_handler: Some(Arc::new(move |_| {
+            refreshes_clone.fetch_add(1, Ordering::SeqCst);
+            (200, json!({"Success": true, "Response": "fresh-token"}))
+        })),
+        accept_token: Some("fresh-token".into()),
+        gate_upgrade,
+        ..FakeServerConfig::default()
+    });
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let client = client_with_seeded_session(
+        &server,
+        "connect-401",
+        &json!({"Token": "revoked-token", "RefreshToken": "refresh-1", "TokenUpdatedAt": now}),
+    );
+    let result = client.invoke("GetMyInfo", json!({}), 0, Duration::ZERO).expect("401 while connecting should refresh and retry");
+    assert_eq!(result, json!({"ok": true}));
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(client.get_access_token().unwrap().as_deref(), Some("fresh-token"));
+}
+
+#[test]
+fn negotiate_401_refreshes_and_retries() {
+    connect_401_recovers(false);
+}
+
+#[test]
+fn websocket_upgrade_401_refreshes_and_retries() {
+    connect_401_recovers(true);
+}
+
 /// Server that answers "unauthorized" until a login happened, with a dead
 /// refresh token: (server, login count, hub call count).
 fn dead_session_server(login_ok: bool) -> (FakeServer, Arc<AtomicUsize>, Arc<AtomicUsize>) {

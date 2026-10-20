@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -62,7 +62,17 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
+/// 每种设置只建一次 `ClientConfig`: rustls 的会话缓存 (默认内存里 256 个主机,
+/// TLS 1.3 票据与 TLS 1.2 会话 ID/票据) 挂在它上面, 共用同一个才能复用会话,
+/// 省掉完整握手和证书链验证。调用方都只读 (`ClientConnection::new`), 不改设置。
 pub fn tls_config(strict: bool) -> Arc<ClientConfig> {
+    static STRICT: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    static LOOSE: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    let cell = if strict { &STRICT } else { &LOOSE };
+    cell.get_or_init(|| build_tls_config(strict)).clone()
+}
+
+fn build_tls_config(strict: bool) -> Arc<ClientConfig> {
     if strict {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -177,5 +187,17 @@ impl Write for NetStream {
             NetStream::Plain(s) => s.flush(),
             NetStream::Tls(s) => s.flush(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_is_shared_per_mode() {
+        assert!(Arc::ptr_eq(&tls_config(true), &tls_config(true)));
+        assert!(Arc::ptr_eq(&tls_config(false), &tls_config(false)));
+        assert!(!Arc::ptr_eq(&tls_config(true), &tls_config(false)));
     }
 }

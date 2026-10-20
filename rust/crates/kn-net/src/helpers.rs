@@ -31,11 +31,31 @@ pub fn int_items(value: &Value) -> Vec<i64> {
 pub fn normalize_data(envelope: Value, key: &str) -> Value {
     match envelope {
         Value::Object(mut obj) => {
-            let data = obj.get(key).cloned().unwrap_or(Value::Null);
-            obj.insert(key.to_string(), Value::Array(dict_items(&data)));
+            replace_in_place(&mut obj, key, dict_items_owned);
             Value::Object(obj)
         }
         other => other,
+    }
+}
+
+/// 同 [`dict_items`], 按值取走, 不复制元素。
+fn dict_items_owned(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(arr) => arr.into_iter().filter(Value::is_object).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `obj[key] = Array(f(旧值))`, 原地替换 (不复制旧值; 开了 preserve_order 时键的位置也不变)。
+fn replace_in_place(obj: &mut Map<String, Value>, key: &str, f: fn(Value) -> Vec<Value>) {
+    match obj.get_mut(key) {
+        Some(slot) => {
+            let data = std::mem::take(slot);
+            *slot = Value::Array(f(data));
+        }
+        None => {
+            obj.insert(key.to_string(), Value::Array(f(Value::Null)));
+        }
     }
 }
 
@@ -45,7 +65,7 @@ pub fn normalize_list(value: Value, key: &str) -> Value {
     if value.is_object() {
         normalize_data(value, key)
     } else {
-        Value::Array(dict_items(&value))
+        Value::Array(dict_items_owned(value))
     }
 }
 
@@ -69,12 +89,15 @@ pub fn novel_items(value: &Value) -> Vec<Value> {
 pub fn novel_data(value: Value, key: &str) -> Value {
     match value {
         Value::Object(mut obj) => {
-            let data = obj.get(key).cloned().unwrap_or(Value::Null);
-            obj.insert(key.to_string(), Value::Array(novel_items(&data)));
+            replace_in_place(&mut obj, key, novel_items_owned);
             Value::Object(obj)
         }
-        other => Value::Array(novel_items(&other)),
+        other => Value::Array(novel_items_owned(other)),
     }
+}
+
+fn novel_items_owned(value: Value) -> Vec<Value> {
+    dict_items_owned(value).into_iter().filter(|item| !is_comic(item)).collect()
 }
 
 pub fn object(pairs: Vec<(&str, Value)>) -> Value {
@@ -127,6 +150,17 @@ mod tests {
         let normalized = normalize_list(envelope, "Data");
         assert_eq!(normalized["Data"], json!([{"Id": 1}]));
         assert_eq!(normalized["TotalPages"], 2);
+    }
+
+    #[test]
+    fn normalize_keeps_key_order_and_missing_key() {
+        let envelope = json!({"A": 1, "Data": [{"Id": 1}, null], "Z": 2});
+        let keys: Vec<String> = normalize_data(envelope, "Data").as_object().unwrap().keys().cloned().collect();
+        let expected: Vec<String> = json!({"A": 1, "Data": [], "Z": 2}).as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, expected);
+        assert_eq!(normalize_data(json!({"X": 1}), "Data")["Data"], json!([]));
+        assert_eq!(novel_data(json!({"Data": "junk"}), "Data")["Data"], json!([]));
+        assert_eq!(novel_data(json!([{"Type": "Comic"}, {"Id": 3}, 1]), "Data"), json!([{"Id": 3}]));
     }
 
     #[test]

@@ -45,6 +45,11 @@ pub struct FakeServerConfig {
     /// If true, the WS hub never ACKs the SignalR protocol handshake
     /// (used to make `connect` fail/time out).
     pub reject_handshake: bool,
+    /// Some(token): answer HTTP 401 unless the request carries this access
+    /// token -- at negotiate (`Authorization` header), or at the WebSocket
+    /// upgrade (`access_token=` query) when `gate_upgrade` is set.
+    pub accept_token: Option<String>,
+    pub gate_upgrade: bool,
 }
 
 impl Default for FakeServerConfig {
@@ -54,6 +59,8 @@ impl Default for FakeServerConfig {
             refresh_handler: None,
             login_handler: None,
             reject_handshake: false,
+            accept_token: None,
+            gate_upgrade: false,
         }
     }
 }
@@ -140,6 +147,19 @@ fn handle_connection(mut stream: TcpStream, config: Arc<FakeServerConfig>, ws_co
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
+
+    if let Some(expected) = &config.accept_token {
+        let gated = if config.gate_upgrade { is_upgrade } else { path.starts_with("/hub/api/negotiate") };
+        let authorized = if config.gate_upgrade {
+            path.contains(&format!("access_token={expected}"))
+        } else {
+            head.contains(&format!("\r\nAuthorization: Bearer {expected}"))
+        };
+        if gated && !authorized {
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+    }
 
     if is_upgrade {
         handle_ws(stream, buf, header_end, config, ws_connections);
