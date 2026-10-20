@@ -133,7 +133,7 @@ fn number(config: &crate::store::Config, s: &Setting) -> f64 {
             let v = config.string(s.key, "");
             options.iter().position(|(value, _)| *value == v).unwrap_or(0) as f64
         }
-        Kind::LockToggle | Kind::LockChange => super::lock::configured_pin(config).is_some() as u8 as f64,
+        Kind::LockToggle | Kind::LockChange => super::lock::pin_set(config) as u8 as f64,
     }
 }
 
@@ -272,7 +272,7 @@ impl Page<KinNovel> for SettingsPage {
                 let settings = GROUPS[self.group].1;
                 let index = ((id - SET_BASE) / 4) as usize;
                 if let Some(s) = settings.get(index) {
-                    let on = super::lock::configured_pin(&cx.app.config).is_some();
+                    let on = super::lock::pin_set(&cx.app.config);
                     match s.kind {
                         Kind::LockToggle if on => return Transition::Push(Box::new(super::lock::LockPage::verify(super::lock::After::Disable))),
                         Kind::LockToggle => return Transition::Push(Box::new(super::lock::LockPage::enable())),

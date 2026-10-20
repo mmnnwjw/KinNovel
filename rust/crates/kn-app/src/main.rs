@@ -152,7 +152,7 @@ impl App for KinNovel {
 
     fn on_resume(&mut self) {
         // 休眠唤醒: 设了锁屏密码就重新上锁 (锁屏页已经在显示时不再叠一层)
-        if pages::lock::configured_pin(&self.config).is_some() && !self.lock_showing {
+        if pages::lock::pin_set(&self.config) && !self.lock_showing {
             self.unlocked = false;
             self.lock_pending = true;
         }
@@ -216,6 +216,7 @@ impl KinNovel {
         if !config.contains("lock_pin") {
             config.set("lock_pin", serde_json::Value::from(""));
         }
+        pages::lock::migrate(&mut config);
         KinNovel {
             paths,
             config,
@@ -245,7 +246,7 @@ impl KinNovel {
 
     /// 设了锁屏密码且本次还没解锁。
     fn locked(&self) -> bool {
-        !self.unlocked && pages::lock::configured_pin(&self.config).is_some()
+        !self.unlocked && pages::lock::pin_set(&self.config)
     }
 
     /// 锁屏页输对了密码。

@@ -1,4 +1,5 @@
-//! 锁屏密码 (设置 `lock_pin`: 6 位数字; 设置 → 内容 → 锁屏密码 / 修改锁屏密码)。
+//! 锁屏密码 (6 位数字; 设置 → 内容 → 锁屏密码 / 修改锁屏密码)。设置 `lock_pin` 存加盐摘要
+//! ([`hash_pin`]); 旧版存的是明文, 启动时换成摘要 ([`migrate`])。连续输错几次后要等一会儿才能再输。
 //! - 启动: 代替首页 (`KinNovel::home_page`), 解锁后回首页 (书架 / 欢迎页)。
 //! - 休眠唤醒: 盖在原来的页面上 (`KinNovel::take_transition`), 解锁后返回。
 //! - 设置页: 开启 = 输两遍新密码; 关闭 / 修改 = 先输当前密码。
@@ -13,7 +14,10 @@ use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, Ink};
 use kn_ui::{Backdrop, Cx, HitId, Page, PageId, RefreshHint, Transition};
 use serde_json::Value;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use crate::store::Config;
 use crate::KinNovel;
 
 pub const PIN_LEN: usize = 6;
@@ -21,13 +25,144 @@ const KEY_BASE: u32 = 10;
 const HIT_DELETE: HitId = HitId(20);
 const HIT_EXIT: HitId = HitId(21);
 
-/// 设置里的锁屏密码: 恰好 6 位数字才算 (字符串, 或不以 0 开头的 6 位整数); 其余一律视为未设置。
-pub fn configured_pin(config: &crate::store::Config) -> Option<String> {
+const TIMER_RETRY: u32 = 1;
+/// 连续输错这么多次后要等一会儿才能再输
+const FREE_TRIES: u32 = 5;
+const FIRST_WAIT: Duration = Duration::from_secs(30);
+/// 保存的格式: `sha256:<轮数>:<盐 hex>:<摘要 hex>`
+const HASH_PREFIX: &str = "sha256";
+const HASH_ROUNDS: u32 = 10_000;
+const SALT_LEN: usize = 16;
+
+/// 旧格式: 明文 6 位数字 (字符串, 或不以 0 开头的 6 位整数)。
+fn plain_pin(config: &Config) -> Option<String> {
     let pin = match config.int("lock_pin", -1) {
         n @ 100_000..=999_999 => n.to_string(),
         _ => config.string("lock_pin", ""),
     };
     (pin.len() == PIN_LEN && pin.bytes().all(|b| b.is_ascii_digit())).then_some(pin)
+}
+
+/// 解析保存的摘要: (轮数, 盐, 摘要)。
+fn parse_hash(text: &str) -> Option<(u32, Vec<u8>, [u8; 32])> {
+    let mut parts = text.split(':');
+    if parts.next()? != HASH_PREFIX {
+        return None;
+    }
+    let rounds: u32 = parts.next()?.parse().ok().filter(|r| (1..=1_000_000).contains(r))?;
+    let salt = hex_decode(parts.next()?).filter(|s| !s.is_empty())?;
+    let digest: [u8; 32] = hex_decode(parts.next()?)?.try_into().ok()?;
+    parts.next().is_none().then_some((rounds, salt, digest))
+}
+
+fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len()).step_by(2).map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok()).collect()
+}
+
+fn digest(rounds: u32, salt: &[u8], pin: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut d: [u8; 32] = Sha256::new().chain_update(salt).chain_update(pin.as_bytes()).finalize().into();
+    for _ in 1..rounds {
+        d = Sha256::new().chain_update(salt).chain_update(d).finalize().into();
+    }
+    d
+}
+
+/// 随机盐: Linux 上读 /dev/urandom, 读不到时用标准库的随机哈希种子 (取自系统随机数) 加时间。
+fn random_salt() -> [u8; SALT_LEN] {
+    let mut salt = [0u8; SALT_LEN];
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut salt)).is_ok() {
+            return salt;
+        }
+    }
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    for (i, chunk) in salt.chunks_mut(8).enumerate() {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_usize(i);
+        h.write_u32(std::process::id());
+        chunk.copy_from_slice(&h.finish().to_le_bytes()[..chunk.len()]);
+    }
+    salt
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 要保存的形式 (加盐摘要, 不存明文)。
+pub fn hash_pin(pin: &str) -> String {
+    let salt = random_salt();
+    format!("{HASH_PREFIX}:{HASH_ROUNDS}:{}:{}", hex(&salt), hex(&digest(HASH_ROUNDS, &salt, pin)))
+}
+
+/// 设了锁屏密码: 摘要, 或旧版的明文 6 位数字; 其余一律视为未设置。
+pub fn pin_set(config: &Config) -> bool {
+    plain_pin(config).is_some() || parse_hash(&config.string("lock_pin", "")).is_some()
+}
+
+/// 输入的密码与设置里的相符 (两种格式都认)。
+pub fn pin_matches(config: &Config, entered: &str) -> bool {
+    if let Some(pin) = plain_pin(config) {
+        return pin == entered;
+    }
+    let Some((rounds, salt, want)) = parse_hash(&config.string("lock_pin", "")) else { return false };
+    let got = digest(rounds, &salt, entered);
+    got.iter().zip(want.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// 启动时把旧版的明文密码换成摘要 (原来的密码照样能用)。
+pub fn migrate(config: &mut Config) {
+    if let Some(pin) = plain_pin(config) {
+        config.set("lock_pin", Value::from(hash_pin(&pin)));
+    }
+}
+
+/// 连续输错的次数和要等到的时刻 (只在内存里, 解锁 / 验证成功后清零)
+struct Throttle {
+    fails: u32,
+    until: Option<Instant>,
+}
+
+static THROTTLE: Mutex<Throttle> = Mutex::new(Throttle { fails: 0, until: None });
+
+fn throttle() -> std::sync::MutexGuard<'static, Throttle> {
+    THROTTLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 还要等多久才能再输。
+fn wait_left() -> Option<Duration> {
+    let until = throttle().until?;
+    until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())
+}
+
+/// 输错一次: 前几次不限制, 之后每次都要等, 等待时间翻倍 (最长约 32 分钟)。
+fn record_failure() {
+    let mut t = throttle();
+    t.fails += 1;
+    if t.fails >= FREE_TRIES {
+        t.until = Some(Instant::now() + FIRST_WAIT * (1u32 << (t.fails - FREE_TRIES).min(6)));
+    }
+}
+
+fn record_success() {
+    *throttle() = Throttle { fails: 0, until: None };
+}
+
+fn wait_text(left: Duration) -> String {
+    let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    if secs <= 90 {
+        format!("错误太多, 请 {secs} 秒后再试")
+    } else {
+        format!("错误太多, 请 {} 分钟后再试", secs.div_ceil(60))
+    }
 }
 
 /// 验证当前密码之后做什么
@@ -85,9 +220,17 @@ impl LockPage {
         matches!(self.mode, Mode::Unlock { .. })
     }
 
-    fn prompt(&self) -> &'static str {
+    /// 这一步要核对已设的密码 (受输错次数限制)
+    fn checks_pin(&self) -> bool {
+        matches!(self.mode, Mode::Unlock { .. } | Mode::Verify(_))
+    }
+
+    fn prompt(&self) -> String {
+        if let Some(left) = wait_left().filter(|_| self.checks_pin()) {
+            return wait_text(left);
+        }
         if let Some(m) = self.message {
-            return m;
+            return m.to_string();
         }
         match self.mode {
             Mode::Unlock { .. } => "输入密码",
@@ -95,10 +238,16 @@ impl LockPage {
             Mode::New => "设置 6 位数字密码",
             Mode::Confirm(_) => "再输入一次",
         }
+        .to_string()
     }
 
     fn press(&mut self, cx: &mut Cx<KinNovel>, digit: char) -> Transition<KinNovel> {
         if self.digits.len() >= PIN_LEN {
+            return Transition::None;
+        }
+        if self.checks_pin() && wait_left().is_some() {
+            // 等待中不收输入, 只刷新剩余时间
+            cx.request_redraw(RefreshHint::Ui);
             return Transition::None;
         }
         self.digits.push(digit);
@@ -108,7 +257,14 @@ impl LockPage {
             return Transition::None;
         }
         let entered = std::mem::take(&mut self.digits);
-        let correct = configured_pin(&cx.app.config).is_none_or(|pin| pin == entered);
+        let correct = !pin_set(&cx.app.config) || pin_matches(&cx.app.config, &entered);
+        if self.checks_pin() {
+            if correct {
+                record_success();
+            } else {
+                record_failure();
+            }
+        }
         match self.mode.clone() {
             Mode::Unlock { resume } if correct => {
                 cx.app.unlock();
@@ -125,7 +281,7 @@ impl LockPage {
             Mode::Unlock { .. } | Mode::Verify(_) => self.message = Some("密码错误"),
             Mode::New => self.mode = Mode::Confirm(entered),
             Mode::Confirm(first) if first == entered => {
-                cx.app.config.set("lock_pin", Value::from(entered));
+                cx.app.config.set("lock_pin", Value::from(hash_pin(&entered)));
                 // 本次运行已经在用了, 不必马上再解锁
                 cx.app.unlock();
                 cx.request_redraw(RefreshHint::Clean);
@@ -176,6 +332,10 @@ impl Page<KinNovel> for LockPage {
             }
             _ => frame.fill_rect(frame.bounds(), theme.background),
         }
+        // 等待结束时刷新提示
+        if let Some(left) = wait_left().filter(|_| self.checks_pin()) {
+            cx.after(left, TIMER_RETRY);
+        }
         let chain = cx.app.ui_fonts.clone();
         let mut ink = Ink { fonts: &*cx.fonts, glyphs: &mut *cx.glyphs, chain: &chain };
 
@@ -194,7 +354,8 @@ impl Page<KinNovel> for LockPage {
 
         let body_h = (m.body * 1.4) as i32;
         let mut y = card.y + m.margin as i32 * 3 / 4;
-        ink.text_centered(frame, Rect::new(card.x, y, card.w, body_h as u32), self.prompt(), m.body, theme.foreground);
+        let prompt = ink.fit(&self.prompt(), m.body, (card.w as i32 - 2 * m.margin as i32) as f32);
+        ink.text_centered(frame, Rect::new(card.x, y, card.w, body_h as u32), &prompt, m.body, theme.foreground);
         y += body_h + m.margin as i32 / 4;
         let dot = (m.body * 0.55) as i32;
         let gap = dot;
@@ -234,6 +395,12 @@ impl Page<KinNovel> for LockPage {
         }
     }
 
+    fn on_timer(&mut self, cx: &mut Cx<KinNovel>, token: u32) {
+        if token == TIMER_RETRY {
+            cx.request_redraw(RefreshHint::Ui);
+        }
+    }
+
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
         let InputEvent::Gesture(g) = event else { return Transition::None };
         if g.kind != GestureKind::Tap {
@@ -260,22 +427,71 @@ impl Page<KinNovel> for LockPage {
 
 #[cfg(test)]
 mod tests {
-    use super::configured_pin;
-    use crate::store::Config;
+    use super::*;
     use serde_json::json;
+
+    fn config(v: Value) -> Config {
+        let mut c = Config::in_memory();
+        c.set("lock_pin", v);
+        c
+    }
 
     #[test]
     fn only_six_digits_count() {
-        let pin = |v| {
-            let mut c = Config::in_memory();
-            c.set("lock_pin", v);
-            configured_pin(&c)
-        };
+        let pin = |v| plain_pin(&config(v));
         assert_eq!(pin(json!("012345")), Some("012345".into()));
         assert_eq!(pin(json!(123456)), Some("123456".into()));
         for bad in [json!(""), json!("12345"), json!("1234567"), json!("12a456"), json!(" 12345"), json!("１２３４５６"), json!(12345), json!(null), json!(true)] {
             assert_eq!(pin(bad.clone()), None, "{bad}");
+            assert!(!pin_set(&config(bad.clone())), "{bad}");
         }
-        assert_eq!(configured_pin(&Config::in_memory()), None);
+        assert!(!pin_set(&Config::in_memory()));
+    }
+
+    #[test]
+    fn plain_pins_become_salted_hashes_and_keep_working() {
+        for (old, entered) in [(json!("012345"), "012345"), (json!(123456), "123456")] {
+            let mut c = config(old);
+            assert!(pin_set(&c) && pin_matches(&c, entered) && !pin_matches(&c, "000000"));
+            migrate(&mut c);
+            let stored = c.string("lock_pin", "");
+            assert!(stored.starts_with("sha256:10000:") && !stored.contains(entered), "{stored}");
+            assert!(pin_set(&c) && pin_matches(&c, entered) && !pin_matches(&c, "000000"));
+            // 已经是摘要: 不再改
+            migrate(&mut c);
+            assert_eq!(c.string("lock_pin", ""), stored);
+        }
+        // 同一个密码每次的盐不同
+        assert_ne!(hash_pin("111111"), hash_pin("111111"));
+        // 固定的盐和轮数: 摘要格式稳定
+        let fixed = format!("sha256:2:0011:{}", hex(&digest(2, &[0x00, 0x11], "654321")));
+        assert!(pin_matches(&config(json!(fixed)), "654321"));
+        for bad in ["sha256:0:00:00", "sha256:10:zz:00", "sha256:10:00:abcd", "md5:1:00:00", "sha256:1::", &format!("{fixed}:x")] {
+            assert!(!pin_set(&config(json!(bad))), "{bad}");
+            assert!(!pin_matches(&config(json!(bad)), "654321"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn wrong_pins_make_the_user_wait_longer_each_time() {
+        record_success();
+        for _ in 0..FREE_TRIES - 1 {
+            record_failure();
+            assert!(wait_left().is_none());
+        }
+        record_failure();
+        let first = wait_left().unwrap();
+        assert!(first > Duration::from_secs(28) && first <= FIRST_WAIT, "{first:?}");
+        record_failure();
+        let second = wait_left().unwrap();
+        assert!(second > Duration::from_secs(58) && second <= FIRST_WAIT * 2, "{second:?}");
+        for _ in 0..20 {
+            record_failure();
+        }
+        assert!(wait_left().unwrap() <= FIRST_WAIT * 64);
+        record_success();
+        assert!(wait_left().is_none());
+        assert_eq!(wait_text(Duration::from_millis(29_200)), "错误太多, 请 30 秒后再试");
+        assert_eq!(wait_text(Duration::from_secs(240)), "错误太多, 请 4 分钟后再试");
     }
 }
