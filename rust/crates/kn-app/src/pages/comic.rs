@@ -79,6 +79,66 @@ struct Loaded {
     page: usize,
 }
 
+/// 打开一话: 书目、图片清单、起始页 (阻塞)。`cached_only` = 只读缓存, 有哪样要联网才拿得到时返回 None
+/// (离线时照常往下走: 拿不到的部分与原来一样报错或跳过, 不必排进网络队列)。
+#[allow(clippy::too_many_arguments)]
+fn open_chapter(
+    paths: &store::Paths,
+    net: Option<&kn_net::Client>,
+    book_id: i64,
+    chapter_id: i64,
+    entry: Entry,
+    local: Option<ComicProgress>,
+    seeded: Option<Manifest>,
+    cached_only: bool,
+    started: Instant,
+) -> Option<Result<Loaded, String>> {
+    let online = net.is_some() || api::fake_mode();
+    let need_net = cached_only && online;
+    let book = if cached_only { ComicBook::load(paths, book_id) } else { comic::load_book(paths, net, book_id) };
+    if book.is_none() && need_net {
+        return None;
+    }
+    let mut server = None;
+    let mut manifest = match seeded.or_else(|| Manifest::load(paths, chapter_id)) {
+        Some(m) if m.total() > 0 => m,
+        _ if need_net => return None,
+        _ => match comic::fetch_batch(paths, net, chapter_id, 0, 0) {
+            Ok((m, position)) => {
+                server = position;
+                m
+            }
+            Err(e) => return Some(Err(e)),
+        },
+    };
+    if manifest.total() == 0 {
+        return Some(Err("本话没有图片".into()));
+    }
+    let last = manifest.total() - 1;
+    let page = match entry {
+        Entry::First => 0,
+        Entry::Last => last,
+        // 本地与服务器 (仅当二者指向本话) 取更靠后的, 与小说阅读页一致
+        Entry::Resume => {
+            let local = local.filter(|p| p.chapter_id == chapter_id).map(|p| p.page);
+            let server = server.filter(|(c, _)| *c == chapter_id).map(|(_, p)| p.saturating_sub(1));
+            local.max(server).unwrap_or(0)
+        }
+    }
+    .min(last);
+    if manifest.needs_batch(page) {
+        if need_net {
+            return None;
+        }
+        match comic::fetch_batch(paths, net, chapter_id, Manifest::batch_start(page), 0) {
+            Ok((m, _)) => manifest = m,
+            Err(e) => eprintln!("[comic] 第 {} 页所在批次: {e}", page + 1),
+        }
+    }
+    eprintln!("[comic] 打开 {book_id}/{chapter_id}: {} 页, 第 {} 页, {} ms", manifest.total(), page + 1, started.elapsed().as_millis());
+    Some(Ok(Loaded { book, manifest, page }))
+}
+
 struct BatchLoaded {
     chapter_id: i64,
     skip: usize,
@@ -217,41 +277,16 @@ impl ComicReaderPage {
         let (book_id, chapter_id, entry) = (self.book_id, self.chapter_id, self.entry);
         let local = comic::load_progress(&paths, book_id);
         let seeded = (self.manifest.total() > 0).then(|| self.manifest.clone());
-        cx.spawn_droppable(move || -> Result<Loaded, String> {
+        // 先在本地队列只读缓存 (书目、图片清单都有就不用等网络队列); 缺了才交给网络队列从头再来一遍
+        let spawner = cx.spawner();
+        cx.spawn_local_droppable(move || -> Option<Result<Loaded, String>> {
             let started = Instant::now();
-            let book = comic::load_book(&paths, net.as_ref(), book_id);
-            let mut server = None;
-            let mut manifest = match seeded.or_else(|| Manifest::load(&paths, chapter_id)) {
-                Some(m) if m.total() > 0 => m,
-                _ => {
-                    let (m, position) = comic::fetch_batch(&paths, net.as_ref(), chapter_id, 0, 0)?;
-                    server = position;
-                    m
-                }
-            };
-            if manifest.total() == 0 {
-                return Err("本话没有图片".into());
+            if let Some(result) = open_chapter(&paths, net.as_ref(), book_id, chapter_id, entry, local.clone(), seeded.clone(), true, started) {
+                return Some(result);
             }
-            let last = manifest.total() - 1;
-            let page = match entry {
-                Entry::First => 0,
-                Entry::Last => last,
-                // 本地与服务器 (仅当二者指向本话) 取更靠后的, 与小说阅读页一致
-                Entry::Resume => {
-                    let local = local.filter(|p| p.chapter_id == chapter_id).map(|p| p.page);
-                    let server = server.filter(|(c, _)| *c == chapter_id).map(|(_, p)| p.saturating_sub(1));
-                    local.max(server).unwrap_or(0)
-                }
-            }
-            .min(last);
-            if manifest.needs_batch(page) {
-                match comic::fetch_batch(&paths, net.as_ref(), chapter_id, Manifest::batch_start(page), 0) {
-                    Ok((m, _)) => manifest = m,
-                    Err(e) => eprintln!("[comic] 第 {} 页所在批次: {e}", page + 1),
-                }
-            }
-            eprintln!("[comic] 打开 {book_id}/{chapter_id}: {} 页, 第 {} 页, {} ms", manifest.total(), page + 1, started.elapsed().as_millis());
-            Ok(Loaded { book, manifest, page })
+            let Some(spawner) = spawner else { return Some(Err("后台任务已停止".into())) };
+            spawner.spawn_on(kn_ui::Lane::Net, true, move || open_chapter(&paths, net.as_ref(), book_id, chapter_id, entry, local, seeded, false, started));
+            None
         });
     }
 
@@ -796,10 +831,12 @@ impl Page<KinNovel> for ComicReaderPage {
             }
             Err(other) => other,
         };
-        let Ok(result) = msg.downcast::<Result<Loaded, String>>() else { return };
+        let Ok(result) = msg.downcast::<Option<Result<Loaded, String>>>() else { return };
         match *result {
-            Ok(loaded) => self.on_loaded(cx, loaded),
-            Err(e) => {
+            // 交给网络队列了, 结果之后再来
+            None => {}
+            Some(Ok(loaded)) => self.on_loaded(cx, loaded),
+            Some(Err(e)) => {
                 self.status = Status::Failed(e);
                 cx.request_redraw(RefreshHint::Flash);
             }

@@ -53,8 +53,8 @@ pub struct Ink<'a> {
 }
 
 impl<'a> Ink<'a> {
-    pub fn style(&self, size: f32) -> TextStyle {
-        TextStyle { fonts: self.chain.to_vec(), size_px: size }
+    pub fn style(&self, size: f32) -> TextStyle<'a> {
+        TextStyle { fonts: self.chain, size_px: size }
     }
 
     pub fn width(&self, text: &str, size: f32) -> f32 {
@@ -173,7 +173,7 @@ pub fn header_with_icon(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m: &Me
     if !status.is_empty() {
         let w = ink.width(status, m.tiny);
         right -= w + m.margin as f32 / 2.0;
-        let st = TextStyle { fonts: ink.chain.to_vec(), size_px: m.tiny };
+        let st = TextStyle { fonts: ink.chain, size_px: m.tiny };
         let lm = ink.fonts.line_metrics(&st);
         let top = (h as f32 - (lm.ascent + lm.descent)) / 2.0;
         ink.text(frame, right as i32, top as i32, status, m.tiny, theme.foreground);

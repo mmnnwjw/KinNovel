@@ -1,6 +1,7 @@
 //! 分页, 对应 reader.py `ReaderDocument._paginate` / `page_for_path` 等。
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::html::{Block, BlockKind, Inline};
 use crate::style::{Align, InlineStyle, WEB_LINE_HEIGHT};
@@ -148,8 +149,10 @@ fn small_size(body: u32) -> u32 {
 /// 脚注在所有正文块处理完之后统一追加在最后 (对应 Python `_paginate` 末尾
 /// 的脚注处理), 结尾的 "if current or not pages" 规则保证章节至少一页。
 pub struct Paginator {
-    /// 自己持有块 (阅读页把分页器存在页面结构体里, 不能借用)
-    blocks: std::vec::IntoIter<Block>,
+    /// 共享持有块 (阅读页把分页器存在页面结构体里, 不能借用; 重排时不必深拷贝整章)
+    blocks: Arc<[Block]>,
+    /// 下一个要排的块
+    next_block: usize,
     params: LayoutParams,
     usable_width: f64,
     usable_height: i64,
@@ -185,14 +188,15 @@ pub fn url_size_hint(url: &str) -> Option<(u32, u32)> {
 }
 
 impl Paginator {
-    pub fn new(blocks: Vec<Block>, params: LayoutParams) -> Self {
+    pub fn new(blocks: impl Into<Arc<[Block]>>, params: LayoutParams) -> Self {
         let usable_width = (params.width - 2 * params.margin).max(120) as f64;
         let usable_height = (params.height - 2 * params.margin).max(160);
         let body_size = params.font_size;
         let line_height = (((body_size as f64) * params.line_spacing) as i64).max(1);
         let heading_gap = (line_height as f64 * 0.5) as i64;
         Paginator {
-            blocks: blocks.into_iter(),
+            blocks: blocks.into(),
+            next_block: 0,
             margin: params.margin,
             body_size,
             small_size: small_size(body_size),
@@ -537,8 +541,12 @@ impl Paginator {
                 return None;
             }
             if !self.blocks_done {
-                match self.blocks.next() {
-                    Some(block) => self.process_block(&block, m),
+                let blocks = Arc::clone(&self.blocks);
+                match blocks.get(self.next_block) {
+                    Some(block) => {
+                        self.next_block += 1;
+                        self.process_block(block, m);
+                    }
                     None => self.blocks_done = true,
                 }
                 continue;
@@ -559,12 +567,64 @@ impl Paginator {
 
 /// 一次性排完整章, 结果与逐页调用 `next_page` 等价。
 pub fn paginate_all(blocks: &[Block], params: LayoutParams, m: &mut impl Measure) -> Vec<Page> {
-    let mut paginator = Paginator::new(blocks.to_vec(), params);
+    let mut paginator = Paginator::new(blocks, params);
     let mut pages = Vec::new();
     while let Some(page) = paginator.next_page(m) {
         pages.push(page);
     }
     pages
+}
+
+/// 渐进分页时判断锚点 (XPath) 的页码是否已经确定: 带这个 XPath 的条目都已进了排好的页,
+/// 这时对已排的页调用 [`page_for_path`] 与整章排完的结果相同。
+///
+/// 条目按块的顺序进页, 所以排好的页里出现了某个更靠后的块的条目, 前面的块就都排完了。
+/// 脚注块的条目在整章最后才排 (`emit_footnotes`), 指向脚注的锚点要等整章排完。
+#[derive(Debug, Default)]
+pub struct AnchorIndex {
+    /// XPath → (第一个块的下标, 最后一个块的下标, 是否有脚注块)
+    paths: std::collections::HashMap<String, (usize, usize, bool)>,
+    /// 已排好的页里出现过的块下标 (按 XPath 第一个块下标估计, 只会偏小) 的最大值 + 1
+    passed: usize,
+}
+
+impl AnchorIndex {
+    pub fn new(blocks: &[Block]) -> Self {
+        let mut paths = std::collections::HashMap::<String, (usize, usize, bool)>::new();
+        // 空 XPath (列表序号等) 不对应某个块, 不参与判断
+        for (i, b) in blocks.iter().enumerate().filter(|(_, b)| !b.path.is_empty()) {
+            let e = paths.entry(b.path.clone()).or_insert((i, i, false));
+            e.1 = i;
+            e.2 |= b.kind == BlockKind::Footnote;
+        }
+        AnchorIndex { paths, passed: 0 }
+    }
+
+    /// 从头重新分页时调用。
+    pub fn reset(&mut self) {
+        self.passed = 0;
+    }
+
+    /// 分页器吐出一页后调用。
+    pub fn add_page(&mut self, page: &Page) {
+        for item in page {
+            if let Some(&(first, _, _)) = self.paths.get(item.path()) {
+                self.passed = self.passed.max(first + 1);
+            }
+        }
+    }
+
+    /// `done` = 整章已排完。不认识的 XPath (不在任何块里, 或为空) 不会出现在页里, 直接算确定。
+    pub fn settled(&self, path: &str, done: bool) -> bool {
+        if done || path.is_empty() {
+            return true;
+        }
+        match self.paths.get(path) {
+            None => true,
+            Some(&(_, _, true)) => false,
+            Some(&(_, last, false)) => self.passed > last + 1,
+        }
+    }
 }
 
 /// 对应 `ReaderDocument.page_for_path`。

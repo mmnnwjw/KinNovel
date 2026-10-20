@@ -71,7 +71,7 @@ fn measure_equals_sum_of_advances() {
     let mut store = FontStore::new();
     let font = store.load_file(&font_path).expect("load system font");
     let style = TextStyle {
-        fonts: vec![font],
+        fonts: &[font],
         size_px: 32.0,
     };
     let text = "AB的字测试";
@@ -95,7 +95,7 @@ fn draw_text_width_matches_measure_within_1px() {
     let mut store = FontStore::new();
     let font = store.load_file(&font_path).expect("load system font");
     let style = TextStyle {
-        fonts: vec![font],
+        fonts: &[font],
         size_px: 28.0,
     };
     let text = "测试Hello世界";
@@ -117,7 +117,7 @@ fn glyph_cache_hit_path_does_not_regrow_bytes() {
     let mut store = FontStore::new();
     let font = store.load_file(&font_path).expect("load system font");
     let style = TextStyle {
-        fonts: vec![font],
+        fonts: &[font],
         size_px: 40.0,
     };
     let text = "重复的字形缓存命中测试";
@@ -141,7 +141,7 @@ fn glyph_cache_lru_eviction_by_bytes() {
     let mut store = FontStore::new();
     let font = store.load_file(&font_path).expect("load system font");
     let style = TextStyle {
-        fonts: vec![font],
+        fonts: &[font],
         size_px: 48.0,
     };
     // Many distinct CJK characters so we rasterize many distinct, sizeable glyphs.
@@ -194,8 +194,8 @@ fn font_chains_with_large_ids_do_not_share_char_mappings() {
     assert_eq!(old_key(&[0]), old_key(&[513, 0]));
 
     let ch = '♡';
-    let a = TextStyle { fonts: vec![e], size_px: 40.0 };
-    let b = TextStyle { fonts: vec![s, e], size_px: 40.0 };
+    let a = TextStyle { fonts: &[e], size_px: 40.0 };
+    let b = TextStyle { fonts: &[s, e], size_px: 40.0 };
     assert_eq!(store.pick_font(&a.fonts, ch), e);
     assert_eq!(store.pick_font(&b.fonts, ch), s);
 
@@ -216,7 +216,7 @@ fn font_chains_with_large_ids_do_not_share_char_mappings() {
 fn glyph_cache_batch_eviction_keeps_recent_glyphs() {
     let mut store = FontStore::new();
     let font = store.load_bytes(app_font("KinNovelSymbols.ttf")).unwrap();
-    let style = TextStyle { fonts: vec![font], size_px: 32.0 };
+    let style = TextStyle { fonts: &[font], size_px: 32.0 };
     // 符号字体里有的字符
     let chars: Vec<char> = ('\u{2190}'..='\u{2BFF}').filter(|&c| store.has_char(font, c)).take(200).collect();
     assert!(chars.len() >= 100, "symbol font coverage: {}", chars.len());
@@ -266,7 +266,7 @@ fn woff2_decode_and_load_if_sample_present() {
     // without panicking, regardless of whether it actually covers it.
     let _ = store.has_char(font, '的');
     let style = TextStyle {
-        fonts: vec![font],
+        fonts: &[font],
         size_px: 32.0,
     };
     let w = store.measure("的", &style);

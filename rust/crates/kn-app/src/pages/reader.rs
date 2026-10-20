@@ -11,8 +11,10 @@
 //!   从设置返回时: 排版参数变了就重排 (保持阅读位置), 简繁转换变了就重新加载章节 (同样保持位置)。
 //!
 //! 性能结构:
-//! - 章节 JSON 解析、HTML 分块、字体读取 (WOFF2 解码只做一次, 结果旁路缓存为 TTF) 在后台线程。
-//! - 分页在 UI 线程渐进进行: 进入时只排到目标页 (有阅读进度时排完整章以便定位), 其余在空闲时每次一页。
+//! - 章节 JSON 解析、HTML 分块、字体读取 (WOFF2 解码只做一次, 结果旁路缓存为 TTF) 在本地队列;
+//!   只有章节或字体没缓存 (或缓存坏了) 要下载时才交给网络队列, 下载完再回本地队列解析。
+//! - 分页在 UI 线程渐进进行: 进入时只排到目标页 (有阅读进度时排到进度锚点的页码确定为止, `AnchorIndex`),
+//!   其余在空闲时每次一页。
 //! - 正文按页渲染成位图并缓存 (当前页 ± 1, 空闲时预渲染), 翻页 = 拷贝位图 + 画顶栏, 走 REAGL 整屏刷新。
 //! - 正文按网页版的样式排 (kn-text 网页样式模式: 粗体、字号、对齐、引用、分隔线、注音、注释等);
 //!   块划分与码点偏移和 Python 版一致, 阅读进度 (XPath + 码点偏移) 与 Python 版、网页版通用。
@@ -20,14 +22,17 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
 use kn_render::{Bitmap, FontId, Point, Rect, Synth, TextStyle};
-use kn_text::{first_anchor_on_page, page_for_path, Block, FontMeasure, Inline, LayoutParams, Page as TextPage, PageItem, Paginator, RichLine, WidthCache, OBJECT_CHAR};
+use kn_text::{
+    first_anchor_on_page, page_for_path, AnchorIndex, Block, FontMeasure, Inline, LayoutParams, Page as TextPage, PageItem, Paginator, RichLine, WidthCache,
+    OBJECT_CHAR,
+};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
-use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
+use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Spawner, Transition};
 
 use crate::store::{self, Chapter, Progress};
 use crate::userdata::{self, Bookmark};
@@ -113,6 +118,100 @@ struct Loaded {
     millis: u128,
 }
 
+/// 章节加载任务发回的消息。
+enum LoadMsg {
+    /// (第几次加载, 结果)
+    Done(u64, Result<Loaded, String>),
+    /// 交给网络队列下载了, 结果由后续一步发回
+    HandedOff,
+}
+
+/// 章节加载: 本地一步 (读缓存的章节与字体并解析) 与网络一步 (下载缺的章节/字体) 之间传递的上下文。
+/// 缓存坏了照样删掉并在线时重新下载; 过期缓存照样先用、后台刷新 (`net::cached_chapter`)。
+struct LoadJob {
+    generation: u64,
+    paths: store::Paths,
+    net: Option<kn_net::Client>,
+    api: String,
+    convert: String,
+    book_id: i64,
+    sort_num: i64,
+    /// 已加载的章节字体 (相同就不再读)
+    loaded_font: Option<PathBuf>,
+    started: Instant,
+    spawner: Option<Spawner<KinNovel>>,
+}
+
+impl LoadJob {
+    fn done(&self, result: Result<Loaded, String>) -> LoadMsg {
+        LoadMsg::Done(self.generation, result)
+    }
+
+    /// 本地一步 (本地队列)。`fetched` = 网络一步带回来的章节; 有它时说明已经下载过, 缺字体也不再交回网络队列。
+    fn local(self, fetched: Option<Chapter>) -> LoadMsg {
+        let online = self.net.is_some() && fetched.is_none();
+        let paths = &self.paths;
+        let mut chapter = match fetched {
+            Some(c) => c,
+            None => match crate::net::cached_chapter(paths, self.net.as_ref(), self.book_id, self.sort_num, &self.convert, true) {
+                crate::net::CachedChapter::Hit(c) => c,
+                crate::net::CachedChapter::Miss { .. } if online => return self.hand_off(None),
+                crate::net::CachedChapter::Miss { corrupt } => return self.done(Err(crate::net::missing_chapter_error(corrupt))),
+            },
+        };
+        let font_path = match &chapter.font {
+            f if f.is_empty() => None,
+            f => match crate::net::cached_font(paths, &self.api, f) {
+                Some(p) => Some(p),
+                None if online => return self.hand_off(Some(chapter)),
+                None => paths.font_file(&self.api, f),
+            },
+        };
+        let font_bytes = match &font_path {
+            Some(p) if Some(p) == self.loaded_font.as_ref() => None,
+            Some(p) => {
+                let existed = p.exists();
+                match store::load_chapter_font(p) {
+                    // 缓存的字体坏了 (已被删掉): 在线就交给网络队列重新下载一次
+                    Err(_) if online && existed && !p.exists() => return self.hand_off(Some(chapter)),
+                    r => Some(r),
+                }
+            }
+            None => None,
+        };
+        let doc = kn_text::extract_document(&chapter.content, store::SITE_BASE, true);
+        let local = store::load_progress(&paths.progress_file(self.book_id, self.sort_num, &self.convert));
+        chapter.content = String::new();
+        let millis = self.started.elapsed().as_millis();
+        self.done(Ok(Loaded { chapter, blocks: doc.blocks, notes: doc.notes, font_path, font_bytes, local, millis }))
+    }
+
+    /// 交给网络队列: 下载章节 (`chapter` 为 None 时) 和缺的字体。
+    fn hand_off(self, chapter: Option<Chapter>) -> LoadMsg {
+        let Some(spawner) = self.spawner.clone() else { return self.done(Err("后台任务已停止".into())) };
+        spawner.spawn(move || self.fetch(chapter));
+        LoadMsg::HandedOff
+    }
+
+    /// 网络一步 (网络队列); 下载完回本地队列解析, 与读缓存走同一条路。
+    fn fetch(self, chapter: Option<Chapter>) -> LoadMsg {
+        let Some(net) = self.net.clone() else { return self.done(Err(crate::net::missing_chapter_error(false))) };
+        let chapter = match chapter {
+            Some(c) => c,
+            None => match crate::net::download_and_parse(&self.paths, &net, self.book_id, self.sort_num, &self.convert, true) {
+                Ok(c) => c,
+                Err(e) => return self.done(Err(e)),
+            },
+        };
+        if !chapter.font.is_empty() {
+            crate::net::ensure_font(&self.paths, Some(&net), &self.api, &chapter.font);
+        }
+        let Some(spawner) = self.spawner.clone() else { return self.done(Err("后台任务已停止".into())) };
+        spawner.spawn_local(move || self.local(Some(chapter)));
+        LoadMsg::HandedOff
+    }
+}
+
 /// 插图状态 (按 URL)。
 enum ImageSlot {
     Pending,
@@ -143,7 +242,10 @@ pub struct ReaderPage {
     entry: Entry,
     status: Status,
     chapter: Chapter,
-    blocks: Vec<Block>,
+    /// 分页器共享同一份 (重排不深拷贝)
+    blocks: Arc<[Block]>,
+    /// 渐进分页时判断锚点的页码是否已确定
+    anchors: AnchorIndex,
     /// 本章注释内容 (点击正文里的注释标记弹出), 下标 = 序号 - 1
     notes: Vec<String>,
     /// 当前页注释标记的点击区域 (屏幕坐标) 与注释序号
@@ -172,12 +274,16 @@ pub struct ReaderPage {
     note: String,
     saved: Option<Progress>,
     last_write: Option<Instant>,
+    /// 最近一次写的最近阅读记录里, 本章还没排完 (总页数不准, 排完后再写一次)
+    last_read_partial: bool,
     /// 本书的书签 (进入时读取, 从目录返回时重读)
     bookmarks: Vec<Bookmark>,
     /// 控件层进度条的位置 (点按/滑动跳页时换算页号)
     track: Rect,
     /// 阅读统计计时
     tracker: crate::stats::Tracker,
+    /// 每次 start_load 加一; 结果带着它回来, 过时的丢弃
+    load_generation: u64,
 }
 
 impl ReaderPage {
@@ -188,7 +294,8 @@ impl ReaderPage {
             entry,
             status: Status::Loading,
             chapter: Chapter::default(),
-            blocks: Vec::new(),
+            blocks: Vec::new().into(),
+            anchors: AnchorIndex::default(),
             notes: Vec::new(),
             note_hits: Vec::new(),
             footnote: None,
@@ -208,9 +315,11 @@ impl ReaderPage {
             note: String::new(),
             saved: None,
             last_write: None,
+            last_read_partial: false,
             bookmarks: Vec::new(),
             track: Rect::new(0, 0, 0, 0),
             tracker: crate::stats::Tracker::default(),
+            load_generation: 0,
         }
     }
 
@@ -261,6 +370,7 @@ impl ReaderPage {
         let mut m = FontMeasure::new(&*cx.fonts, &self.chain, &mut self.widths);
         match paginator.next_page(&mut m) {
             Some(page) => {
+                self.anchors.add_page(&page);
                 self.pages.push(page);
                 true
             }
@@ -275,10 +385,21 @@ impl ReaderPage {
         while self.paginate_step(cx) {}
     }
 
+    /// 排到这些锚点 (XPath) 的页码都确定为止, 至少一页。之后对已排的页查 `page_for_path`
+    /// 与整章排完的结果相同 (页边界本来就一样), 其余的页留给 on_idle。
+    fn paginate_until_settled(&mut self, cx: &mut Cx<KinNovel>, paths: &[&str]) {
+        while self.pages.is_empty() || !paths.iter().all(|p| self.anchors.settled(p, self.done())) {
+            if !self.paginate_step(cx) {
+                break;
+            }
+        }
+    }
+
     /// 从头开始分页 (首次加载、字号变化)。
     fn restart_layout(&mut self, cx: &mut Cx<KinNovel>) {
         let params = Self::layout_params(cx, self.sort_num);
-        self.paginator = Some(Paginator::new(self.blocks.clone(), params.clone()));
+        self.paginator = Some(Paginator::new(Arc::clone(&self.blocks), params.clone()));
+        self.anchors.reset();
         self.params = Some(params);
         self.pages.clear();
         self.cache.clear();
@@ -313,6 +434,12 @@ impl ReaderPage {
             }
             Err(e) => eprintln!("[reader] 进度保存失败: {e}"),
         }
+        self.save_last_read(cx);
+    }
+
+    /// 最近阅读记录 (书架的继续阅读卡片显示 "第 x / y 页")。
+    fn save_last_read(&mut self, cx: &mut Cx<KinNovel>) {
+        self.last_read_partial = !self.done();
         let last = store::LastRead {
             book_id: self.book_id,
             sort_num: self.sort_num,
@@ -354,7 +481,8 @@ impl ReaderPage {
     fn on_loaded(&mut self, cx: &mut Cx<KinNovel>, loaded: Loaded) {
         let started = Instant::now();
         self.chapter = loaded.chapter;
-        self.blocks = loaded.blocks;
+        self.blocks = loaded.blocks.into();
+        self.anchors = AnchorIndex::new(&self.blocks);
         self.notes = loaded.notes;
         self.footnote = None;
         let mut chapter_font = None;
@@ -411,19 +539,16 @@ impl ReaderPage {
                     Some(p) => vec![(p.path, Some(p.offset as i64))],
                     None => server.into_iter().chain(local).collect(),
                 };
-                if anchors.is_empty() {
-                    self.paginate_step(cx);
-                    0
-                } else {
-                    self.paginate_all(cx);
-                    // 多端进度取最远页 (与 Python 版一致)
-                    anchors
-                        .iter()
-                        .map(|(path, offset)| page_for_path(&self.pages, path, *offset, usize::MAX))
-                        .filter(|&p| p != usize::MAX)
-                        .max()
-                        .unwrap_or(0)
-                }
+                // 只排到锚点的页码确定 (长章节不必先排完整章), 没有锚点时排一页
+                let paths: Vec<&str> = anchors.iter().map(|(p, _)| p.as_str()).collect();
+                self.paginate_until_settled(cx, &paths);
+                // 多端进度取最远页 (与 Python 版一致)
+                anchors
+                    .iter()
+                    .map(|(path, offset)| page_for_path(&self.pages, path, *offset, usize::MAX))
+                    .filter(|&p| p != usize::MAX)
+                    .max()
+                    .unwrap_or(0)
             }
         };
         self.page = target.min(self.pages.len().saturating_sub(1));
@@ -507,8 +632,8 @@ impl ReaderPage {
                 PageItem::Note { .. } => {}
                 PageItem::Text { text, x, y, size, .. } => {
                     let size_px = *size as f32;
-                    let ascent = cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain.to_vec(), size_px }).ascent;
-                    let style = TextStyle { fonts: self.chain.clone(), size_px };
+                    let ascent = cx.fonts.line_metrics(&TextStyle { fonts: &metrics_chain, size_px }).ascent;
+                    let style = TextStyle { fonts: &self.chain, size_px };
                     cx.glyphs.draw_text(&*cx.fonts, &mut bmp, *x as f32, (*y as f32 + ascent).round(), text, &style, theme.foreground);
                 }
                 PageItem::Image { url, x, y, width, height, .. } => {
@@ -538,8 +663,8 @@ impl ReaderPage {
     /// 一行带样式的文字 (网页样式模式)。基线按行内最大字号定, 与兼容模式的整行文字一致。
     fn draw_rich_line(&self, cx: &mut Cx<KinNovel>, bmp: &mut Bitmap, text: &str, x: f32, y: f32, line: &RichLine) {
         let theme = cx.theme;
-        let metrics_chain = vec![cx.app.ui_fonts[0]];
-        let ascent = |cx: &Cx<KinNovel>, size: u32| cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain.clone(), size_px: size as f32 }).ascent;
+        let metrics_chain = [cx.app.ui_fonts[0]];
+        let ascent = |cx: &Cx<KinNovel>, size: u32| cx.fonts.line_metrics(&TextStyle { fonts: &metrics_chain, size_px: size as f32 }).ascent;
         let baseline = (y + ascent(cx, line.max_size)).round();
         // 最近的注音基字 (x, 宽, 字号)
         let mut base: Option<(f32, f32, u32)> = None;
@@ -572,14 +697,14 @@ impl ReaderPage {
                 Some(_) => {}
                 None if s.ruby => {
                     let Some((bx, bw, bsize)) = base else { continue };
-                    let style = TextStyle { fonts: self.chain.clone(), size_px: size };
+                    let style = TextStyle { fonts: &self.chain, size_px: size };
                     let rt = &text[r.start..r.end];
                     let w = cx.fonts.measure(rt, &style);
                     let rbl = (baseline - ascent(cx, bsize) - size * 0.15).round();
                     cx.glyphs.draw_text_synth(&*cx.fonts, bmp, (bx + (bw - w) / 2.0).round(), rbl, rt, &style, color, Synth { bold: s.bold, italic: s.italic });
                 }
                 None => {
-                    let style = TextStyle { fonts: self.chain.clone(), size_px: size };
+                    let style = TextStyle { fonts: &self.chain, size_px: size };
                     let run = &text[r.start..r.end];
                     cx.glyphs.draw_text_synth(&*cx.fonts, bmp, rx, bl, run, &style, color, Synth { bold: s.bold, italic: s.italic });
                     let thick = ((size / 20.0).round() as u32).max(1);
@@ -760,7 +885,8 @@ impl ReaderPage {
     fn relayout_keep_position(&mut self, cx: &mut Cx<KinNovel>) {
         let anchor = self.anchor();
         self.restart_layout(cx);
-        self.paginate_all(cx);
+        let path = anchor.as_ref().map(|a| a.path.as_str());
+        self.paginate_until_settled(cx, path.as_slice());
         self.page = anchor
             .map(|a| page_for_path(&self.pages, &a.path, Some(a.offset as i64), 0))
             .unwrap_or(0)
@@ -798,8 +924,8 @@ impl ReaderPage {
             self.save_progress(cx, true);
         }
         if let Some(at) = jump.and_then(|j| j.at) {
-            // 本章内的书签
-            self.paginate_all(cx);
+            // 本章内的书签 (排到它的页码确定为止)
+            self.paginate_until_settled(cx, &[&at.path]);
             let page = page_for_path(&self.pages, &at.path, Some(at.offset as i64), self.page);
             self.page = page.min(self.pages.len().saturating_sub(1));
             self.note.clear();
@@ -817,7 +943,8 @@ impl ReaderPage {
         self.resume_override = at;
         self.status = Status::Loading;
         self.chapter = Chapter::default();
-        self.blocks.clear();
+        self.blocks = Vec::new().into();
+        self.anchors = AnchorIndex::default();
         self.notes.clear();
         self.note_hits.clear();
         self.footnote = None;
@@ -834,6 +961,25 @@ impl ReaderPage {
         self.last_write = None;
         self.start_load(cx);
         cx.request_redraw(RefreshHint::Ui);
+    }
+
+    /// 还没排完时, 页码未定的书签可能被误认为在当前页 (所在段落的后半还没排): 先排到它们确定为止。
+    /// 渲染和切换书签之前调用, 之后 `bookmark_on_page` 与整章排完时的判断相同。
+    fn settle_bookmarks(&mut self, cx: &mut Cx<KinNovel>) {
+        if self.done() || self.pages.is_empty() {
+            return;
+        }
+        let unsure: Vec<String> = self
+            .bookmarks
+            .iter()
+            .filter(|b| b.sort_num == self.sort_num && !self.anchors.settled(&b.path, false))
+            .filter(|b| page_for_path(&self.pages, &b.path, Some(b.offset as i64), usize::MAX) == self.page)
+            .map(|b| b.path.clone())
+            .collect();
+        if !unsure.is_empty() {
+            let paths: Vec<&str> = unsure.iter().map(String::as_str).collect();
+            self.paginate_until_settled(cx, &paths);
+        }
     }
 
     /// 当前页上的书签 (下标)。
@@ -864,6 +1010,7 @@ impl ReaderPage {
     }
 
     fn toggle_bookmark(&mut self, cx: &mut Cx<KinNovel>) {
+        self.settle_bookmarks(cx);
         if let Some(i) = self.bookmark_on_page() {
             self.bookmarks.remove(i);
             self.note = "已删除书签".into();
@@ -912,46 +1059,25 @@ impl ReaderPage {
         cx.request_redraw(RefreshHint::Ui);
     }
 
-    /// 后台读取章节、字体与本地进度 (结果回到 on_message)。
+    /// 后台读取章节、字体与本地进度 (结果回到 on_message)。先走本地队列读缓存, 不会被卡住的网络请求挡住;
+    /// 要下载时才交给网络队列 (见 [`LoadJob`])。两步都不可丢弃: 页面还在就一定要等到结果。
     fn start_load(&mut self, cx: &mut Cx<KinNovel>) {
         self.convert = cx.app.config.convert();
         self.bookmarks = userdata::load_bookmarks(&cx.app.paths, self.book_id);
-        let paths = cx.app.paths.clone();
-        let convert = cx.app.config.convert();
-        let api = cx.app.config.api_server();
-        let loaded_font = cx.app.chapter_font.as_ref().map(|(p, _)| p.clone());
-        let net = cx.app.net();
-        let (book_id, sort_num) = (self.book_id, self.sort_num);
-        cx.spawn(move || -> Result<Loaded, String> {
-            let started = Instant::now();
-            // 缓存坏了的话 load_chapter 会删掉它并 (在线时) 重新下载
-            let chapter = crate::net::load_chapter(&paths, net.as_ref(), book_id, sort_num, &convert, true)?;
-            let doc = kn_text::extract_document(&chapter.content, store::SITE_BASE, true);
-            let (blocks, notes) = (doc.blocks, doc.notes);
-            let font_path = match &chapter.font {
-                f if f.is_empty() => None,
-                f => crate::net::ensure_font(&paths, net.as_ref(), &api, f).or_else(|| paths.font_file(&api, f)),
-            };
-            let font_bytes = match &font_path {
-                Some(p) if Some(p) == loaded_font.as_ref() => None,
-                Some(p) => {
-                    let existed = p.exists();
-                    Some(store::load_chapter_font(p).or_else(|e| match net.as_ref() {
-                        // 缓存的字体坏了 (已被删掉): 在线就重新下载一次
-                        Some(n) if existed && !p.exists() => {
-                            crate::net::ensure_font(&paths, Some(n), &api, &chapter.font).ok_or(e)?;
-                            store::load_chapter_font(p)
-                        }
-                        _ => Err(e),
-                    }))
-                }
-                None => None,
-            };
-            let local = store::load_progress(&paths.progress_file(book_id, sort_num, &convert));
-            let mut chapter = chapter;
-            chapter.content = String::new();
-            Ok(Loaded { chapter, blocks, notes, font_path, font_bytes, local, millis: started.elapsed().as_millis() })
-        });
+        self.load_generation += 1;
+        let job = LoadJob {
+            generation: self.load_generation,
+            paths: cx.app.paths.clone(),
+            net: cx.app.net(),
+            api: cx.app.config.api_server(),
+            convert: cx.app.config.convert(),
+            book_id: self.book_id,
+            sort_num: self.sort_num,
+            loaded_font: cx.app.chapter_font.as_ref().map(|(p, _)| p.clone()),
+            started: Instant::now(),
+            spawner: cx.spawner(),
+        };
+        cx.spawn_local(move || job.local(None));
     }
 
     fn draw_header(&self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap, top: i32) {
@@ -1202,10 +1328,14 @@ impl Page<KinNovel> for ReaderPage {
             Ok(img) => return self.on_image(cx, *img),
             Err(other) => other,
         };
-        let Ok(result) = msg.downcast::<Result<Loaded, String>>() else { return };
-        match *result {
-            Ok(loaded) => self.on_loaded(cx, loaded),
-            Err(e) => {
+        let Ok(msg) = msg.downcast::<LoadMsg>() else { return };
+        match *msg {
+            // 交给网络队列下载了, 结果之后再来
+            LoadMsg::HandedOff => {}
+            // 之后又发起过加载 (目录跳章、改简繁转换): 旧的结果作废
+            LoadMsg::Done(generation, _) if generation != self.load_generation => {}
+            LoadMsg::Done(_, Ok(loaded)) => self.on_loaded(cx, loaded),
+            LoadMsg::Done(_, Err(e)) => {
                 self.status = Status::Failed(e);
                 cx.request_redraw(RefreshHint::Ui);
             }
@@ -1257,6 +1387,7 @@ impl Page<KinNovel> for ReaderPage {
                 self.save_progress(cx, true);
                 eprintln!("[reader] 换方向重排 {} ms, {} 页", started.elapsed().as_millis(), self.pages.len());
             }
+            self.settle_bookmarks(cx);
             self.request_images(cx, self.page);
             self.update_image_hits(top);
             let slot = self.content_bitmap(cx, self.page);
@@ -1396,7 +1527,10 @@ impl Page<KinNovel> for ReaderPage {
         // 2. 继续分页 (一次一页)
         if !self.done() {
             if !self.paginate_step(cx) {
-                // 排完: 页码 "n+" 变成确定值
+                // 排完: 页码 "n+" 变成确定值; 最近阅读记录里的总页数也补上
+                if self.last_read_partial {
+                    self.save_last_read(cx);
+                }
                 cx.request_redraw(RefreshHint::Ui);
             }
             return true;
@@ -1440,9 +1574,9 @@ impl ReaderPage {
             let hw = ink.width(hint, m.tiny).ceil() as i32;
             ink.text(frame, card.x + card_w - pad - hw, card.y + pad / 2 + ((m.small - m.tiny) / 2.0) as i32, hint, m.tiny, theme.muted);
         }
-        let metrics_chain = vec![cx.app.ui_fonts[0]];
-        let ascent = cx.fonts.line_metrics(&TextStyle { fonts: metrics_chain, size_px: font }).ascent;
-        let style = TextStyle { fonts: self.chain.clone(), size_px: font };
+        let metrics_chain = [cx.app.ui_fonts[0]];
+        let ascent = cx.fonts.line_metrics(&TextStyle { fonts: &metrics_chain, size_px: font }).ascent;
+        let style = TextStyle { fonts: &self.chain, size_px: font };
         let mut y = card.y + pad / 2 + title_h + (line_h - font as i32) / 2;
         for line in &lines {
             cx.glyphs.draw_text(&*cx.fonts, frame, (card.x + pad) as f32, (y as f32 + ascent).round(), line, &style, theme.foreground);
@@ -1478,5 +1612,84 @@ fn ribbon(frame: &mut Bitmap, r: Rect, filled: bool, line: f32, color: u8) {
         frame.line(rr, y0, rr, y0 + h, line, color);
         frame.line(l, y0 + h, mid, y0 + body, line, color);
         frame.line(mid, y0 + body, rr, y0 + h, line, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn job(dir: &std::path::Path, net: Option<kn_net::Client>) -> LoadJob {
+        LoadJob {
+            generation: 7,
+            paths: store::Paths { app_dir: dir.to_path_buf() },
+            net,
+            api: "https://api.example.com".into(),
+            convert: String::new(),
+            book_id: 5,
+            sort_num: 2,
+            loaded_font: None,
+            started: Instant::now(),
+            spawner: None,
+        }
+    }
+
+    fn write_chapter(dir: &std::path::Path, font: &str) {
+        let file = store::Paths { app_dir: dir.to_path_buf() }.chapter_file(5, 2, "");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let v = serde_json::json!({"Chapter": {"Title": "章", "SortNum": 2, "Font": font, "Content": "<p>第一段</p><p>第二段</p>"}});
+        std::fs::write(&file, v.to_string()).unwrap();
+    }
+
+    fn unroutable(dir: &std::path::Path) -> kn_net::Client {
+        // 不可路由的地址: 真去连接的话要等到超时
+        kn_net::Client::new(kn_net::ClientConfig { server: "http://10.255.255.1:9".into(), session_path: dir.join("session.json"), ..Default::default() })
+    }
+
+    #[test]
+    fn cached_chapter_loads_locally() {
+        let dir = std::env::temp_dir().join(format!("kn-reader-load-{}", std::process::id()));
+        write_chapter(&dir, "");
+        let LoadMsg::Done(7, Ok(loaded)) = job(&dir, None).local(None) else { panic!("应直接读缓存") };
+        assert_eq!(loaded.chapter.title, "章");
+        assert!(loaded.chapter.content.is_empty());
+        assert_eq!(loaded.blocks.len(), 2);
+        assert!(loaded.font_path.is_none());
+        // 在线 (服务器不可达) 也只读缓存, 不等网络
+        let net = unroutable(&dir);
+        let started = Instant::now();
+        assert!(matches!(job(&dir, Some(net.clone())).local(None), LoadMsg::Done(7, Ok(_))));
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_chapter_or_font_goes_to_the_network_step() {
+        let dir = std::env::temp_dir().join(format!("kn-reader-miss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 离线: 与原来一次加载时相同的提示
+        let LoadMsg::Done(_, Err(e)) = job(&dir, None).local(None) else { panic!() };
+        assert_eq!(e, "章节未缓存 (离线)");
+        // 在线: 交给网络队列 (这里没有线程池, 所以报错), 本地一步不自己下载
+        let net = unroutable(&dir);
+        let started = Instant::now();
+        let LoadMsg::Done(_, Err(e)) = job(&dir, Some(net.clone())).local(None) else { panic!() };
+        assert_eq!(e, "后台任务已停止");
+        // 章节有缓存、字体没有: 同样交给网络一步
+        write_chapter(&dir, "/fonts/a.woff2");
+        let LoadMsg::Done(_, Err(e)) = job(&dir, Some(net.clone())).local(None) else { panic!() };
+        assert_eq!(e, "后台任务已停止");
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        // 离线缺字体: 照常打开, 字体报错 (阅读页提示乱码)
+        let LoadMsg::Done(_, Ok(loaded)) = job(&dir, None).local(None) else { panic!() };
+        assert!(matches!(loaded.font_bytes, Some(Err(_))));
+        // 网络一步带回的章节: 缺字体也不再交回网络队列
+        let chapter = Chapter::parse(&std::fs::read(job(&dir, None).paths.chapter_file(5, 2, "")).unwrap(), true).unwrap();
+        let LoadMsg::Done(_, Ok(loaded)) = job(&dir, Some(net.clone())).local(Some(chapter)) else { panic!() };
+        assert_eq!(loaded.blocks.len(), 2);
+        net.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

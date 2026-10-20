@@ -66,10 +66,10 @@ pub fn bold_strokes(size_px: f32) -> i32 {
     ((size_px * 0.04).round() as i32).max(1)
 }
 
-/// 一段文字的样式: 字体回退链 + 像素字号。
-#[derive(Clone, Debug, PartialEq)]
-pub struct TextStyle {
-    pub fonts: Vec<FontId>,
+/// 一段文字的样式: 字体回退链 + 像素字号。借用字体链, 每段文字建一个不用分配。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle<'a> {
+    pub fonts: &'a [FontId],
     pub size_px: f32,
 }
 

@@ -70,7 +70,7 @@ fn main() {
     println!("[bench] font load: {:?}", t_load.elapsed());
 
     let style = TextStyle {
-        fonts: chain,
+        fonts: &chain,
         size_px: FONT_SIZE,
     };
 

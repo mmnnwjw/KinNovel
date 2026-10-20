@@ -81,33 +81,54 @@ fn is_fresh(file: &std::path::Path) -> bool {
         .is_some_and(|age| age < CHAPTER_TTL)
 }
 
-/// 读章节 (Python `_load_chapter` 的缓存语义, 但不再为过期缓存阻塞):
+/// [`cached_chapter`] 的结果。
+pub enum CachedChapter {
+    Hit(store::Chapter),
+    /// 没有能用的缓存, 要下载 (corrupt = 缓存解析不了, 已删除)
+    Miss { corrupt: bool },
+}
+
+/// 读章节分两步 (Python `_load_chapter` 的缓存语义, 但不再为过期缓存阻塞): 先 `cached_chapter` (本地队列),
+/// 未命中且在线时再 [`download_and_parse`] (网络队列); 离线时报 [`missing_chapter_error`]。
 /// - 有缓存: 立即返回。缓存过期 (> 12 h) 且服务器未被标记为不可用时, 后台线程重新下载写回,
 ///   下次打开生效 —— 打开章节永远不用等网络。
 /// - 缓存解析不了 (断电留下的半截文件等): 删掉, 按无缓存处理 —— 不然新的 mtime 让它 12 小时内都不会刷新。
 /// - 无缓存: 下载并写缓存 (必须等); 直接用解好的 JSON, 不再从写盘的字节重新解析。
-/// `net` 为 None (离线/预览) 时只读缓存。
-pub fn load_chapter(paths: &Paths, net: Option<&Client>, book_id: i64, sort_num: i64, convert: &str, with_content: bool) -> Result<store::Chapter, String> {
+pub fn cached_chapter(paths: &Paths, net: Option<&Client>, book_id: i64, sort_num: i64, convert: &str, with_content: bool) -> CachedChapter {
     let file = paths.chapter_file(book_id, sort_num, convert);
-    let mut corrupt = false;
-    if let Ok(bytes) = std::fs::read(&file) {
-        if let Some(chapter) = store::Chapter::parse(&bytes, with_content) {
-            if let Some(net) = net {
-                if !is_fresh(&file) && !net.server_down() {
-                    spawn_refresh(paths, net, book_id, sort_num, convert);
-                }
+    let Ok(bytes) = std::fs::read(&file) else { return CachedChapter::Miss { corrupt: false } };
+    if let Some(chapter) = store::Chapter::parse(&bytes, with_content) {
+        if let Some(net) = net {
+            if !is_fresh(&file) && !net.server_down() {
+                spawn_refresh(paths, net, book_id, sort_num, convert);
             }
-            return Ok(chapter);
         }
-        eprintln!("[net] 章节缓存 {book_id}#{sort_num} 损坏, 删除后重新下载");
-        let _ = std::fs::remove_file(&file);
-        corrupt = true;
+        return CachedChapter::Hit(chapter);
     }
-    let Some(net) = net else {
-        return Err(if corrupt { "章节缓存损坏, 已删除, 联网后重试" } else { "章节未缓存 (离线)" }.into());
-    };
+    eprintln!("[net] 章节缓存 {book_id}#{sort_num} 损坏, 删除后重新下载");
+    let _ = std::fs::remove_file(&file);
+    CachedChapter::Miss { corrupt: true }
+}
+
+/// 缓存未命中又不能下载 (离线) 时的提示。
+pub fn missing_chapter_error(corrupt: bool) -> String {
+    if corrupt { "章节缓存损坏, 已删除, 联网后重试" } else { "章节未缓存 (离线)" }.into()
+}
+
+/// 下载章节、写缓存并解析 (阻塞等网络, 只在网络队列里调用)。
+pub fn download_and_parse(paths: &Paths, net: &Client, book_id: i64, sort_num: i64, convert: &str, with_content: bool) -> Result<store::Chapter, String> {
     let value = download_chapter_value(paths, net, book_id, sort_num, convert, 0)?;
     store::Chapter::from_value(&value, with_content).ok_or_else(|| "章节数据损坏".into())
+}
+
+/// 已缓存的章节字体文件 (不下载; 有就更新访问时间)。
+pub fn cached_font(paths: &Paths, api_server: &str, font_url: &str) -> Option<PathBuf> {
+    let file = paths.font_file(api_server, font_url)?;
+    if std::fs::metadata(&file).is_ok_and(|m| m.len() > 0) {
+        store::touch(&file);
+        return Some(file);
+    }
+    None
 }
 
 /// 正在后台刷新的章节 (书, 序号, 繁简转换): 来回切章时同一章只刷新一次。
@@ -167,11 +188,10 @@ fn download_chapter_value(paths: &Paths, net: &Client, book_id: i64, sort_num: i
 /// 章节字体文件: 已缓存直接返回, 否则下载 (Python `ensure_font`)。
 /// 缓存的字体解析不了时由 [`store::load_chapter_font`] / [`store::forget_chapter_font`] 删掉, 下次进来重新下载。
 pub fn ensure_font(paths: &Paths, net: Option<&Client>, api_server: &str, font_url: &str) -> Option<PathBuf> {
-    let file = paths.font_file(api_server, font_url)?;
-    if std::fs::metadata(&file).is_ok_and(|m| m.len() > 0) {
-        store::touch(&file);
+    if let Some(file) = cached_font(paths, api_server, font_url) {
         return Some(file);
     }
+    let file = paths.font_file(api_server, font_url)?;
     let net = net?;
     let url = kn_text::absolute_url(api_server, font_url);
     match net.download(&url, FONT_LIMIT) {
@@ -332,7 +352,7 @@ mod tests {
             ..Default::default()
         });
         let started = std::time::Instant::now();
-        let chapter = load_chapter(&paths, Some(&net), 1, 2, "", true).unwrap();
+        let CachedChapter::Hit(chapter) = cached_chapter(&paths, Some(&net), 1, 2, "", true) else { panic!("应命中缓存") };
         assert_eq!(chapter.title, "缓存");
         assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
         // 后台刷新还在连 (不可路由地址): 再打开同一章不会再起一个刷新线程
@@ -349,13 +369,14 @@ mod tests {
         let file = paths.chapter_file(3, 4, "t2s");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, b"{\"Chapter\": {\"Title\": \"x\", \"Cont").unwrap();
-        let err = load_chapter(&paths, None, 3, 4, "t2s", true).unwrap_err();
-        assert!(err.contains("损坏"), "{err}");
+        assert!(matches!(cached_chapter(&paths, None, 3, 4, "t2s", true), CachedChapter::Miss { corrupt: true }));
+        assert!(missing_chapter_error(true).contains("损坏"));
         assert!(!file.exists());
-        assert_eq!(load_chapter(&paths, None, 3, 4, "t2s", true).unwrap_err(), "章节未缓存 (离线)");
+        assert!(matches!(cached_chapter(&paths, None, 3, 4, "t2s", true), CachedChapter::Miss { corrupt: false }));
+        assert_eq!(missing_chapter_error(false), "章节未缓存 (离线)");
         // 完好的缓存照常读
         std::fs::write(&file, "{\"Chapter\": {\"Title\": \"好\", \"SortNum\": 4, \"Content\": \"<p>a</p>\"}}").unwrap();
-        let chapter = load_chapter(&paths, None, 3, 4, "t2s", true).unwrap();
+        let CachedChapter::Hit(chapter) = cached_chapter(&paths, None, 3, 4, "t2s", true) else { panic!() };
         assert_eq!((chapter.title.as_str(), chapter.sort_num, chapter.content.as_str()), ("好", 4, "<p>a</p>"));
         let _ = std::fs::remove_dir_all(&dir);
     }

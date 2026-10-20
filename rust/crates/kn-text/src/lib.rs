@@ -19,7 +19,7 @@ pub use clean::{clean_text, py_isspace};
 pub use html::{absolute_url, extract_blocks, extract_document, Block, BlockKind, Document, Inline, Span, OBJECT_CHAR};
 pub use measure::{FontMeasure, WidthCache};
 pub use paginate::{
-    first_anchor_on_page, first_path_on_page, page_for_path, paginate_all, LayoutParams, Page,
+    first_anchor_on_page, AnchorIndex, first_path_on_page, page_for_path, paginate_all, LayoutParams, Page,
     PageItem, Paginator, RichLine, Run, PYTHON_IMAGE_MAX_RATIO, PYTHON_PARAGRAPH_SPACING, url_size_hint,
 };
 pub use style::{Align, BlockStyle, InlineStyle};
