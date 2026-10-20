@@ -431,9 +431,15 @@ pub fn program_dir(paths: &Paths) -> PathBuf {
 pub const RESTART_MARKER: &str = "/tmp/kinnovel_restart";
 pub const UNINSTALL_MARKER: &str = "/tmp/kinnovel_uninstall";
 
-/// 把发布包装进 `dir`: 校验内容与版本, 先全部写成 `*.kn-new`, 再逐个改名替换 (vfat 上 rename 会替换旧文件;
+/// 把发布包装进 `dir`: 校验内容与版本后按 [`replace_files`] 替换程序文件 (掉电或出错都能回到旧版本;
 /// 正在运行的启动脚本和 /tmp 里的程序副本不受影响, 新版下次启动生效)。数据 (data/ cache/ logs/) 不动。
 pub fn install(zip: &[u8], version: &str, dir: &Path) -> Result<usize, String> {
+    let files = package_files(zip, version)?;
+    replace_files(&files, dir, Fault::None)
+}
+
+/// 发布包里 `KinNovel/` 下的文件 (相对路径, 内容), 校验过路径、必需文件和版本。
+fn package_files(zip: &[u8], version: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
     let entries = unzip(zip)?;
     let files: Vec<(String, Vec<u8>)> = entries
         .into_iter()
@@ -447,6 +453,12 @@ pub fn install(zip: &[u8], version: &str, dir: &Path) -> Result<usize, String> {
             return Err(format!("安装包里有可疑路径: {rel}"));
         }
     }
+    // 安装记录按行存路径, 也不接受控制字符和我们自己的临时文件名
+    for (rel, _) in &files {
+        if !journal_path_ok(rel) {
+            return Err(format!("安装包里有可疑路径: {rel}"));
+        }
+    }
     let get = |name: &str| files.iter().find(|(r, _)| r == name).map(|(_, d)| d);
     for required in ["bin/kinnovel", "bin/kinnovel.sh", "config.xml", "menu.json"] {
         if get(required).is_none() {
@@ -457,27 +469,230 @@ pub fn install(zip: &[u8], version: &str, dir: &Path) -> Result<usize, String> {
     if !config.contains(&format!("<version>{version}</version>")) {
         return Err(format!("安装包版本与 {version} 不符"));
     }
-    let staged: Vec<(PathBuf, PathBuf)> = files
-        .iter()
-        .map(|(rel, data)| {
+    Ok(files)
+}
+
+/// 安装记录 (在程序目录里): 第一行阶段, 之后每行 `+ 路径` (原来就有, 备份为 `.kn-old`) 或 `- 路径` (新增的文件)。
+const JOURNAL: &str = ".kn-install";
+const NEW_SUFFIX: &str = ".kn-new";
+const OLD_SUFFIX: &str = ".kn-old";
+
+/// 替换进行到哪一步 (写在安装记录里, 中断后下次启动据此收拾)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    /// 正在写 `.kn-new` / 备份 `.kn-old`: 目标文件都还没动
+    Stage,
+    /// 正在把 `.kn-new` 换上去: 备份都已完整落盘
+    Swap,
+    /// 全部换好了, 只剩删备份
+    Done,
+}
+
+impl Phase {
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Stage => "stage",
+            Phase::Swap => "swap",
+            Phase::Done => "done",
+        }
+    }
+}
+
+/// 测试用的故障注入: 第 n 次替换时出错 (照常回滚) / 直接停下 (模拟掉电, 什么都不收拾)
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Fault {
+    None,
+    FailAt(usize),
+    CrashAt(usize),
+}
+
+fn journal_path_ok(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.contains('\\')
+        && !rel.chars().any(char::is_control)
+        && !rel.split('/').any(|p| p.is_empty() || p == "." || p == "..")
+        && !rel.ends_with(NEW_SUFFIX)
+        && !rel.ends_with(OLD_SUFFIX)
+        && rel != JOURNAL
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// 写文件并落盘 (fsync)。
+fn write_synced(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
+/// 目录项落盘 (改名 / 删除之后); vfat 上也支持, 失败不算错。
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+fn write_journal(dir: &Path, phase: Phase, entries: &[(String, bool)]) -> Result<(), String> {
+    let mut text = format!("{}\n", phase.name());
+    for (rel, existed) in entries {
+        text.push_str(if *existed { "+ " } else { "- " });
+        text.push_str(rel);
+        text.push('\n');
+    }
+    let path = dir.join(JOURNAL);
+    let tmp = with_suffix(&path, NEW_SUFFIX);
+    write_synced(&tmp, text.as_bytes()).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))?;
+    sync_dir(dir);
+    Ok(())
+}
+
+fn read_journal(dir: &Path) -> Option<(Phase, Vec<(String, bool)>)> {
+    let text = std::fs::read_to_string(dir.join(JOURNAL)).ok()?;
+    let mut lines = text.lines();
+    let phase = match lines.next()? {
+        "stage" => Phase::Stage,
+        "swap" => Phase::Swap,
+        "done" => Phase::Done,
+        _ => return None,
+    };
+    let entries = lines
+        .filter_map(|line| {
+            let (flag, rel) = line.split_at_checked(2)?;
+            let existed = match flag {
+                "+ " => true,
+                "- " => false,
+                _ => return None,
+            };
+            journal_path_ok(rel).then(|| (rel.to_string(), existed))
+        })
+        .collect();
+    Some((phase, entries))
+}
+
+/// 替换程序文件, 任何时刻掉电都能恢复, `bin/kinnovel` 和 `bin/kinnovel.sh` 一直在:
+/// 1. 记下要动哪些文件 (阶段 stage), 全部写成 `*.kn-new` 并 fsync; 原来就有的文件复制一份 `*.kn-old` 并 fsync;
+/// 2. 阶段改为 swap, 逐个把 `*.kn-new` 改名盖到目标上 (说明 / 许可等在前, 程序和启动脚本最后);
+/// 3. 阶段改为 done, 删掉备份和安装记录。
+///
+/// 中途出错: 已换上的改回 `.kn-old`、新增的删掉, 程序目录与安装前逐字节相同。中途掉电: 下次启动时
+/// [`recover_install`] 照同样的办法回到旧版本。
+fn replace_files(files: &[(String, Vec<u8>)], dir: &Path, fault: Fault) -> Result<usize, String> {
+    recover_install(dir);
+    if dir.join(JOURNAL).exists() {
+        return Err("上次安装没能恢复, 请重启后再试".to_string());
+    }
+    let mut order: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    let rank = |rel: &str| match rel {
+        "bin/kinnovel" => 1,
+        "bin/kinnovel.sh" => 2,
+        _ => 0,
+    };
+    order.sort_by_key(|(rel, _)| rank(rel));
+    let entries: Vec<(String, bool)> = order.iter().map(|(rel, _)| (rel.clone(), dir.join(rel).exists())).collect();
+    write_journal(dir, Phase::Stage, &entries)?;
+    let result = (|| {
+        for (rel, data) in &order {
             let target = dir.join(rel);
-            let tmp = PathBuf::from(format!("{}.kn-new", target.display()));
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
             }
-            std::fs::write(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
-            Ok((tmp, target))
-        })
-        .collect::<Result<_, String>>()
-        .inspect_err(|_| {
-            for (rel, _) in &files {
-                let _ = std::fs::remove_file(format!("{}.kn-new", dir.join(rel).display()));
+            let tmp = with_suffix(&target, NEW_SUFFIX);
+            write_synced(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        }
+        for (rel, existed) in &entries {
+            if *existed {
+                let target = dir.join(rel);
+                let old = with_suffix(&target, OLD_SUFFIX);
+                // 复制而不是改名: 换新的时目标一直在
+                std::fs::copy(&target, &old)
+                    .and_then(|_| std::fs::OpenOptions::new().write(true).open(&old)?.sync_all())
+                    .map_err(|e| format!("{}: {e}", old.display()))?;
             }
-        })?;
-    for (tmp, target) in &staged {
-        std::fs::rename(tmp, target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+        write_journal(dir, Phase::Swap, &entries)?;
+        for (i, (rel, _)) in entries.iter().enumerate() {
+            match fault {
+                Fault::FailAt(n) if n == i => return Err("测试: 替换失败".to_string()),
+                Fault::CrashAt(n) if n == i => return Err("测试: 掉电".to_string()),
+                _ => {}
+            }
+            let target = dir.join(rel);
+            std::fs::rename(with_suffix(&target, NEW_SUFFIX), &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+        for (rel, _) in &entries {
+            if let Some(parent) = dir.join(rel).parent() {
+                sync_dir(parent);
+            }
+        }
+        write_journal(dir, Phase::Done, &entries)
+    })();
+    match result {
+        Err(e) if matches!(fault, Fault::CrashAt(_)) => Err(e),
+        Err(e) => {
+            eprintln!("[update] 安装失败, 恢复旧版本: {e}");
+            recover_install(dir);
+            Err(e)
+        }
+        Ok(()) => {
+            recover_install(dir);
+            Ok(entries.len())
+        }
     }
-    Ok(staged.len())
+}
+
+/// 收拾上次没做完的安装 (启动时、每次安装前调用): stage 阶段只删临时文件; swap 阶段把已换上的文件
+/// 改回备份、删掉新增的文件, 回到旧版本 (新版本可以再装一次); done 阶段只删备份。没有安装记录时什么都不做。
+pub fn recover_install(dir: &Path) {
+    let Some((phase, entries)) = read_journal(dir) else {
+        let _ = std::fs::remove_file(dir.join(JOURNAL));
+        let _ = std::fs::remove_file(with_suffix(&dir.join(JOURNAL), NEW_SUFFIX));
+        return;
+    };
+    if phase != Phase::Done {
+        eprintln!("[update] 上次安装没有完成 ({}), 恢复旧版本", phase.name());
+    }
+    // 有文件改不回去时留着它的备份和安装记录, 下次启动再试
+    let mut stuck = false;
+    for (rel, existed) in &entries {
+        let target = dir.join(rel);
+        let (new, old) = (with_suffix(&target, NEW_SUFFIX), with_suffix(&target, OLD_SUFFIX));
+        // `.kn-new` 还在 = 这个文件还没换上
+        let swapped = !new.exists();
+        if phase == Phase::Swap && swapped {
+            if *existed {
+                if old.exists() {
+                    if let Err(e) = std::fs::rename(&old, &target) {
+                        eprintln!("[update] 无法恢复 {}: {e}", target.display());
+                        stuck = true;
+                        continue;
+                    }
+                }
+            } else {
+                let _ = std::fs::remove_file(&target);
+            }
+        }
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_file(&old);
+    }
+    for (rel, _) in &entries {
+        if let Some(parent) = dir.join(rel).parent() {
+            sync_dir(parent);
+        }
+    }
+    if !stuck {
+        let _ = std::fs::remove_file(dir.join(JOURNAL));
+        sync_dir(dir);
+    }
 }
 
 fn u16_at(b: &[u8], at: usize) -> Option<usize> {
@@ -676,6 +891,131 @@ mod tests {
         let at = broken.windows(9).position(|w| w == b"#!/bin/sh").unwrap();
         broken[at + 2] ^= 0xff;
         assert!(unzip(&broken).unwrap_err().contains("校验失败"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 测试目录: 旧版本的程序文件 + 数据。
+    fn old_install(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kn-update-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        for (rel, data) in OLD_FILES {
+            std::fs::write(dir.join(rel), data).unwrap();
+        }
+        dir
+    }
+
+    const OLD_FILES: [(&str, &[u8]); 5] = [
+        ("bin/kinnovel", b"old binary"),
+        ("bin/kinnovel.sh", b"#!/bin/sh\nold\n"),
+        ("config.xml", b"<version>1.6.0</version>"),
+        ("menu.json", b"{\"old\": 1}"),
+        ("data/settings.json", b"{}"),
+    ];
+
+    fn new_files() -> Vec<(String, Vec<u8>)> {
+        [
+            ("README.md", b"new readme".to_vec()),
+            ("bin/kinnovel", vec![b'n'; 5000]),
+            ("bin/kinnovel.sh", b"#!/bin/sh\nnew\n".to_vec()),
+            ("config.xml", b"<version>1.7.0</version>".to_vec()),
+            ("menu.json", b"{\"new\": 1}".to_vec()),
+            ("data2/LICENSE", b"licence".to_vec()),
+        ]
+        .into_iter()
+        .map(|(r, d)| (r.to_string(), d))
+        .collect()
+    }
+
+    /// 目录里所有文件 (相对路径 → 内容)。
+    fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(at).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(root, &p, out);
+                } else {
+                    let rel = p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.insert(rel, std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn assert_old(dir: &Path) {
+        let snap = snapshot(dir);
+        let want: BTreeMap<String, Vec<u8>> = OLD_FILES.iter().map(|(r, d)| (r.to_string(), d.to_vec())).collect();
+        assert_eq!(snap, want);
+    }
+
+    #[test]
+    fn replacement_puts_the_program_last_and_leaves_no_temporaries() {
+        let dir = old_install("ok");
+        assert_eq!(replace_files(&new_files(), &dir, Fault::None), Ok(6));
+        let snap = snapshot(&dir);
+        for (rel, data) in new_files() {
+            assert_eq!(snap.get(&rel), Some(&data), "{rel}");
+        }
+        assert_eq!(snap.get("data/settings.json").map(Vec::as_slice), Some(&b"{}"[..]));
+        assert_eq!(snap.len(), 7, "{:?}", snap.keys());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_replacement_restores_every_old_file() {
+        // 每一步失败都回到旧版本, 没有临时文件
+        for at in 0..6 {
+            let dir = old_install("fail");
+            assert!(replace_files(&new_files(), &dir, Fault::FailAt(at)).is_err());
+            assert_old(&dir);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        // 目标是个目录 (改名、备份都会失败)
+        let dir = old_install("dir");
+        std::fs::create_dir_all(dir.join("README.md")).unwrap();
+        assert!(replace_files(&new_files(), &dir, Fault::None).is_err());
+        assert!(dir.join("README.md").is_dir());
+        std::fs::remove_dir(dir.join("README.md")).unwrap();
+        assert_old(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn interrupted_install_is_rolled_back_on_the_next_start() {
+        for at in 0..6 {
+            let dir = old_install("crash");
+            assert!(replace_files(&new_files(), &dir, Fault::CrashAt(at)).is_err());
+            assert!(dir.join(JOURNAL).exists());
+            // 程序和启动脚本任何时候都在
+            assert!(dir.join("bin/kinnovel").is_file() && dir.join("bin/kinnovel.sh").is_file());
+            recover_install(&dir);
+            assert_old(&dir);
+            // 之后照常能装
+            assert_eq!(replace_files(&new_files(), &dir, Fault::None), Ok(6));
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        // 写临时文件时中断 (stage) / 删备份时中断 (done): 只收拾临时文件
+        let dir = old_install("stage");
+        let entries: Vec<(String, bool)> = vec![("bin/kinnovel".into(), true), ("README.md".into(), false)];
+        write_journal(&dir, Phase::Stage, &entries).unwrap();
+        std::fs::write(dir.join("bin/kinnovel.kn-new"), b"half").unwrap();
+        std::fs::write(dir.join("bin/kinnovel.kn-old"), b"old bin").unwrap();
+        recover_install(&dir);
+        assert_old(&dir);
+        write_journal(&dir, Phase::Done, &entries).unwrap();
+        std::fs::write(dir.join("README.md"), b"new").unwrap();
+        std::fs::write(dir.join("bin/kinnovel.kn-old"), b"old binary").unwrap();
+        recover_install(&dir);
+        assert!(!dir.join("bin/kinnovel.kn-old").exists() && !dir.join(JOURNAL).exists());
+        assert_eq!(std::fs::read(dir.join("README.md")).unwrap(), b"new");
+        // 记录里的可疑路径不碰
+        std::fs::write(dir.join(JOURNAL), "swap\n- ../outside\n- bin/../menu.json\n").unwrap();
+        recover_install(&dir);
+        assert!(dir.join("menu.json").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

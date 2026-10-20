@@ -453,6 +453,8 @@ fn run_device(start: StartMode) {
     let paths = Paths::from_env();
     crash::install_panic_hook(&paths);
     let crash_notice = crash::take_crash_notice(&paths);
+    // 上次应用内更新中途断电: 回到旧版本的文件
+    update::recover_install(&update::program_dir(&paths));
     let mut display = FbinkDisplay::open().expect("FBInk 初始化失败");
     let info = display.info().clone();
     eprintln!(

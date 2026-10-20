@@ -19,10 +19,41 @@ use serde_json::{json, Value};
 use crate::store::{self, atomic_write, Paths};
 use crate::KinNovel;
 
-static COVERS: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
+/// 书 id → 封面 URL, 最多记这么多本 (超出时丢掉最久没用过的四分之一)
+const COVERS_MAX: usize = 2048;
 
-fn covers() -> &'static Mutex<HashMap<i64, String>> {
-    COVERS.get_or_init(Default::default)
+/// 书 id → (封面 URL, 最近一次记下 / 查询的序号)
+#[derive(Default)]
+struct Covers {
+    map: HashMap<i64, (String, u64)>,
+    tick: u64,
+}
+
+impl Covers {
+    fn insert(&mut self, book_id: i64, url: &str) {
+        self.tick += 1;
+        self.map.insert(book_id, (url.to_string(), self.tick));
+        if self.map.len() > COVERS_MAX {
+            let mut ticks: Vec<u64> = self.map.values().map(|(_, t)| *t).collect();
+            let (_, &mut cut, _) = ticks.select_nth_unstable(COVERS_MAX / 4);
+            self.map.retain(|_, (_, t)| *t > cut);
+        }
+    }
+
+    fn get(&mut self, book_id: i64) -> Option<String> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.get_mut(&book_id).map(|(url, t)| {
+            *t = tick;
+            url.clone()
+        })
+    }
+}
+
+static COVERS: OnceLock<Mutex<Covers>> = OnceLock::new();
+
+fn covers() -> std::sync::MutexGuard<'static, Covers> {
+    COVERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 启动脚本卸载了系统屏保。
@@ -34,13 +65,13 @@ pub fn enabled() -> bool {
 /// 记下一本书的封面地址 (书目接口解析时调用)。
 pub fn note_cover(book_id: i64, url: &str) {
     if book_id > 0 && !url.is_empty() {
-        covers().lock().unwrap_or_else(|e| e.into_inner()).insert(book_id, url.to_string());
+        covers().insert(book_id, url);
     }
 }
 
 /// 书目接口里见过的封面地址。
 pub fn known_cover(book_id: i64) -> Option<String> {
-    covers().lock().unwrap_or_else(|e| e.into_inner()).get(&book_id).cloned()
+    covers().get(book_id)
 }
 
 fn cover_file(paths: &Paths) -> std::path::PathBuf {
@@ -63,7 +94,7 @@ pub fn on_book_opened(paths: &Paths, net: Option<kn_net::Client>, book_id: i64, 
     if !enabled() {
         return;
     }
-    let url = covers().lock().unwrap_or_else(|e| e.into_inner()).get(&book_id).cloned();
+    let url = covers().get(book_id);
     let url = match url {
         Some(u) => u,
         None => match saved(paths) {
@@ -176,5 +207,27 @@ impl Page<KinNovel> for SleepPage {
 
     fn on_input(&mut self, _cx: &mut Cx<KinNovel>, _event: &InputEvent) -> Transition<KinNovel> {
         Transition::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_urls_are_bounded_and_keep_recent_books() {
+        let mut c = Covers::default();
+        c.insert(1, "a");
+        for id in 2..10_000 {
+            c.insert(id, "u");
+            // 正在读的书一直被查询
+            if id % 100 == 0 {
+                assert_eq!(c.get(1).as_deref(), Some("a"));
+            }
+        }
+        assert!(c.map.len() <= COVERS_MAX);
+        assert_eq!(c.get(1).as_deref(), Some("a"));
+        assert!(c.get(9_999).is_some());
+        assert!(c.get(2).is_none());
     }
 }
