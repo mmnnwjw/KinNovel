@@ -602,11 +602,11 @@ impl Page<KinNovel> for CatalogPage {
                             }
                         }
                         self.confirm_delete = None;
-                        cx.request_redraw(RefreshHint::Clean);
+                        cx.request_ui_redraw(RefreshHint::Clean);
                     }
                     Some(CAT_HIT_CANCEL) => {
                         self.confirm_delete = None;
-                        cx.request_redraw(RefreshHint::Clean);
+                        cx.request_ui_redraw(RefreshHint::Clean);
                     }
                     _ => {}
                 }

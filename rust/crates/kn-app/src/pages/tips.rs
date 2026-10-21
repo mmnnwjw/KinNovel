@@ -126,8 +126,8 @@ pub fn input(cx: &mut Cx<KinNovel>, event: &InputEvent, tip: &'static Tip) -> bo
 
 fn close(cx: &mut Cx<KinNovel>) {
     cx.app.tip_open = None;
-    // 弹窗盖住了一大块页面: 闪刷一次清掉残影
-    cx.request_redraw(RefreshHint::Flash);
+    // 提示关闭按普通 UI 恢复, 避免关闭说明时整屏闪烁
+    cx.request_ui_redraw(RefreshHint::Flash);
 }
 
 /// 居中卡片: 标题、逐条说明 (自动折行)、底部两个按钮; 先登记一个吞掉框外点击的全屏区域。

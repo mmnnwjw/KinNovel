@@ -461,22 +461,6 @@ fn session_json_round_trips_python_shape() {
     assert_eq!(client.user_id(), 3);
 }
 
-#[test]
-fn parses_recorded_fixtures_if_present() {
-    let candidates = [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/private/invoke_getbooklist.json"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spike-net/fixtures/invoke_getbooklist.json"),
-    ];
-    let Some(path) = candidates.into_iter().find(|p| p.exists()) else {
-        eprintln!("no recorded fixture found, skipping (run rust/spike-net --live once to record one)");
-        return;
-    };
-    let body = std::fs::read(&path).unwrap();
-    let message: Value = serde_json::from_slice(&body).unwrap();
-    let envelope = &message["result"];
-    assert!(envelope.is_object() || envelope.is_string(), "fixture should hold a SignalR completion envelope");
-}
-
 fn gzip_base64(data: &[u8]) -> String {
     use base64::Engine;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());

@@ -236,6 +236,40 @@ enum Status {
     Ready,
 }
 
+/// 最近一次提交的可见插图, 与预取、正文位图缓存和时钟重绘分开记录。
+#[derive(Clone, Debug, PartialEq)]
+struct ImageFrame {
+    page: (i64, u64, usize, u32, u32),
+    images: Vec<(Rect, String, u64)>,
+    coverage: f32,
+}
+
+impl ImageFrame {
+    fn needs_clean(&self, shown: Option<&Self>) -> bool {
+        let changed = shown != Some(self);
+        let previous = shown.map_or(0.0, |s| s.coverage);
+        changed && (self.coverage >= 0.075 || (self.coverage - previous).abs() >= 0.075)
+    }
+}
+
+/// 按横向条带求矩形并集面积, 不把重叠图片计算两次。
+fn image_area(rects: &[Rect]) -> u64 {
+    let mut xs: Vec<_> = rects.iter().flat_map(|r| [r.x, r.right()]).collect();
+    xs.sort_unstable();
+    xs.dedup();
+    xs.windows(2).map(|x| {
+        let mut spans: Vec<_> = rects.iter().filter(|r| r.x < x[1] && r.right() > x[0]).map(|r| (r.y, r.bottom())).collect();
+        spans.sort_unstable();
+        let mut bottom = i32::MIN;
+        let mut height = 0u64;
+        for (y, end) in spans {
+            height += (end - y.max(bottom)).max(0) as u64;
+            bottom = bottom.max(end);
+        }
+        (x[1] - x[0]) as u64 * height
+    }).sum()
+}
+
 pub struct ReaderPage {
     book_id: i64,
     sort_num: i64,
@@ -261,6 +295,11 @@ pub struct ReaderPage {
     /// (页号, 正文位图), 最近使用的在末尾
     cache: Vec<(usize, Bitmap)>,
     images: HashMap<String, ImageSlot>,
+    image_versions: HashMap<String, u64>,
+    drawn_images: Option<ImageFrame>,
+    shown_images: Option<ImageFrame>,
+    chrome_rects: Vec<Rect>,
+    footnote_rect: Option<Rect>,
     /// 当前页已显示插图的实际绘制区域 (屏幕坐标) 与 (URL, 请求高度), 点击预览用
     image_hits: Vec<(Rect, String, u32)>,
     chrome: bool,
@@ -307,6 +346,11 @@ impl ReaderPage {
             page: 0,
             cache: Vec::new(),
             images: HashMap::new(),
+            image_versions: HashMap::new(),
+            drawn_images: None,
+            shown_images: None,
+            chrome_rects: Vec::new(),
+            footnote_rect: None,
             image_hits: Vec::new(),
             chrome: false,
             next_leave: Leave::Exit,
@@ -805,6 +849,7 @@ impl ReaderPage {
             }
         };
         self.images.insert(loaded.url.clone(), slot);
+        *self.image_versions.entry(loaded.url.clone()).or_default() += 1;
         // 含这张图的页位图作废; 当前页需要重画
         let pages = &self.pages;
         let has = |i: usize| pages.get(i).is_some_and(|p| p.iter().any(|it| matches!(it, PageItem::Image { url, .. } if *url == loaded.url)));
@@ -954,7 +999,10 @@ impl ReaderPage {
         self.page = 0;
         self.cache.clear();
         self.images.clear();
+        self.image_versions.clear();
         self.image_hits.clear();
+        self.chrome_rects.clear();
+        self.footnote_rect = None;
         self.chrome = false;
         self.note.clear();
         self.saved = None;
@@ -1142,7 +1190,8 @@ impl ReaderPage {
             ribbon(frame, icon, self.bookmark_on_page().is_some(), (4.0 * m.scale).max(3.0), theme.foreground);
             cx.hits.add(HIT_BOOKMARK, mark);
         }
-        super::light::draw(&mut ink, frame, cx.hits, &theme, &m, &cx.app.light, w, bar.bottom() + 2);
+        let light_bottom = super::light::draw(&mut ink, frame, cx.hits, &theme, &m, &cx.app.light, w, bar.bottom() + 2);
+        self.chrome_rects = vec![Rect::new(0, 0, w, light_bottom as u32)];
 
         // 底部面板
         let pad = m.margin as i32 / 2;
@@ -1152,6 +1201,7 @@ impl ReaderPage {
         let track_h = (10.0 * m.scale).max(8.0) as i32;
         let panel_h = pad + info_h + gap / 2 + track_h + gap + btn_h + gap + btn_h + pad;
         let panel = Rect::new(0, h as i32 - panel_h, w, panel_h as u32);
+        self.chrome_rects.push(panel);
         frame.fill_rect(panel, theme.background);
         frame.fill_rect(Rect::new(0, panel.y, w, 2), theme.foreground);
         cx.hits.add(HIT_PANEL, panel).no_feedback();
@@ -1217,6 +1267,7 @@ impl ReaderPage {
             let nw = (text_w + 2 * m.margin).min(w - 2 * m.margin);
             let nh = (m.small * 2.2) as u32;
             let r = Rect::new((w - nw) as i32 / 2, panel.y - nh as i32 - gap, nw, nh);
+            self.chrome_rects.push(r);
             frame.rounded_rect(r, nh / 2, Some(theme.foreground), None, 0);
             ink.text_centered(frame, r.inflate(-(m.margin as i32) / 2), &self.note, m.small, theme.background);
         }
@@ -1230,9 +1281,11 @@ impl ReaderPage {
                 cx.app.light.refresh();
             } else {
                 self.note.clear();
+                for rect in self.chrome_rects.drain(..) {
+                    cx.request_clean(rect);
+                }
             }
-            // 夜间关菜单: 按钮细框在 GCK16 局部刷新后留淡淡的残影 (相机实拍), 对变化区域闪刷
-            cx.request_redraw(if !visible && cx.theme.night { RefreshHint::Clean } else { RefreshHint::Ui });
+            cx.request_redraw(RefreshHint::Ui);
         }
     }
 
@@ -1352,6 +1405,7 @@ impl Page<KinNovel> for ReaderPage {
     }
 
     fn render(&mut self, cx: &mut Cx<KinNovel>, frame: &mut Bitmap) {
+        self.drawn_images = None;
         'body: {
             let theme = cx.theme;
             let m = cx.app.metrics;
@@ -1400,8 +1454,27 @@ impl Page<KinNovel> for ReaderPage {
             if let Some(n) = self.footnote {
                 self.draw_footnote(cx, frame, n);
             }
+            // 从当前页实际就绪的图片登记, 缓存命中也走同一路径。占位和失败提示不计入。
+            let content = Rect::new(0, top, cx.width, cx.height - top as u32);
+            let images: Vec<_> = self.image_hits.iter().filter_map(|(r, url, _)| {
+                Some((r.intersect(&content)?, url.clone(), *self.image_versions.get(url).unwrap_or(&0)))
+            }).collect();
+            let coverage = image_area(&images.iter().map(|i| i.0).collect::<Vec<_>>()) as f32 / frame.bounds().area() as f32;
+            self.drawn_images = Some(ImageFrame {
+                page: (self.sort_num, self.load_generation, self.page, cx.width, cx.height), images, coverage,
+            });
         }
         super::tips::show(cx, frame, &super::tips::READER, matches!(self.status, Status::Ready));
+    }
+
+    fn refresh_hint(&self) -> Option<RefreshHint> {
+        self.drawn_images.as_ref().filter(|f| f.needs_clean(self.shown_images.as_ref())).map(|_| RefreshHint::Flash)
+    }
+
+    fn presented(&mut self) {
+        if let Some(frame) = &self.drawn_images {
+            self.shown_images = Some(frame.clone());
+        }
     }
 
     fn on_input(&mut self, cx: &mut Cx<KinNovel>, event: &InputEvent) -> Transition<KinNovel> {
@@ -1412,7 +1485,9 @@ impl Page<KinNovel> for ReaderPage {
         if self.footnote.is_some() {
             if matches!(event, InputEvent::Gesture(g) if g.kind != GestureKind::Down) || matches!(event, InputEvent::Key { pressed: true, .. }) {
                 self.footnote = None;
-                cx.request_redraw(RefreshHint::Clean);
+                if let Some(rect) = self.footnote_rect.take() {
+                    cx.request_clean(rect);
+                }
             }
             return Transition::None;
         }
@@ -1482,11 +1557,11 @@ impl Page<KinNovel> for ReaderPage {
                         Transition::None
                     }
                     GestureKind::SwipeLeft => {
-                        self.chrome = false;
+                        self.set_chrome(cx, false);
                         self.turn(cx, 1)
                     }
                     GestureKind::SwipeRight => {
-                        self.chrome = false;
+                        self.set_chrome(cx, false);
                         self.turn(cx, -1)
                     }
                     GestureKind::SwipeDown => {
@@ -1565,6 +1640,7 @@ impl ReaderPage {
         }
         let card_h = pad + title_h + lines.len() as i32 * line_h + pad / 4;
         let card = Rect::new(pad, (cx.height as i32 - card_h) / 2, card_w as u32, card_h as u32);
+        self.footnote_rect = Some(card);
         frame.rounded_rect(card, m.radius, Some(theme.background), Some(theme.foreground), 3);
         let chain = cx.app.ui_fonts.clone();
         {
@@ -1618,6 +1694,43 @@ fn ribbon(frame: &mut Bitmap, r: Rect, filled: bool, line: f32, color: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_images_clean_once_after_successful_submission() {
+        let dir = std::env::temp_dir().join(format!("kn-reader-refresh-{}", std::process::id()));
+        let paths = store::Paths { app_dir: dir.clone() };
+        let config = store::Config::load(paths.settings_file());
+        let mut fonts = kn_render::FontStore::new();
+        let chain = vec![fonts.load_bytes(crate::SYMBOL_FONT.to_vec()).unwrap()];
+        let mut app = KinNovel::new(paths, config, chain.clone(), 600, 800, 300, kn_platform::Frontlight::detect(None), false);
+        let mut glyphs = kn_render::GlyphCache::new(1024 * 1024);
+        let mut hits = kn_ui::Hits::default();
+        let mut frame = Bitmap::new(600, 800, 255);
+        let mut page = ReaderPage::new(5, 2, Entry::Resume);
+        page.status = Status::Ready;
+        page.chain = chain;
+        page.pages = vec![vec![PageItem::Image { url: "image".into(), x: 100, y: 20, width: 300, height: 400, path: "/img".into(), offset: 0 }], vec![]];
+        page.images.insert("image".into(), ImageSlot::Pending);
+        kn_ui::render_once(&mut app, &mut fonts, &mut glyphs, &mut hits, &mut page, &mut frame);
+        assert_eq!(page.refresh_hint(), None); // 占位符不算图片
+        page.presented();
+        page.images.insert("image".into(), ImageSlot::Ready(Bitmap::new(300, 400, 100)));
+        page.image_versions.insert("image".into(), 1);
+        page.cache.clear();
+        kn_ui::render_once(&mut app, &mut fonts, &mut glyphs, &mut hits, &mut page, &mut frame);
+        assert_eq!(page.refresh_hint(), Some(RefreshHint::Flash));
+        // 只渲染、没有成功提交, 不能消耗本次清理。
+        kn_ui::render_once(&mut app, &mut fonts, &mut glyphs, &mut hits, &mut page, &mut frame);
+        assert_eq!(page.refresh_hint(), Some(RefreshHint::Flash));
+        page.presented();
+        kn_ui::render_once(&mut app, &mut fonts, &mut glyphs, &mut hits, &mut page, &mut frame);
+        assert_eq!(page.refresh_hint(), None); // 正文位图缓存命中、时钟重绘
+        page.page = 1;
+        kn_ui::render_once(&mut app, &mut fonts, &mut glyphs, &mut hits, &mut page, &mut frame);
+        assert_eq!(page.refresh_hint(), Some(RefreshHint::Flash));
+        app.net_client.shutdown();
+        let _ = std::fs::remove_dir_all(dir);
+    }
     use std::time::Duration;
 
     fn job(dir: &std::path::Path, net: Option<kn_net::Client>) -> LoadJob {

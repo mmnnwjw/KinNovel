@@ -44,6 +44,7 @@ const COMIC_DIRECTION: &[(&str, &str)] = &[("ltr", "从左往右"), ("rtl", "从
 const COMIC_QUALITY: &[(&str, &str)] = &[("high", "高清"), ("standard", "标准")];
 const ORIENTATION: &[(&str, &str)] = &[("portrait", "竖屏"), ("landscape", "横屏")];
 const LANDSCAPE_SIDE: &[(&str, &str)] = &[("left", "向左转"), ("right", "向右转")];
+const UI_REFRESH: &[(&str, &str)] = &[("smooth", "流畅"), ("classic", "经典")];
 /// 漫画分组的下标 (漫画阅读页的 "设置" 直接打开它)。
 const COMIC_GROUP: usize = 3;
 
@@ -65,6 +66,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         "显示",
         &[
             toggle("night_mode", "夜间模式", "", false),
+            Setting { key: "ui_refresh_mode", label: "UI 刷新模式", note: "默认流畅，经典为 1.6.4", kind: Kind::Choice(UI_REFRESH), default: 0.0 },
             toggle("page_turn_animation", "翻页动画", "PW5 及更新机型", true),
             step(super::SWIPE_STEPS, "翻页动画阶数", "越多越细腻, 动画越长", 6.0, 60.0, 6.0, 0, 12.0),
             Setting { key: super::LANDSCAPE_SIDE, label: "横屏握持", note: "设备往哪边转", kind: Kind::Choice(LANDSCAPE_SIDE), default: 0.0 },
@@ -264,8 +266,7 @@ impl Page<KinNovel> for SettingsPage {
                 let group = (id - GROUP_BASE) as usize;
                 if group != self.group {
                     self.group = group;
-                    // 换分组相当于换页: 闪刷, 否则下方空白处的旧残影不会被刷到 (差分只刷变化的像素)
-                    cx.request_redraw(RefreshHint::Flash);
+                    cx.request_ui_redraw(RefreshHint::Flash);
                 }
             }
             HitId(id) if id >= SET_BASE => {

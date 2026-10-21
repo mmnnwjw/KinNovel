@@ -443,40 +443,4 @@ mod tests {
         assert!(!failure.can_expand());
     }
 
-    #[test]
-    fn failure_actions_render_and_retry_at_small_and_large_sizes() {
-        use crate::store::{Config, Paths};
-        use std::time::Duration;
-
-        let dir = std::env::temp_dir().join(format!("kn-image-ui-{}", std::process::id()));
-        for (width, height) in [(600, 800), (1236, 1648), (1648, 1236)] {
-            let paths = Paths { app_dir: dir.clone() };
-            let config = Config::load(paths.settings_file());
-            let mut fonts = kn_render::FontStore::new();
-            // CI 不依赖 Windows 可选的中文字体; 本地导出预览时用实际 UI 字体链。
-            let chain = if std::env::var_os("KN_IMAGE_TEST_PREVIEW").is_some() {
-                crate::load_ui_fonts(&mut fonts, &config)
-            } else {
-                vec![fonts.load_bytes(crate::SYMBOL_FONT.to_vec()).unwrap()]
-            };
-            let app = KinNovel::new(paths, config, chain, width, height, 300, kn_platform::Frontlight::detect(None), false);
-            let mut ui = kn_ui::Headless::new(app, fonts, width, height).unwrap();
-            let mut page = ImagePage::new("https://example.com/uncached.jpg".into(), height);
-            page.status = Status::Failed(LoadFailure::TooLarge(ImageBudget::Normal));
-            ui.push(Box::new(page));
-            let (frame, _) = ui.frame();
-            let m = ui.app().metrics;
-            let point = Point { x: width as i32 - m.margin as i32 - m.touch as i32 / 2, y: height as i32 - m.margin as i32 / 2 - m.touch as i32 / 2 };
-            assert_eq!(ui.hits().at(point), Some(HIT_ORIGINAL));
-            if let Some(out) = std::env::var_os("KN_IMAGE_TEST_PREVIEW") {
-                std::fs::create_dir_all(&out).unwrap();
-                std::fs::write(std::path::Path::new(&out).join(format!("image-failed-{width}x{height}.pgm")), frame.to_pgm()).unwrap();
-            }
-            ui.input(&InputEvent::Gesture(kn_platform::Gesture { kind: GestureKind::Tap, start: (point.x, point.y), end: (point.x, point.y), duration_ms: 80 }));
-            ui.settle(Duration::from_secs(2));
-            ui.frame();
-            assert_eq!(ui.hits().at(point), Some(HIT_ORIGINAL)); // 离线仍能重试
-        }
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }

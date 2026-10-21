@@ -14,10 +14,10 @@ use kn_platform::{Display, GestureKind, InputEvent, InputReader, KeyCode, PowerE
 
 /// 按下电源键后等待系统进入屏保的时限; 超时说明这次按键没有引起休眠, 重新接管屏幕。
 const POWER_KEY_GRACE: Duration = Duration::from_secs(15);
-use kn_render::{Bitmap, FontStore, GlyphCache, Point};
+use kn_render::{Bitmap, FontStore, GlyphCache, Point, Rect};
 
 use crate::hits::Hits;
-use crate::refresh::{RefreshHint, RefreshScheduler};
+use crate::refresh::{RefreshHint, RefreshScheduler, UiRefreshMode};
 use crate::tasks::{Lane, Poster, Submitter, Tasks, Waker};
 
 /// 网络队列的线程数 (本地队列另有 1 个线程, 见 `tasks::Lane`)。
@@ -84,6 +84,9 @@ pub enum Backdrop {
 pub trait App: Sized + 'static {
     fn home_page(&mut self) -> Box<dyn Page<Self>>;
     fn theme(&self) -> Theme;
+    fn ui_refresh_mode(&self) -> UiRefreshMode {
+        UiRefreshMode::Smooth
+    }
     /// 每分钟时钟走动时调用 (顶栏时间/电量), 返回是否需要重绘。
     fn on_minute(&mut self) -> bool {
         true
@@ -133,6 +136,7 @@ pub struct Cx<'a, A: App> {
     alive: &'a Alive,
     redraw: &'a mut Option<RefreshHint>,
     swipe: &'a mut Option<SwipeDir>,
+    clean: &'a mut Vec<Rect>,
     timers: &'a mut Timers,
 }
 
@@ -211,6 +215,18 @@ impl<'a, A: App> Cx<'a, A> {
         });
     }
 
+    /// 普通 UI 的弹窗/键盘恢复: 经典模式保留旧版清理请求, 流畅模式只做普通重绘。
+    pub fn request_ui_redraw(&mut self, classic_hint: RefreshHint) {
+        let hint = if self.app.ui_refresh_mode() == UiRefreshMode::Classic { classic_hint } else { RefreshHint::Ui };
+        self.request_redraw(hint);
+    }
+
+    /// 清理原控件区域, 即使重绘后像素相同也提交; 不参与全局 hint 的强弱覆盖。
+    pub fn request_clean(&mut self, rect: Rect) {
+        self.clean.push(rect);
+        self.request_redraw(RefreshHint::Ui);
+    }
+
     /// 阅读翻页: 等同 `request_redraw(Turn)`, 并请求 MTK 原生翻页动画 (方向 = 内容移动方向;
     /// 设备不支持时显示层忽略, 本次要闪刷时动画让位)。
     pub fn request_turn(&mut self, swipe: Option<SwipeDir>) {
@@ -218,8 +234,8 @@ impl<'a, A: App> Cx<'a, A> {
         *self.swipe = swipe;
     }
 
-    /// 翻页且整屏闪刷 (漫画: 大面积灰阶, 每页清残影), 同样带 MTK 翻页动画 —— FBInk 的动画标志与
-    /// 闪刷互不排斥 (UPDATE_MODE_FULL + 动画)。小说阅读页不用它: 残影预算触发的闪刷仍不带动画。
+    /// 翻页且整屏清理 (漫画: 大面积灰阶, 每页清残影)。显示层让动画让位于清理,
+    /// 避免 FBInk 动画分支把 FULL/GC16 改成 PARTIAL/AUTO。
     pub fn request_flash_turn(&mut self, swipe: Option<SwipeDir>) {
         self.request_redraw(RefreshHint::Flash);
         *self.swipe = swipe;
@@ -377,6 +393,14 @@ pub trait Page<A: App> {
     /// 整帧渲染到 `frame` (已用主题背景色清空) 并登记命中区域 (`cx.hits` 已清空)。
     fn render(&mut self, cx: &mut Cx<A>, frame: &mut Bitmap);
 
+    /// 本帧绘制结果附带的刷新意图, 在 render 后、规划前读取, 不消耗下一帧重绘请求。
+    fn refresh_hint(&self) -> Option<RefreshHint> {
+        None
+    }
+
+    /// 本帧全部更新已成功提交 (不是面板完成通知)。用于记录实际显示的内容元数据。
+    fn presented(&mut self) {}
+
     /// 处理手势/按键。`Down` 手势也会送达 (多数页面忽略即可)。
     fn on_input(&mut self, cx: &mut Cx<A>, event: &InputEvent) -> Transition<A>;
 
@@ -437,6 +461,7 @@ struct Runtime<A: App> {
     alive: Alive,
     redraw: Option<RefreshHint>,
     swipe: Option<SwipeDir>,
+    clean: Vec<Rect>,
     /// 逻辑画面尺寸 (横屏时与 panel 互换)
     width: u32,
     height: u32,
@@ -460,6 +485,7 @@ impl<A: App> Runtime<A> {
             alive: Alive::default(),
             redraw: None,
             swipe: None,
+            clean: Vec::new(),
             width: panel.0,
             height: panel.1,
             panel,
@@ -498,6 +524,7 @@ impl<A: App> Runtime<A> {
             alive: &self.alive,
             redraw: &mut self.redraw,
             swipe: &mut self.swipe,
+            clean: &mut self.clean,
             timers: &mut self.timers,
         }
     }
@@ -590,11 +617,8 @@ impl<A: App> Stack<A> {
             }
         }
         if nav_flash && self.top().page.flash_on_enter() {
-            // 进入/离开二级页面: 整屏 GC16 + 残影预算 (约每 UI_FLASH_EVERY 屏闪一次), 被点那一行的按下反相
-            // 由定点清残影单独闪刷。以前每次都整屏闪刷: 残影其实来自按下反馈与闪刷撞车 (见 kn-platform
-            // display.rs 的进行中刷新等待), 修好之后不必每次闪 (用户嫌闪得多)。
-            // 夜间 (白字黑底) 局部刷新残影重得多 (相机实拍: 进详情页后下半屏留着列表行), 仍然每次整屏闪刷
-            let hint = if rt.app.theme().night { RefreshHint::Flash } else { RefreshHint::Ui };
+            // 流畅模式导航不主动闪刷; 经典模式保留夜间闪刷。
+            let hint = if rt.app.ui_refresh_mode() == UiRefreshMode::Classic && rt.app.theme().night { RefreshHint::Flash } else { RefreshHint::Ui };
             if rt.redraw.is_none_or(|h| h.strength() < hint.strength()) {
                 rt.redraw = Some(hint);
             }
@@ -660,6 +684,7 @@ pub fn render_once<A: App>(
     let tasks: Tasks<Delivery<A>> = Tasks::new(1, Waker::new().expect("waker"));
     let mut redraw = None;
     let mut swipe = None;
+    let mut clean = Vec::new();
     let mut timers = Timers::default();
     let alive = Alive::default();
     let theme = app.theme();
@@ -679,6 +704,7 @@ pub fn render_once<A: App>(
         alive: &alive,
         redraw: &mut redraw,
         swipe: &mut swipe,
+        clean: &mut clean,
         timers: &mut timers,
     };
     page.render(&mut cx, frame);
@@ -886,7 +912,15 @@ impl<A: App> Headless<A> {
         self.rt.hits.clear();
         let instance = top.instance;
         top.page.render(&mut self.rt.cx(instance), &mut frame);
-        (frame, self.rt.redraw.take())
+        let mut hint = self.rt.redraw.take();
+        if let Some(rendered) = top.page.refresh_hint() {
+            if hint.is_none_or(|h| h.strength() < rendered.strength()) {
+                hint = Some(rendered);
+            }
+        }
+        self.rt.clean.clear();
+        top.page.presented();
+        (frame, hint)
     }
 
     pub fn app(&mut self) -> &mut A {
@@ -1155,9 +1189,10 @@ pub fn run<A: App>(
         if let Some(mut hint) = rt.redraw.take() {
             if !sleeping {
                 let theme = rt.app.theme();
+                scheduler.set_ui_mode(rt.app.ui_refresh_mode());
+                scheduler.set_background(theme.background);
                 if theme != last_theme {
                     last_theme = theme;
-                    scheduler.set_background(theme.background);
                     display.set_night(theme.night);
                     hint = RefreshHint::Flash;
                 }
@@ -1213,24 +1248,35 @@ pub fn run<A: App>(
                 rt.hits.clear();
                 let instance = top.instance;
                 top.page.render(&mut rt.cx(instance), &mut frame);
+                if let Some(rendered) = top.page.refresh_hint() {
+                    if rendered.strength() > hint.strength() {
+                        hint = rendered;
+                    }
+                }
                 let rendered = started.elapsed();
                 let swipe = rt.swipe.take();
-                let mut plan = scheduler.plan(&frame, hint);
+                let clean = std::mem::take(&mut rt.clean);
+                let mut plan = scheduler.plan_with_clean(&frame, hint, &clean);
                 if let [req] = plan.as_mut_slice() {
-                    // 翻页刷新 (不闪) 或 request_flash_turn 的整屏闪刷才带动画; swipe 只由这两者设置
-                    if (hint == RefreshHint::Turn && !req.flash) || (hint == RefreshHint::Flash && req.flash) {
+                    // 上层传递方向, 清理与动画的互斥统一由显示层执行。
+                    if display.info().supports_swipe && ((hint == RefreshHint::Turn && !req.flash) || (hint == RefreshHint::Flash && req.flash)) {
                         req.swipe = swipe;
                     }
                 }
                 let planned = started.elapsed();
+                let mut submitted = !plan.is_empty();
                 for req in &plan {
                     match display.present(&frame, req) {
                         Ok(_) => scheduler.commit(&frame, req, hint),
                         Err(_) => {
+                            submitted = false;
                             scheduler.invalidate();
                             break;
                         }
                     }
+                }
+                if submitted {
+                    top.page.presented();
                 }
                 if debug {
                     eprintln!(
@@ -1267,6 +1313,8 @@ mod tests {
     struct TestApp {
         /// 页面收到的消息 ("页面名:消息")
         log: Vec<String>,
+        night: bool,
+        ui_mode: UiRefreshMode,
     }
 
     impl App for TestApp {
@@ -1274,7 +1322,10 @@ mod tests {
             Box::new(TestPage::new("home", |_| {}))
         }
         fn theme(&self) -> Theme {
-            Theme::new(false)
+            Theme::new(self.night)
+        }
+        fn ui_refresh_mode(&self) -> UiRefreshMode {
+            self.ui_mode
         }
     }
 
@@ -1327,6 +1378,28 @@ mod tests {
 
     fn headless() -> Headless<TestApp> {
         Headless::new(TestApp::default(), FontStore::new(), 100, 100).unwrap()
+    }
+
+    #[test]
+    fn ordinary_navigation_does_not_flash_in_either_theme() {
+        for night in [false, true] {
+            let mut h = headless();
+            h.rt.app.night = night;
+            h.rt.redraw = None;
+            h.push(Box::new(TestPage::new("detail", |_| {})));
+            assert_eq!(h.rt.redraw.take(), Some(RefreshHint::Ui));
+            h.stack.apply(&mut h.rt, Transition::Back);
+            assert_eq!(h.rt.redraw.take(), Some(RefreshHint::Ui));
+            h.rt.app.ui_mode = UiRefreshMode::Classic;
+            h.push(Box::new(TestPage::new("classic", |_| {})));
+            assert_eq!(h.rt.redraw.take(), Some(if night { RefreshHint::Flash } else { RefreshHint::Ui }));
+            let instance = h.stack.top().instance;
+            h.rt.cx(instance).request_ui_redraw(RefreshHint::Clean);
+            assert_eq!(h.rt.redraw.take(), Some(RefreshHint::Clean));
+            h.rt.app.ui_mode = UiRefreshMode::Smooth;
+            h.rt.cx(instance).request_ui_redraw(RefreshHint::Clean);
+            assert_eq!(h.rt.redraw.take(), Some(RefreshHint::Ui));
+        }
     }
 
     #[test]

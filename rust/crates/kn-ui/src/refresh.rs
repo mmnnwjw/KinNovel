@@ -1,27 +1,24 @@
 //! 刷新调度: 差分 + 波形选择 + 残影预算。纯逻辑, 主机可测。
 //!
-//! 规则移植自 Python 0.8.0 `PageContext._refresh_plan / _waveform_for` (bin/src/kinnovel/ui.py),
-//! 并参照 KOReader `UIManager` (`_refresh` / `setDirty` 的刷新模式与脏区合并) 扩展:
-//! - `plan` 返回按顺序提交的若干刷新; 空表示无需刷新。
-//! - 多脏区 (KOReader 每次重绘可有多个刷新区域, 只合并相交的): 差分按纵向间隔 (>= 32 行未变) 拆成
-//!   最多 4 块, 各自外扩 4 px 分别刷新; 总面积 >= 95% 屏视为整屏。顶部按钮与底部标签同时变化时不再整屏刷。
-//! - `Flash`: 强制整屏 GC16 闪刷, 预算清零。
-//! - 大面积 (变化总面积 >= 50% 屏) 且预算 >= 阈值 → 整屏闪刷 (KOReader: partial 累计 FULL_REFRESH_COUNT 次升级)。
-//!   阈值: 翻页用 policy.full_refresh_every; 其它界面最多 `UI_FLASH_EVERY` 屏 (列表/菜单的残影比正文明显)。
-//!   翻页且 policy.flash_every_turn → 每页闪刷。
-//! - `Clean`: 只对各变化区域闪刷 (关闭弹窗; KOReader 关闭 ButtonDialog 等用 "flashui")。
-//! - 波形: Turn → Reagl (设备支持时, 否则 Gl16); Ui → Gc16; Fast → Du; Flash/Clean → Gc16 + flash;
-//!   Feedback (按下反相) → 小块 (< 2% 屏, 键盘按键) A2, 其余 DU (KOReader: 键盘 "a2", 其它高亮 "fast")。
-//! - 定点清残影 (仅 Ui/Fast): 实心深色块 (选中的标签/按钮、反相的行) 在局部刷新下变回背景色最容易留残影。
-//!   按 16 px 格子统计 "由深变成背景色" 的像素, 过半的格子连成块, 块够大 (>= 0.6% 屏, 键盘按键以下不算)
-//!   就在该区域刷新之后对块单独闪刷; 块占该区域一半以上时区域本身改为闪刷。
-//!   小于 2% 屏的按下反馈区域内的还原不算 (键盘逐键反相不闪)。夜间模式方向相反 (`set_background`)。
-//! - 预算累计: 非闪刷时 += 面积占比, Turn 且使用 Reagl 时 × 0.25; 局部闪刷扣掉对应面积。
-//! - Turn 跳过差分直接整屏 (几乎全屏都变, 省掉 diff 开销)。
-//! - 首帧或 `invalidate()` 之后: 整屏刷新 (不闪, 除非 hint 为 Flash 或预算已满)。
+//! - 流畅 UI (默认): 按像素差分拆区, 不因面积预算或深色块消失自动闪刷。
+//!   黑白 MTK 用 AUTO, 其它设备沿用 GC16; 按下反馈仍为小块 A2 / 大块 DU。
+//! - 经典 UI: 沿用 v1.6.4 的 GC16、面积预算和深色块定点清理。
+//! - 阅读 Turn: 整屏 REAGL / GL16, 保留按面积累计的阅读预算和每页闪刷设置。
+//!   UI / 按下反馈不增加阅读预算; 无动画 REAGL 翻页按 0.25 屏计。
+//! - Flash: 显式整屏清理; Clean / plan_with_clean: 显式局部清理, 不被 Turn 覆盖。
+//! - 每次成功提交后更新副本和预算; 驱动 FULL 配对不等于清理闪刷。
 
 use kn_platform::{RefreshRequest, Waveform};
 use kn_render::{Bitmap, Rect};
+
+mod classic;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiRefreshMode {
+    #[default]
+    Smooth,
+    Classic,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefreshHint {
@@ -59,13 +56,16 @@ pub struct RefreshPolicy {
     pub full_refresh_every: f32,
     /// 每次翻页都闪刷 (config: page_flash)
     pub flash_every_turn: bool,
+    /// 普通 UI 的设备波形, 黑白 MTK 用 AUTO, 其余保守回退 GC16
+    pub ui_waveform: Waveform,
+    pub ui_mode: UiRefreshMode,
     /// 设备支持 REAGL
     pub supports_reagl: bool,
 }
 
 impl Default for RefreshPolicy {
     fn default() -> Self {
-        RefreshPolicy { full_refresh_every: 6.0, flash_every_turn: false, supports_reagl: false }
+        RefreshPolicy { full_refresh_every: 6.0, flash_every_turn: false, ui_waveform: Waveform::Gc16, ui_mode: UiRefreshMode::Smooth, supports_reagl: false }
     }
 }
 
@@ -75,31 +75,12 @@ const REGION_PAD: i32 = 4;
 const REGION_GAP: u32 = 32;
 /// 一次重绘最多几个差分区域 (EPDC 同时进行的更新数有限, 再多就合并间隔最小的)。
 const MAX_REGIONS: usize = 4;
-/// 变化面积达到整屏这个比例才算"大面积", 只有大面积刷新会被升级为闪刷。
-const LARGE_RATIO: f32 = 0.5;
 /// 达到这个比例直接按整屏处理。
 const FULL_RATIO: f32 = 0.95;
 /// REAGL 翻页自带残影抑制, 计入预算时打折。
 const REAGL_TURN_WEIGHT: f32 = 0.25;
-/// 阅读页以外: 局部刷新累计多少屏后, 下一次大面积刷新升级为闪刷 (配置值更小时用配置值)。
-const UI_FLASH_EVERY: f32 = 3.0;
-/// 夜间的 `UI_FLASH_EVERY` (白字黑底的局部刷新残影重得多)
-const NIGHT_UI_FLASH_EVERY: f32 = 1.0;
-/// 定点清残影的格子边长 (px)。
-const CLEAR_TILE: u32 = 16;
-/// 格子里至少这么多像素由深色变成背景色, 才算 "实心深色块被清掉"。正文/列表文字远达不到。
-const CLEAR_TILE_FILL: u32 = CLEAR_TILE * CLEAR_TILE / 2;
-/// 清掉的实心块至少占整屏这个比例才单独闪刷 (KPW5: 键盘按键 ~0.45%, 筛选按钮 ~0.75%, 底部标签 ~1.3%)。
-const CLEAR_MIN_RATIO: f32 = 0.006;
-/// 按下反馈区域小于整屏这个比例时, 其中的反相还原不触发闪刷 (键盘按键、小按钮)。
+/// 按下反馈小于整屏这个比例时用 A2, 其余用 DU。
 const FEEDBACK_SMALL_RATIO: f32 = 0.02;
-/// 清掉的块占主刷新区域这个比例以上: 主刷新直接改成区域闪刷, 省一次刷新。
-const CLEAR_TAKEOVER_RATIO: f32 = 0.5;
-/// 单独闪刷的块最多几个, 再多就合并成一个包围盒。
-const CLEAR_MAX_RECTS: usize = 4;
-/// 深/浅的判定阈值 (L8)。
-const DARK_MAX: u8 = 96;
-const LIGHT_MIN: u8 = 160;
 
 pub struct RefreshScheduler {
     /// 屏幕上当前内容 (仅 screen_valid 时可信)
@@ -107,9 +88,9 @@ pub struct RefreshScheduler {
     screen_valid: bool,
     budget: f32,
     policy: RefreshPolicy,
-    /// 主题背景是否为浅色 (夜间模式为深色: 残影来自浅色块变黑)
+    /// 经典 UI 的面积预算独立记录, 不让模式切换改变阅读清理间隔。
+    ui_budget: f32,
     light_background: bool,
-    /// 最近一次按下反馈的区域, 直到下一次非反馈刷新提交
     feedback: Option<Rect>,
 }
 
@@ -120,16 +101,25 @@ impl RefreshScheduler {
             screen_valid: false,
             budget: 0.0,
             policy,
+            ui_budget: 0.0,
             light_background: true,
             feedback: None,
         }
     }
 
     pub fn set_policy(&mut self, policy: RefreshPolicy) {
+        self.set_ui_mode(policy.ui_mode);
         self.policy = policy;
     }
 
-    /// 主题背景色 (定点清残影按 "变成背景色" 判断方向)。
+    pub fn set_ui_mode(&mut self, mode: UiRefreshMode) {
+        if mode != self.policy.ui_mode {
+            self.policy.ui_mode = mode;
+            self.ui_budget = 0.0;
+            self.feedback = None;
+        }
+    }
+
     pub fn set_background(&mut self, background: u8) {
         self.light_background = background >= 128;
     }
@@ -146,6 +136,7 @@ impl RefreshScheduler {
     /// 屏幕被外部改写过; 下一次刷新走整屏。
     pub fn invalidate(&mut self) {
         self.screen_valid = false;
+        self.feedback = None;
     }
 
     /// 逻辑画面尺寸变了 (横竖屏切换): 之后按新尺寸规划, 下一次刷新走整屏。
@@ -159,23 +150,17 @@ impl RefreshScheduler {
         self.screen.bounds()
     }
 
-    fn threshold(&self, hint: RefreshHint) -> f32 {
-        let configured = if self.policy.full_refresh_every > 0.0 { self.policy.full_refresh_every } else { 6.0 };
-        if hint == RefreshHint::Turn {
-            configured
-        } else if !self.light_background {
-            // 夜间: 列表 / 菜单的大面积变化累计 1 屏就闪
-            configured.min(NIGHT_UI_FLASH_EVERY)
-        } else {
-            configured.min(UI_FLASH_EVERY)
-        }
+    fn threshold(&self) -> f32 {
+        if self.policy.full_refresh_every > 0.0 { self.policy.full_refresh_every } else { 6.0 }
     }
 
     fn waveform(&self, hint: RefreshHint) -> Waveform {
         match hint {
             RefreshHint::Turn if self.policy.supports_reagl => Waveform::Reagl,
             RefreshHint::Turn => Waveform::Gl16,
-            RefreshHint::Ui | RefreshHint::Flash | RefreshHint::Clean => Waveform::Gc16,
+            RefreshHint::Ui if self.policy.ui_mode == UiRefreshMode::Classic => Waveform::Gc16,
+            RefreshHint::Ui => self.policy.ui_waveform,
+            RefreshHint::Flash | RefreshHint::Clean => Waveform::Gc16,
             RefreshHint::Fast => Waveform::Du,
             RefreshHint::Feedback => Waveform::A2,
         }
@@ -215,38 +200,45 @@ impl RefreshScheduler {
         if hint == RefreshHint::Feedback {
             return regions.into_iter().map(|r| Self::request(r, self.feedback_waveform(r), false)).collect();
         }
-        if ratio >= LARGE_RATIO && self.budget >= self.threshold(hint) {
+        if self.policy.ui_mode == UiRefreshMode::Classic && ratio >= 0.5 && self.classic_budget_full() {
             return vec![self.flash_request()];
         }
         if hint == RefreshHint::Clean {
             return regions.into_iter().map(|r| Self::request(r, Waveform::Gc16, true)).collect();
         }
-        // Ui / Fast: 定点清残影
-        let ignore = self.feedback.filter(|r| (r.area() as f32) < full_area * FEEDBACK_SMALL_RATIO);
-        let min_area = (full_area * CLEAR_MIN_RATIO) as u64;
-        let mut out = Vec::with_capacity(regions.len());
-        let mut blocks = Vec::new();
-        for r in regions {
-            let found = cleared_blocks(&self.screen, frame, r, self.light_background, ignore, min_area);
-            let cleared: u64 = found.iter().map(|b| b.area()).sum();
-            if cleared as f32 >= r.area() as f32 * CLEAR_TAKEOVER_RATIO {
-                out.push(Self::request(r, Waveform::Gc16, true));
-            } else {
-                out.push(Self::request(r, self.waveform(hint), false));
-                blocks.extend(found);
-            }
+        if self.policy.ui_mode == UiRefreshMode::Classic {
+            return classic::plan(&self.screen, frame, regions, self.waveform(hint), self.light_background, self.feedback);
         }
-        if blocks.len() > CLEAR_MAX_RECTS {
-            let union = blocks.iter().skip(1).fold(blocks[0], |acc, b| acc.union(b));
-            blocks = vec![union];
+        regions.into_iter().map(|r| Self::request(r, self.waveform(hint), false)).collect()
+    }
+
+    /// 显式清理与差分独立: 相同像素仍需清掉物理残影。普通翻页不能吞掉局部清理。
+    pub fn plan_with_clean(&self, frame: &Bitmap, hint: RefreshHint, clean: &[Rect]) -> Vec<RefreshRequest> {
+        let mut plan = self.plan(frame, hint);
+        if plan.iter().any(|r| r.flash && r.rect == self.full()) {
+            return plan;
         }
-        out.extend(
-            blocks
-                .into_iter()
-                .filter_map(|b| b.inflate(REGION_PAD).intersect(&full))
-                .map(|b| Self::request(b, Waveform::Gc16, true)),
-        );
-        out
+        let mut regions = Vec::<Rect>::new();
+        for rect in clean.iter().filter_map(|r| r.inflate(REGION_PAD).intersect(&self.full())).filter(|r| !r.is_empty()) {
+            merge_clean(&mut regions, rect);
+        }
+        // 正常只有弹窗或菜单的几块区域; 超过上限时优先合并增加面积最少的一对。
+        while regions.len() > MAX_REGIONS {
+            let (i, j) = (0..regions.len())
+                .flat_map(|i| (i + 1..regions.len()).map(move |j| (i, j)))
+                .min_by_key(|&(i, j)| regions[i].union(&regions[j]).area().saturating_sub(regions[i].area() + regions[j].area()))
+                .unwrap();
+            let r = regions.remove(j);
+            let merged = regions.remove(i).union(&r);
+            merge_clean(&mut regions, merged);
+        }
+        for rect in &regions {
+            plan = plan.into_iter()
+                .flat_map(|req| subtract(req.rect, *rect).into_iter().map(move |r| RefreshRequest { rect: r, ..req }))
+                .collect();
+        }
+        plan.extend(regions.into_iter().map(|r| Self::request(r, Waveform::Gc16, true)));
+        plan
     }
 
     /// 整屏刷新 (首帧、invalidate 之后、翻页、变化接近整屏)。
@@ -254,12 +246,17 @@ impl RefreshScheduler {
         let full = self.full();
         if hint != RefreshHint::Feedback {
             let turn_flash = hint == RefreshHint::Turn && self.policy.flash_every_turn;
-            if turn_flash || hint == RefreshHint::Clean || self.budget >= self.threshold(hint) {
+            let budget_full = if hint == RefreshHint::Turn { self.budget >= self.threshold() } else { self.classic_budget_full() };
+            if turn_flash || hint == RefreshHint::Clean || budget_full {
                 return self.flash_request();
             }
         }
         let waveform = if hint == RefreshHint::Feedback { self.feedback_waveform(full) } else { self.waveform(hint) };
         Self::request(full, waveform, false)
+    }
+
+    fn classic_budget_full(&self) -> bool {
+        self.policy.ui_mode == UiRefreshMode::Classic && self.ui_budget >= classic::threshold(self.threshold(), self.light_background)
     }
 
     /// 按下反馈: 键盘按键这类小块用 A2 (最快), 较大的 (列表行、含灰阶封面) 用 DU ——
@@ -272,7 +269,7 @@ impl RefreshScheduler {
         }
     }
 
-    /// 按下反馈: 直接在屏幕副本上把 `rect` (圆角 `radius`) 反相并记入预算, 返回只刷这一块的请求
+    /// 按下反馈: 直接在屏幕副本上把 `rect` (圆角 `radius`) 反相, 返回只刷这一块的请求
     /// (用 `screen()` 作帧提交)。结果与 "拷一份屏幕、反相、`plan(Feedback)`、`commit`" 相同, 但不拷整屏、不做整屏差分。
     /// 屏幕副本不可信 (首帧前、invalidate 之后) 或区域在屏幕外时返回 None。
     pub fn press(&mut self, rect: Rect, radius: u32) -> Option<RefreshRequest> {
@@ -302,21 +299,32 @@ impl RefreshScheduler {
         self.account(req, hint);
     }
 
-    /// 提交后的预算与反馈区域记账。
+    /// 提交后的阅读预算记账, 普通 UI 与反馈不消耗阅读预算。
     fn account(&mut self, req: &RefreshRequest, hint: RefreshHint) {
         let full = self.full();
-        if hint == RefreshHint::Feedback {
-            self.feedback = Some(self.feedback.map_or(req.rect, |r| r.union(&req.rect)));
-        } else {
-            self.feedback = None;
-        }
         let mut weight = req.rect.area() as f32 / full.area().max(1) as f32;
+        if self.policy.ui_mode == UiRefreshMode::Classic {
+            if hint == RefreshHint::Feedback {
+                self.feedback = Some(self.feedback.map_or(req.rect, |r| r.union(&req.rect)));
+            } else {
+                self.feedback = None;
+            }
+            if req.flash {
+                self.ui_budget = if req.rect == full { 0.0 } else { (self.ui_budget - weight).max(0.0) };
+            } else {
+                let ui_weight = if hint == RefreshHint::Turn && req.waveform == Waveform::Reagl { weight * REAGL_TURN_WEIGHT } else { weight };
+                self.ui_budget += ui_weight;
+            }
+        }
         if req.flash {
             // 整屏闪刷清零; 局部闪刷只清掉那一块
             self.budget = if req.rect == full { 0.0 } else { (self.budget - weight).max(0.0) };
             return;
         }
-        if hint == RefreshHint::Turn && req.waveform == Waveform::Reagl {
+        if hint != RefreshHint::Turn {
+            return;
+        }
+        if req.waveform == Waveform::Reagl && req.swipe.is_none() {
             weight *= REAGL_TURN_WEIGHT;
         }
         self.budget += weight;
@@ -332,89 +340,32 @@ impl RefreshScheduler {
     }
 }
 
-/// 在 `rect` 内找 "实心深色块被清成背景色" 的连通块 (见模块说明), 返回各块包围盒 (已裁到 `rect`)。
-fn cleared_blocks(old: &Bitmap, new: &Bitmap, rect: Rect, light_bg: bool, ignore: Option<Rect>, min_area: u64) -> Vec<Rect> {
-    let t = CLEAR_TILE as i32;
-    let (tx0, ty0) = (rect.x / t, rect.y / t);
-    let (tx1, ty1) = ((rect.right() + t - 1) / t, (rect.bottom() + t - 1) / t);
-    let (cols, rows) = ((tx1 - tx0) as usize, (ty1 - ty0) as usize);
-    if cols == 0 || rows == 0 {
-        return Vec::new();
-    }
-    let mut counts = vec![0u32; cols * rows];
-    // 逐行把命中 (0/1) 累加到按列的 u8 累加器 (整行一个长循环, 便于 NEON 向量化), 每满一行格子再按格汇总。
-    // 逐格切片计数在 KPW5 上让整屏计划多花 ~15 ms。
-    let (x0, x1) = (rect.x as usize, rect.right() as usize);
-    let mut acc = vec![0u8; x1 - x0];
-    let flush = |acc: &mut [u8], tile_row: usize, counts: &mut [u32]| {
-        for (c, count) in counts[tile_row * cols..][..cols].iter_mut().enumerate() {
-            let from = (((tx0 + c as i32) * t) as usize).max(x0) - x0;
-            let to = (((tx0 + c as i32 + 1) * t) as usize).min(x1) - x0;
-            *count += acc[from..to].iter().map(|&v| v as u32).sum::<u32>();
-        }
-        acc.fill(0);
-    };
-    let flip = if light_bg { 0u8 } else { 255u8 };
-    for y in rect.y..rect.bottom() {
-        let a = &old.row(y as u32)[x0..x1];
-        let b = &new.row(y as u32)[x0..x1];
-        // 夜间模式取反后同一判断: 浅色块变黑
-        for ((v, &o), &n) in acc.iter_mut().zip(a).zip(b) {
-            *v += (((o ^ flip) <= DARK_MAX) & ((n ^ flip) >= LIGHT_MIN)) as u8;
-        }
-        if (y + 1) % t == 0 || y + 1 == rect.bottom() {
-            flush(&mut acc, (y / t - ty0) as usize, &mut counts);
+fn merge_clean(regions: &mut Vec<Rect>, mut rect: Rect) {
+    let mut i = 0;
+    while i < regions.len() {
+        let r = regions[i];
+        if rect.x <= r.right() && r.x <= rect.right() && rect.y <= r.bottom() && r.y <= rect.bottom() {
+            rect = rect.union(&regions.remove(i));
+            i = 0;
+        } else {
+            i += 1;
         }
     }
-    let mut solid: Vec<bool> = counts.iter().map(|&n| n >= CLEAR_TILE_FILL).collect();
-    if let Some(ig) = ignore {
-        for (i, s) in solid.iter_mut().enumerate() {
-            let cx = (tx0 + (i % cols) as i32) * t + t / 2;
-            let cy = (ty0 + (i / cols) as i32) * t + t / 2;
-            if ig.contains(kn_render::Point { x: cx, y: cy }) {
-                *s = false;
-            }
-        }
-    }
-    // 8 邻域连通块
-    let mut out = Vec::new();
-    let mut stack = Vec::new();
-    for start in 0..solid.len() {
-        if !solid[start] {
-            continue;
-        }
-        solid[start] = false;
-        stack.push(start);
-        let (mut c0, mut c1, mut r0, mut r1, mut n) = (cols, 0, rows, 0, 0u64);
-        while let Some(i) = stack.pop() {
-            let (c, r) = (i % cols, i / cols);
-            (c0, c1, r0, r1) = (c0.min(c), c1.max(c), r0.min(r), r1.max(r));
-            n += 1;
-            for dr in -1i32..=1 {
-                for dc in -1i32..=1 {
-                    let (nc, nr) = (c as i32 + dc, r as i32 + dr);
-                    if nc < 0 || nr < 0 || nc >= cols as i32 || nr >= rows as i32 {
-                        continue;
-                    }
-                    let j = nr as usize * cols + nc as usize;
-                    if solid[j] {
-                        solid[j] = false;
-                        stack.push(j);
-                    }
-                }
-            }
-        }
-        if n * (t * t) as u64 >= min_area {
-            let block = Rect::new(
-                (tx0 + c0 as i32) * t,
-                (ty0 + r0 as i32) * t,
-                ((c1 - c0 + 1) as i32 * t) as u32,
-                ((r1 - r0 + 1) as i32 * t) as u32,
-            );
-            out.extend(block.intersect(&rect));
-        }
-    }
-    out
+    regions.push(rect);
+}
+
+/// 从普通更新中去掉将由清理更新覆盖的部分, 避免先整屏翻页再刷弹窗。
+fn subtract(rect: Rect, clean: Rect) -> Vec<Rect> {
+    let Some(i) = rect.intersect(&clean).filter(|r| !r.is_empty()) else { return vec![rect] };
+    [
+        Rect::new(rect.x, rect.y, rect.w, (i.y - rect.y) as u32),
+        Rect::new(rect.x, i.bottom(), rect.w, (rect.bottom() - i.bottom()) as u32),
+        Rect::new(rect.x, i.y, (i.x - rect.x) as u32, i.h),
+        Rect::new(i.right(), i.y, (rect.right() - i.right()) as u32, i.h),
+    ]
+    .into_iter()
+    .filter(|r| !r.is_empty())
+    .collect()
 }
 
 #[cfg(test)]
@@ -459,6 +410,58 @@ mod tests {
     }
 
     #[test]
+    fn explicit_clean_survives_identical_pixels_and_turn() {
+        let (mut s, f) = big();
+        let clean = [Rect::new(20, 40, 70, 60), Rect::new(290, 480, 60, 60)];
+        let reqs = s.plan_with_clean(&f, RefreshHint::Ui, &clean);
+        assert_eq!(reqs.len(), 2);
+        assert!(reqs.iter().all(|r| r.flash));
+        let reqs = s.plan_with_clean(&f, RefreshHint::Turn, &clean);
+        assert_eq!(reqs.iter().filter(|r| r.flash).count(), 2);
+        assert!(reqs.iter().all(|r| r.rect != f.bounds()));
+        // 普通翻页与清理区域不重复提交; 所有区域仍覆盖全屏。
+        assert_eq!(reqs.iter().map(|r| r.rect.area()).sum::<u64>(), f.bounds().area());
+        for req in &reqs { s.commit(&f, req, RefreshHint::Turn); }
+        assert!(s.ghost_budget() > 0.0);
+        let flash = s.plan_with_clean(&f, RefreshHint::Flash, &clean);
+        assert_eq!(flash.len(), 1);
+        assert!(flash[0].flash && flash[0].rect == f.bounds());
+    }
+
+    #[test]
+    fn animated_turn_does_not_get_reagl_discount() {
+        let mut s = sched(reagl());
+        let f = Bitmap::new(W, H, 255);
+        present(&mut s, &f, RefreshHint::Flash);
+        let mut req = s.plan(&f, RefreshHint::Turn)[0];
+        req.swipe = Some(kn_platform::SwipeDir::Left);
+        s.commit(&f, &req, RefreshHint::Turn);
+        assert_eq!(s.ghost_budget(), 1.0);
+    }
+
+    #[test]
+    fn switching_ui_modes_changes_cleanup_without_resetting_reading_budget() {
+        let mut s = RefreshScheduler::new(BW, BH, RefreshPolicy { ui_waveform: Waveform::Auto, ..reagl() });
+        let mut f = Bitmap::new(BW, BH, 255);
+        present(&mut s, &f, RefreshHint::Turn);
+        let reading_budget = s.ghost_budget();
+        s.set_ui_mode(UiRefreshMode::Classic);
+        assert_eq!(s.ghost_budget(), reading_budget);
+        f.fill_rect(Rect::new(100, 100, 160, 96), 0);
+        assert_eq!(present(&mut s, &f, RefreshHint::Ui).unwrap().waveform, Waveform::Gc16);
+        assert_eq!(s.ghost_budget(), reading_budget);
+        f.fill_rect(Rect::new(100, 100, 160, 96), 255);
+        assert!(s.plan(&f, RefreshHint::Ui).iter().any(|r| r.flash));
+        s.set_ui_mode(UiRefreshMode::Smooth);
+        assert!(s.plan(&f, RefreshHint::Ui).iter().all(|r| !r.flash && r.waveform == Waveform::Auto));
+        s.set_ui_mode(UiRefreshMode::Classic);
+        for gray in [110, 120, 130] {
+            assert!(!present(&mut s, &Bitmap::new(BW, BH, gray), RefreshHint::Ui).unwrap().flash);
+        }
+        assert!(present(&mut s, &Bitmap::new(BW, BH, 140), RefreshHint::Ui).unwrap().flash);
+    }
+
+    #[test]
     fn small_change_refreshes_padded_bbox() {
         let mut s = sched(RefreshPolicy::default());
         let mut f = Bitmap::new(W, H, 255);
@@ -475,7 +478,7 @@ mod tests {
         let mut flashes = 0;
         for i in 0..6u8 {
             let f = Bitmap::new(W, H, i.wrapping_mul(40).wrapping_add(10));
-            if present(&mut s, &f, RefreshHint::Ui).unwrap().flash {
+            if present(&mut s, &f, RefreshHint::Turn).unwrap().flash {
                 flashes += 1;
                 assert_eq!(s.ghost_budget(), 0.0);
             }
@@ -560,23 +563,23 @@ mod tests {
     }
 
     #[test]
-    fn ui_flashes_sooner_than_reader() {
-        // 配置 6 屏: 翻页 (Gl16) 要攒 6 屏, 其它界面 3 屏就闪
-        let mut s = sched(RefreshPolicy::default());
-        let mut flashed_at = None;
-        for i in 0..6u8 {
-            let f = Bitmap::new(W, H, i.wrapping_mul(40).wrapping_add(10));
-            if present(&mut s, &f, RefreshHint::Ui).unwrap().flash {
-                flashed_at = Some(i);
-                break;
-            }
+    fn ui_and_feedback_do_not_consume_or_trigger_reading_budget() {
+        let mut s = sched(RefreshPolicy { ui_waveform: Waveform::Auto, ..reagl() });
+        for i in 0..30u8 {
+            let f = Bitmap::new(W, H, i.wrapping_mul(40));
+            let req = present(&mut s, &f, RefreshHint::Ui).unwrap();
+            assert!(!req.flash);
+            assert_eq!(req.waveform, Waveform::Auto);
+            s.press(Rect::new(0, 0, W, 80), 0);
         }
-        assert_eq!(flashed_at, Some(3));
-        let mut s = sched(RefreshPolicy::default());
-        for i in 0..6u8 {
-            let f = Bitmap::new(W, H, i.wrapping_mul(40).wrapping_add(10));
-            assert!(!present(&mut s, &f, RefreshHint::Turn).unwrap().flash, "turn {i}");
-        }
+        assert_eq!(s.ghost_budget(), 0.0);
+        let f = Bitmap::new(W, H, 128);
+        assert_eq!(present(&mut s, &f, RefreshHint::Turn).unwrap().waveform, Waveform::Reagl);
+        assert_eq!(s.ghost_budget(), 0.25);
+        s.budget = 6.0;
+        assert!(!present(&mut s, &Bitmap::new(W, H, 40), RefreshHint::Ui).unwrap().flash);
+        assert_eq!(s.ghost_budget(), 6.0);
+        assert!(present(&mut s, &f, RefreshHint::Turn).unwrap().flash);
     }
 
     #[test]
@@ -585,7 +588,7 @@ mod tests {
         let mut f = Bitmap::new(W, H, 255);
         present(&mut s, &f, RefreshHint::Ui);
         f.fill_rect(Rect::new(0, 0, W, 100), 0);
-        present(&mut s, &f, RefreshHint::Ui);
+        present(&mut s, &f, RefreshHint::Turn);
         let before = s.ghost_budget();
         f.fill_rect(Rect::new(10, 20, 30, 40), 255);
         let req = present(&mut s, &f, RefreshHint::Clean).unwrap();
@@ -594,7 +597,7 @@ mod tests {
         assert!(s.ghost_budget() < before && s.ghost_budget() > 0.0);
     }
 
-    // 定点清残影与多脏区用接近真实比例的屏幕 (0.6% = 1440 px, 约 6 个格子)
+    // 标签、弹窗和多脏区使用接近实际比例的屏幕
     const BW: u32 = 400;
     const BH: u32 = 600;
 
@@ -618,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn cleared_dark_block_gets_its_own_flash() {
+    fn dark_tab_restore_does_not_add_a_flash() {
         // 选中的标签 (实心黑块) 移走, 同时下方大片内容变化
         let (mut s, mut f) = big();
         f.fill_rect(Rect::new(0, 520, 96, 64), 0);
@@ -629,38 +632,7 @@ mod tests {
             f.fill_rect(Rect::new(20, y, 300, 2), 0);
         }
         let reqs = s.plan(&f, RefreshHint::Ui);
-        let flashes: Vec<_> = reqs.iter().filter(|r| r.flash).collect();
-        assert_eq!(flashes.len(), 1, "{reqs:?}");
-        assert!(flashes[0].rect.contains(kn_render::Point { x: 48, y: 552 }));
-        assert!(!flashes[0].rect.contains(kn_render::Point { x: 250, y: 552 }));
-        assert!(reqs.iter().any(|r| !r.flash && r.rect.contains(kn_render::Point { x: 100, y: 200 })));
-        // 闪刷排在普通刷新之后
-        assert!(reqs.last().unwrap().flash);
-    }
-
-    #[test]
-    fn region_mostly_cleared_flashes_itself() {
-        // 关掉带深色按钮的小弹层 (Ui 提示): 区域本身改闪刷, 不再额外刷一次
-        let (mut s, mut f) = big();
-        f.fill_rect(Rect::new(100, 100, 160, 96), 0);
-        present(&mut s, &f, RefreshHint::Ui);
-        f.fill_rect(Rect::new(100, 100, 160, 96), 255);
-        let reqs = s.plan(&f, RefreshHint::Ui);
-        assert_eq!(reqs.len(), 1);
-        assert!(reqs[0].flash && reqs[0].waveform == Waveform::Gc16);
-    }
-
-    #[test]
-    fn text_and_small_blocks_do_not_flash() {
-        let (mut s, mut f) = big();
-        // 按键大小的黑块 (约 0.4% 屏) 与文字线条
-        f.fill_rect(Rect::new(16, 16, 32, 32), 0);
-        for y in (100..300).step_by(12) {
-            f.fill_rect(Rect::new(20, y, 300, 3), 0);
-        }
-        present(&mut s, &f, RefreshHint::Ui);
-        let blank = Bitmap::new(BW, BH, 255);
-        assert!(s.plan(&blank, RefreshHint::Ui).iter().all(|r| !r.flash));
+        assert!(reqs.iter().all(|r| !r.flash), "{reqs:?}");
     }
 
     #[test]
@@ -672,108 +644,26 @@ mod tests {
         pressed.invert_rect(key);
         present(&mut s, &pressed, RefreshHint::Feedback);
         assert!(s.plan(&f, RefreshHint::Ui).iter().all(|r| !r.flash));
-        // 较大的反馈区域 (列表行) 还原 → 闪刷
+        // 较大的反馈区域 (列表行) 还原也不自动闪刷
         let (mut s, f) = big();
         let row = Rect::new(0, 200, BW, 80);
         let mut pressed = f.clone();
         pressed.invert_rect(row);
         present(&mut s, &pressed, RefreshHint::Feedback);
-        assert!(s.plan(&f, RefreshHint::Ui).iter().any(|r| r.flash));
-    }
-
-    #[test]
-    fn night_mode_detects_light_blocks() {
-        let mut s = RefreshScheduler::new(BW, BH, RefreshPolicy::default());
-        s.set_background(0);
-        let mut f = Bitmap::new(BW, BH, 0);
-        present(&mut s, &f, RefreshHint::Ui);
-        f.fill_rect(Rect::new(100, 100, 160, 96), 255);
         assert!(s.plan(&f, RefreshHint::Ui).iter().all(|r| !r.flash));
-        present(&mut s, &f, RefreshHint::Ui);
-        f.fill_rect(Rect::new(100, 100, 160, 96), 0);
-        assert!(s.plan(&f, RefreshHint::Ui).iter().any(|r| r.flash));
-    }
-
-    /// 有灰阶内容的屏幕 (反相后每个像素都变)。
-    fn textured(w: u32, h: u32) -> Bitmap {
-        let mut f = Bitmap::new(w, h, 255);
-        for y in 0..h {
-            for (x, v) in f.row_mut(y).iter_mut().enumerate() {
-                *v = ((x as u32 * 7 + y * 13) % 251) as u8;
-            }
-        }
-        f
-    }
-
-    /// 旧的按下反馈路径: 拷整屏、反相、整屏差分、提交。
-    fn press_old(s: &mut RefreshScheduler, rect: Rect, radius: u32) -> Vec<RefreshRequest> {
-        let mut pressed = s.screen().clone();
-        pressed.invert_rounded(rect, radius);
-        let reqs = s.plan(&pressed, RefreshHint::Feedback);
-        for req in &reqs {
-            s.commit(&pressed, req, RefreshHint::Feedback);
-        }
-        reqs
-    }
-
-    #[test]
-    fn press_matches_full_diff_path() {
-        let cases = [
-            (Rect::new(20, 40, 200, 60), 0),
-            (Rect::new(20, 40, 200, 60), 12),
-            (Rect::new(30, 30, 40, 40), 8),
-            // 部分在屏幕外
-            (Rect::new(-10, 560, 120, 80), 6),
-            // 几乎整屏
-            (Rect::new(0, 0, BW, BH - 4), 0),
-        ];
-        for (rect, radius) in cases {
-            let base = textured(BW, BH);
-            let (mut old, mut new) = (RefreshScheduler::new(BW, BH, RefreshPolicy::default()), RefreshScheduler::new(BW, BH, RefreshPolicy::default()));
-            present(&mut old, &base, RefreshHint::Ui);
-            present(&mut new, &base, RefreshHint::Ui);
-            let mut shown_old = kn_platform::MemoryDisplay::new(BW, BH);
-            let mut shown_new = kn_platform::MemoryDisplay::new(BW, BH);
-            use kn_platform::Display;
-            let full = RefreshRequest { rect: Rect::new(0, 0, BW, BH), waveform: Waveform::Gc16, flash: false, swipe: None };
-            shown_old.present(&base, &full).unwrap();
-            shown_new.present(&base, &full).unwrap();
-
-            let reqs_old = press_old(&mut old, rect, radius);
-            let req_new = new.press(rect, radius).expect("press");
-            assert_eq!(reqs_old, vec![req_new], "{rect:?} r{radius}");
-            for req in &reqs_old {
-                shown_old.present(old.screen(), req).unwrap();
-            }
-            shown_new.present(new.screen(), &req_new).unwrap();
-            assert_eq!(old.screen().data(), new.screen().data(), "{rect:?}");
-            assert_eq!(shown_old.screen.data(), shown_new.screen.data(), "{rect:?}");
-            assert_eq!(new.screen().data(), shown_new.screen.data(), "副本与面板一致 {rect:?}");
-            assert!((old.ghost_budget() - new.ghost_budget()).abs() < 1e-6);
-            assert_eq!(old.feedback, new.feedback);
-            // 抬起后重绘 (还原 + 别处有变化) 的计划也一样
-            let mut after = base.clone();
-            after.fill_rect(Rect::new(300, 500, 40, 40), 0);
-            assert_eq!(old.plan(&after, RefreshHint::Ui), new.plan(&after, RefreshHint::Ui), "{rect:?}");
-        }
     }
 
     #[test]
     fn press_needs_a_valid_screen_copy() {
         let mut s = RefreshScheduler::new(BW, BH, RefreshPolicy::default());
         assert!(s.press(Rect::new(10, 10, 20, 20), 0).is_none());
-        present(&mut s, &textured(BW, BH), RefreshHint::Ui);
+        present(&mut s, &Bitmap::new(BW, BH, 255), RefreshHint::Ui);
         assert!(s.press(Rect::new(BW as i32 + 5, 10, 20, 20), 0).is_none());
         let req = s.press(Rect::new(10, 10, 20, 20), 0).unwrap();
         assert_eq!(req.waveform, Waveform::A2);
         assert_eq!(req.rect, Rect::new(6, 6, 28, 28));
+        assert_eq!(s.screen().get(15, 15), 0);
+        assert_eq!(s.screen().get(40, 40), 255);
     }
 
-    #[test]
-    fn hint_strength_order() {
-        assert!(RefreshHint::Flash.strength() > RefreshHint::Turn.strength());
-        assert!(RefreshHint::Turn.strength() > RefreshHint::Clean.strength());
-        assert!(RefreshHint::Clean.strength() > RefreshHint::Ui.strength());
-        assert!(RefreshHint::Ui.strength() > RefreshHint::Fast.strength());
-    }
 }

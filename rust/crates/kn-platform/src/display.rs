@@ -40,6 +40,17 @@ pub struct RefreshRequest {
     pub swipe: Option<SwipeDir>,
 }
 
+impl RefreshRequest {
+    /// FBInk 的 MTK 动画会强制 AUTO/PARTIAL, 真正的清理必须禁用动画。
+    fn animation(&self, supports_swipe: bool) -> Option<SwipeDir> {
+        if supports_swipe && !self.flash {
+            self.swipe
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeviceInfo {
     pub width: u32,
@@ -404,22 +415,26 @@ impl FbinkDisplay {
         (wfm, req.flash || (wfm == WFM_REAGL && !self.info.is_mtk))
     }
 
-    /// 等 `marker` 刷完, 并把它从进行中列表里去掉。
+    /// 等待 `marker`, 返回后移出进行中列表; 失败记录返回码, 不将其当作完成证明。
     fn wait_marker(&mut self, marker: u32, why: &str) {
         let started = std::time::Instant::now();
-        unsafe {
-            crate::ffi::shim_wait_for_complete(self.fbfd, marker);
-        }
+        let rc = unsafe { crate::ffi::shim_wait_for_complete(self.fbfd, marker) };
         self.inflight.retain(|u| u.marker != marker);
-        if self.debug {
-            eprintln!("[epdc] wait {why} #{marker}: {:.1} ms", started.elapsed().as_secs_f32() * 1e3);
+        if self.debug || rc < 0 {
+            eprintln!("[epdc] wait {why} #{marker}: {:.1} ms, rc={rc}", started.elapsed().as_secs_f32() * 1e3);
         }
     }
 
     /// 等与 `rect` (面板坐标) 重叠、可能还没刷完的刷新; `flash_only` 时只等闪刷。
     fn wait_overlapping(&mut self, rect: Rect, flash_only: bool) {
         let now = std::time::Instant::now();
-        self.inflight.retain(|u| now.duration_since(u.at) < INFLIGHT_MAX);
+        self.inflight.retain(|u| {
+            let keep = now.duration_since(u.at) < INFLIGHT_MAX;
+            if !keep && self.debug {
+                eprintln!("[epdc] expire #{} (completion unknown)", u.marker);
+            }
+            keep
+        });
         let overlapping: Vec<u32> = self
             .inflight
             .iter()
@@ -611,15 +626,13 @@ impl Display for FbinkDisplay {
 
         // MTK 原生翻页动画, 仅在设备支持且上层要求时启用。
         let mut is_animated = 0;
-        if self.info.supports_swipe {
-            if let Some(dir) = req.swipe {
-                // 软件旋转时按帧缓冲的方向换算 (横屏时逻辑上的左右是帧缓冲的上下)
-                let direction = swipe_direction_code(dir, rot);
-                let steps = SWIPE_STEPS.load(std::sync::atomic::Ordering::Relaxed);
-                let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, steps) };
-                if rc == 0 {
-                    is_animated = 1;
-                }
+        if let Some(dir) = req.animation(self.info.supports_swipe) {
+            // 软件旋转时按帧缓冲的方向换算 (横屏时逻辑上的左右是帧缓冲的上下)
+            let direction = swipe_direction_code(dir, rot);
+            let steps = SWIPE_STEPS.load(std::sync::atomic::Ordering::Relaxed);
+            let rc = unsafe { ffi::shim_mtk_set_swipe_data(direction, steps) };
+            if rc == 0 {
+                is_animated = 1;
             }
         }
 
@@ -635,11 +648,20 @@ impl Display for FbinkDisplay {
                 is_animated,
             )
         };
+        if self.debug {
+            eprintln!(
+                "[epdc] request {:?}; FBInk config selector={} full={} animated={} rect={:?}, rc={} (valid animation -> AUTO/PARTIAL; physical AUTO waveform unknown)",
+                req, if is_animated != 0 { ffi::WFM_AUTO } else { wfm }, full && is_animated == 0, is_animated, rect, rc
+            );
+        }
         if rc < 0 {
             return Err(std::io::Error::from_raw_os_error(-rc));
         }
         // 返回内核实际的 marker, wait_complete 才能真正等到这次刷新完成
         let marker = unsafe { ffi::shim_get_last_marker() };
+        if self.debug {
+            eprintln!("[epdc] submitted #{marker}");
+        }
         self.next_marker = marker;
         // KOReader 在 FULL 刷新提交后就地等它完成。我们一帧里常有几块不相交的区域闪刷 (清深色块),
         // 就地等会让它们排队 (关弹窗 0.74 s、打开书 1.2 s); 只记下来, 之后重叠的刷新 (含按下反馈) 再等。
@@ -649,10 +671,7 @@ impl Display for FbinkDisplay {
     }
 
     fn wait_complete(&mut self, marker: u32) {
-        use crate::ffi;
-        unsafe {
-            ffi::shim_wait_for_complete(self.fbfd, marker);
-        }
+        self.wait_marker(marker, "explicit");
     }
 
     fn reinit(&mut self) -> std::io::Result<()> {
@@ -747,6 +766,15 @@ impl Drop for FbinkDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleaning_takes_priority_over_swipe_animation() {
+        let mut req = RefreshRequest { rect: Rect::new(0, 0, 100, 200), waveform: Waveform::Gc16, flash: true, swipe: Some(SwipeDir::Left) };
+        assert_eq!(req.animation(true), None);
+        req.flash = false;
+        assert_eq!(req.animation(true), Some(SwipeDir::Left));
+        assert_eq!(req.animation(false), None);
+    }
 
     #[test]
     fn memory_display_records_requests_and_copies_rect() {

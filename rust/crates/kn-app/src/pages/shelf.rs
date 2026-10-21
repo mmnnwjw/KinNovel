@@ -327,7 +327,7 @@ impl Page<KinNovel> for ShelfPage {
 
     fn on_timer(&mut self, cx: &mut Cx<KinNovel>, token: u32) {
         if token == NOTICE_TOKEN && self.notice.take().is_some() {
-            cx.request_redraw(RefreshHint::Clean);
+            cx.request_ui_redraw(RefreshHint::Clean);
         }
     }
 
@@ -343,7 +343,7 @@ impl Page<KinNovel> for ShelfPage {
             let hit = cx.hits.at(Point { x: g.start.0, y: g.start.1 });
             if hit.is_some_and(|h| [HIT_ACT_MOVE, HIT_ACT_REMOVE, HIT_ACT_RENAME, HIT_ACT_CLOSE].contains(&h)) {
                 self.menu = None;
-                cx.request_redraw(RefreshHint::Clean);
+                cx.request_ui_redraw(RefreshHint::Clean);
             }
             let (what, title) = match &entry {
                 ShelfEntry::Book(b) => (ShelfRef::Book(b.id), b.title.clone()),
@@ -375,11 +375,11 @@ impl Page<KinNovel> for ShelfPage {
                     Some(HIT_CONFIRM) => {
                         let confirm = self.confirm.take().expect("checked");
                         self.write(cx, confirm);
-                        cx.request_redraw(RefreshHint::Clean);
+                        cx.request_ui_redraw(RefreshHint::Clean);
                     }
                     Some(HIT_CANCEL) => {
                         self.confirm = None;
-                        cx.request_redraw(RefreshHint::Clean);
+                        cx.request_ui_redraw(RefreshHint::Clean);
                     }
                     _ => {}
                 }

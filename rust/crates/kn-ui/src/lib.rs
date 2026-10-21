@@ -24,6 +24,6 @@ pub mod widgets;
 
 pub use app::{render_once, run, App, Backdrop, Cx, Delivery, Headless, Orientation, Page, PageId, PagePoster, Spawner, Transition};
 pub use hits::{HitId, Hits};
-pub use refresh::{RefreshHint, RefreshPolicy, RefreshScheduler};
+pub use refresh::{RefreshHint, RefreshPolicy, RefreshScheduler, UiRefreshMode};
 pub use tasks::{Lane, Poster, Submitter, Tasks, Waker};
 pub use theme::Theme;

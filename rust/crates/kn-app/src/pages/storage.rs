@@ -190,11 +190,11 @@ impl Page<KinNovel> for StoragePage {
                 Some(HIT_CONFIRM) => {
                     self.confirm = None;
                     self.clear(cx, which);
-                    cx.request_redraw(RefreshHint::Clean);
+                    cx.request_ui_redraw(RefreshHint::Clean);
                 }
                 Some(HIT_CANCEL) => {
                     self.confirm = None;
-                    cx.request_redraw(RefreshHint::Clean);
+                    cx.request_ui_redraw(RefreshHint::Clean);
                 }
                 _ => {}
             }
