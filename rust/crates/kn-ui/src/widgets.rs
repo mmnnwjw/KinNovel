@@ -82,18 +82,7 @@ impl<'a> Ink<'a> {
 
     /// 截断到 max_width 以内, 超出时末尾加 "…"。
     pub fn fit(&self, text: &str, size: f32, max_width: f32) -> String {
-        if self.width(text, size) <= max_width {
-            return text.to_string();
-        }
-        let mut chars: Vec<char> = text.chars().collect();
-        while !chars.is_empty() {
-            chars.pop();
-            let candidate: String = chars.iter().collect::<String>() + "…";
-            if self.width(&candidate, size) <= max_width {
-                return candidate;
-            }
-        }
-        "…".to_string()
+        self.fonts.fit(text, &self.style(size), max_width)
     }
 }
 

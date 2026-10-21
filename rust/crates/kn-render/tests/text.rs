@@ -266,3 +266,24 @@ fn glyph_cache_batch_eviction_keeps_recent_glyphs() {
     draw(&mut cache, &store, &style, &chars.last().unwrap().to_string());
     assert_eq!(cache.stats().hits, hits + 1);
 }
+
+#[test]
+fn fit_matches_prefix_measurement() {
+    let font_path = skip_if_missing!(find_system_cjk_font(), "no system CJK font on this host");
+    let mut store = FontStore::new();
+    let font = store.load_file(&font_path).unwrap();
+    let style = TextStyle { fonts: &[font], size_px: 28.0 };
+    for text in ["", "短标题", "这是一个中英文 mixed title", "emoji 👩\u{200d}💻 和符号 ♡", "有空格的 text "] {
+        for width in [0.0, 15.0, 70.0, 180.0, 1000.0] {
+            let mut expected = text.to_string();
+            if store.measure(text, &style) > width {
+                loop {
+                    expected.pop();
+                    let candidate = format!("{expected}…");
+                    if expected.is_empty() || store.measure(&candidate, &style) <= width { expected = candidate; break; }
+                }
+            }
+            assert_eq!(store.fit(text, &style, width), expected, "{text:?}, {width}");
+        }
+    }
+}

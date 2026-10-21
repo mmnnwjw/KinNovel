@@ -207,6 +207,27 @@ impl FontStore {
         total
     }
 
+    /// 最长可容纳前缀 + 省略号。宽度按 measure 的顺序累加, 每个字符只查一次字体。
+    pub fn fit(&self, text: &str, style: &TextStyle, max_width: f32) -> String {
+        let mut memo = HashMap::new();
+        let mut prefixes = vec![(0, 0.0f32)];
+        let mut total = 0.0;
+        for (i, ch) in text.char_indices() {
+            total += *memo.entry(ch).or_insert_with(|| self.advance(self.pick_font(&style.fonts, ch), ch, style.size_px));
+            prefixes.push((i + ch.len_utf8(), total));
+        }
+        if total <= max_width {
+            return text.to_string();
+        }
+        let ellipsis = self.measure("…", style);
+        for &(end, width) in prefixes.iter().rev().skip(1) {
+            if width + ellipsis <= max_width {
+                return format!("{}…", &text[..end]);
+            }
+        }
+        "…".to_string()
+    }
+
     /// 字号对应的 ascent/descent/行高 (像素), 取链上第一个字体。
     pub fn line_metrics(&self, style: &TextStyle) -> LineMetrics {
         let font = *style
