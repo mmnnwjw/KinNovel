@@ -7,7 +7,7 @@
 //! `Send + Sync`; every method blocks the calling thread. The intended
 //! caller is a `kn-ui` worker-pool thread, never the UI/render thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,6 +30,7 @@ const NON_IDEMPOTENT_METHODS: &[&str] = &[
     "BuyShopItem",
     "SignIn",
     "SaveBookShelf",
+    "SaveReadPosition", // 位置快照不自动重试, 免得旧快照覆盖后续位置。
     "MarkNotifications",
     "ClearReadHistory",
     "PostComment",
@@ -96,8 +97,16 @@ const RELOGIN_AFTER_FAIL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Default)]
 struct Relogin {
+    generation: u64,
     last: Option<Instant>,
     ok: bool,
+}
+
+#[derive(Default)]
+struct PositionQueue {
+    pending: VecDeque<(u64, i64, i64, String, i32)>,
+    last: Option<(u64, i64, i64, String)>,
+    running: bool,
 }
 
 /// The real client state, always reached through `Client`'s `Arc`. Split
@@ -111,6 +120,9 @@ struct Inner {
     session: SessionStore,
     hub: Arc<SignalRClient>,
     refresh_lock: Mutex<()>,
+    generation: Mutex<u64>,
+    positions: Mutex<PositionQueue>,
+    shelf_lock: Mutex<()>,
     flight: Mutex<HashMap<String, Arc<Inflight>>>,
     cache: Mutex<HashMap<String, CacheEntry>>,
     health: ServerHealth,
@@ -160,6 +172,9 @@ impl Client {
                 session,
                 hub: SignalRClient::new(hub_config, Some(token_provider)),
                 refresh_lock: Mutex::new(()),
+                generation: Mutex::new(0),
+                positions: Mutex::new(PositionQueue::default()),
+                shelf_lock: Mutex::new(()),
                 flight: Mutex::new(HashMap::new()),
                 cache: Mutex::new(HashMap::new()),
                 health: ServerHealth::default(),
@@ -363,14 +378,51 @@ impl Client {
     }
 
     pub fn login(&self, email: &str, password: &str) -> Result<Value, NetError> {
-        self.login_inner(email, &password_hash(password), false)
+        self.login_hashed(email, &password_hash(password))
     }
 
     /// Like [`Client::login`], with the password already hashed
     /// ([`password_hash`]; the server only ever sees the hash, so the app
     /// can store that instead of the password).
     pub fn login_hashed(&self, email: &str, hash: &str) -> Result<Value, NetError> {
-        self.login_inner(email, hash, false)
+        let generation = {
+            let mut generation = self.0.generation.lock().unwrap();
+            *generation += 1;
+            self.set_account(None);
+            self.0.account_rejected.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.0.cache.lock().unwrap().clear();
+            self.0.session.clear_credentials()?;
+            *generation
+        };
+        self.0.hub.close();
+        self.login_inner(email, hash, false, generation)
+    }
+
+    /// 后台使用保存的账号; 不开启新会话, 因而不能撤销用户刚做出的退出。
+    pub fn login_saved(&self) -> Result<Value, NetError> {
+        let (generation, account) = {
+            let generation = self.0.generation.lock().unwrap();
+            (*generation, self.account())
+        };
+        let (email, hash) = account.ok_or_else(|| NetError::network("未登录"))?;
+        let result = self.login_inner(&email, &hash, false, generation);
+        if matches!(result, Err(NetError::Auth(_))) {
+            self.reject_in_session(generation);
+        }
+        result
+    }
+
+    fn reject_in_session(&self, expected: u64) {
+        {
+            let mut generation = self.0.generation.lock().unwrap();
+            if *generation != expected { return; }
+            *generation += 1;
+            self.set_account(None);
+            let _ = self.0.session.clear_credentials();
+            self.0.cache.lock().unwrap().clear();
+            self.0.account_rejected.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.0.hub.close();
     }
 
     /// The account set with [`Client::set_account`], as (email, hash).
@@ -397,38 +449,54 @@ impl Client {
 
     /// Forgets the session (tokens + user) and the re-login account.
     pub fn logout(&self) -> Result<(), NetError> {
-        self.set_account(None);
+        let result = {
+            let mut generation = self.0.generation.lock().unwrap();
+            *generation += 1;
+            self.set_account(None);
+            self.0.account_rejected.store(false, std::sync::atomic::Ordering::SeqCst);
+            self.0.cache.lock().unwrap().clear();
+            self.0.session.clear_credentials()
+        };
         self.0.hub.close();
-        self.0.cache.lock().unwrap().clear();
-        self.0.session.clear_credentials()
+        result
+    }
+
+    fn generation(&self) -> u64 { *self.0.generation.lock().unwrap() }
+
+    /// 检查与写入共用会话锁, 退出/切换账号之后旧任务不能再落盘。
+    fn in_session<T>(&self, expected: u64, work: impl FnOnce() -> Result<T, NetError>) -> Result<T, NetError> {
+        let generation = self.0.generation.lock().unwrap();
+        if *generation != expected { return Err(NetError::network("会话已改变")); }
+        work()
     }
 
     /// `nested` = called from the 401 handler: fetch the user straight from
     /// the hub so a second 401 can't recurse into another re-login.
-    fn login_inner(&self, email: &str, hash: &str, nested: bool) -> Result<Value, NetError> {
+    fn login_inner(&self, email: &str, hash: &str, nested: bool, generation: u64) -> Result<Value, NetError> {
         // The site answers HTTP 200 + `Success: false` with Status 401
         // ("密码错误") or 404 ("没有此用户"), checked against the live API
         // 2026-10-16. Only those verdicts mean the account itself is wrong;
         // HTTP error pages (proxy 403/404, 5xx) and rate limiting do not.
         let mut verdict = false;
-        let credentials = self
-            .http_call_verdict("/api/user/login", Some(json!({"email": email, "password": hash})), "POST", None, &mut verdict)
+        let response = self
+            .http_call_verdict("/api/user/login", Some(json!({"email": email, "password": hash})), "POST", None, &mut verdict);
+        let credentials = self.in_session(generation, || response)
             .map_err(|e| match e {
                 NetError::Api { status: 401 | 404, message } if verdict => NetError::Auth(message),
                 other => other,
             })?;
-        self.store_credentials(&credentials)?;
+        self.in_session(generation, || self.store_credentials(&credentials))?;
         // The open hub connection (if any) was authorized with the old token.
         self.0.hub.close();
-        let user = if nested { self.0.hub.invoke("GetMyInfo", json!({}), true, None, true, 0) } else { self.get_my_info() };
+        let user = if nested { self.hub_invoke("GetMyInfo", json!({}), true, 0, generation) } else { self.get_my_info() };
         let user = match user {
             Ok(u) => u,
             Err(e) => {
-                let _ = self.0.session.clear_credentials();
+                let _ = self.in_session(generation, || self.0.session.clear_credentials());
                 return Err(e);
             }
         };
-        self.0.session.set_many(vec![("User", user.clone())])?;
+        self.in_session(generation, || self.0.session.set_many(vec![("User", user.clone())]))?;
         Ok(user)
     }
 
@@ -449,10 +517,12 @@ impl Client {
     }
 
     pub fn refresh_access_token(&self) -> Result<Option<String>, NetError> {
+        let generation = self.generation();
         let Some(refresh) = self.0.session.get_str("RefreshToken").filter(|s| !s.is_empty()) else {
             return Ok(None);
         };
         let _guard = self.0.refresh_lock.lock().unwrap();
+        self.in_session(generation, || Ok(()))?;
         let token = self.0.session.get_str("Token").filter(|s| !s.is_empty());
         let updated = self.0.session.get("TokenUpdatedAt").and_then(|v| v.as_f64()).unwrap_or(0.0);
         if let Some(t) = &token {
@@ -460,12 +530,11 @@ impl Client {
                 return Ok(Some(t.clone()));
             }
         }
-        match self.http_call("/api/user/refresh_token", Some(json!({"token": refresh})), "POST", None) {
+        let response = self.http_call("/api/user/refresh_token", Some(json!({"token": refresh})), "POST", None);
+        match self.in_session(generation, || response) {
             Ok(value) => match value.as_str() {
                 Some(t) if !t.is_empty() => {
-                    self.0
-                        .session
-                        .set_many(vec![("Token", Value::String(t.to_string())), ("TokenUpdatedAt", json!(now_epoch_secs()))])?;
+                    self.in_session(generation, || self.0.session.set_many(vec![("Token", Value::String(t.to_string())), ("TokenUpdatedAt", json!(now_epoch_secs()))]))?;
                     Ok(Some(t.to_string()))
                 }
                 _ => Ok(None),
@@ -475,7 +544,7 @@ impl Client {
                 // that the refresh token itself is dead; only drop
                 // credentials on an explicit "invalid" status.
                 if e.is_refresh_invalid() {
-                    let _ = self.0.session.clear_credentials();
+                    let _ = self.in_session(generation, || self.0.session.clear_credentials());
                 }
                 Err(e)
             }
@@ -487,11 +556,12 @@ impl Client {
     }
 
     pub fn refresh_user(&self) -> Result<Option<Value>, NetError> {
+        let generation = self.generation();
         if !self.has_refresh_token() {
             return Ok(None);
         }
         let user = self.get_my_info()?;
-        self.0.session.set_many(vec![("User", user.clone())])?;
+        self.in_session(generation, || self.0.session.set_many(vec![("User", user.clone())]))?;
         Ok(Some(user))
     }
 
@@ -531,8 +601,9 @@ impl Client {
         cache_ttl: Duration,
         coalesce: Option<bool>,
     ) -> Result<Value, NetError> {
+        let generation = self.generation();
         let coalesce = coalesce.unwrap_or(!is_non_idempotent(method));
-        let key = if coalesce || !cache_ttl.is_zero() { Some(Self::flight_key(method, &params)) } else { None };
+        let key = if coalesce || !cache_ttl.is_zero() { Some(format!("{generation}:{}", Self::flight_key(method, &params))) } else { None };
         if !cache_ttl.is_zero() {
             if let Some(k) = &key {
                 if let Some(cached) = self.cache_get(k) {
@@ -564,16 +635,16 @@ impl Client {
                     .unwrap();
                 if timeout_result.timed_out() {
                     drop(state);
-                    return self.invoke_direct(method, params, priority);
+                    return self.invoke_direct(method, params, priority, generation);
                 }
                 return match &*state {
                     InflightState::Done(result) => result.clone(),
                     InflightState::Pending => unreachable!(),
                 };
             }
-            return self.invoke_leader(method, params, priority, cache_ttl, Some(key));
+            return self.invoke_leader(method, params, priority, cache_ttl, Some(key), generation);
         }
-        self.invoke_leader(method, params, priority, cache_ttl, key)
+        self.invoke_leader(method, params, priority, cache_ttl, key, generation)
     }
 
     fn invoke_leader(
@@ -583,8 +654,9 @@ impl Client {
         priority: i32,
         cache_ttl: Duration,
         key: Option<String>,
+        generation: u64,
     ) -> Result<Value, NetError> {
-        let result = self.invoke_direct(method, params, priority);
+        let result = self.invoke_direct(method, params, priority, generation);
         if let Some(k) = &key {
             if let Some(entry) = self.0.flight.lock().unwrap().remove(k) {
                 let mut state = entry.state.lock().unwrap();
@@ -593,14 +665,16 @@ impl Client {
             }
         }
         if let (Ok(value), false, Some(k)) = (&result, cache_ttl.is_zero(), &key) {
-            self.cache_set(k.clone(), value.clone(), cache_ttl);
+            let _ = self.in_session(generation, || { self.cache_set(k.clone(), value.clone(), cache_ttl); Ok(()) });
         }
         result
     }
 
-    fn invoke_direct(&self, method: &str, params: Value, priority: i32) -> Result<Value, NetError> {
+    fn invoke_direct(&self, method: &str, params: Value, priority: i32, generation: u64) -> Result<Value, NetError> {
         let dump = std::env::var_os("KN_DUMP_API").map(|p| (p, params.clone()));
-        let result = self.invoke_direct_inner(method, params, priority);
+        self.in_session(generation, || Ok(()))?;
+        let result = self.invoke_direct_inner(method, params, priority, generation);
+        let result = self.in_session(generation, || Ok(result))?;
         self.0.health.record(&result);
         if let Some((path, params)) = dump {
             dump_call(&path, method, &params, &result);
@@ -608,20 +682,25 @@ impl Client {
         result
     }
 
-    fn invoke_direct_inner(&self, method: &str, params: Value, priority: i32) -> Result<Value, NetError> {
+    fn hub_invoke(&self, method: &str, params: Value, retry: bool, priority: i32, generation: u64) -> Result<Value, NetError> {
+        let connection = self.in_session(generation, || Ok(self.0.hub.generation()))?;
+        self.0.hub.invoke_in_generation(method, params, true, None, retry, priority, connection)
+    }
+
+    fn invoke_direct_inner(&self, method: &str, params: Value, priority: i32, generation: u64) -> Result<Value, NetError> {
         let retry = !is_non_idempotent(method);
-        match self.0.hub.invoke(method, params.clone(), true, None, retry, priority) {
+        match self.hub_invoke(method, params.clone(), retry, priority, generation) {
             Ok(v) => Ok(v),
             Err(e) if !e.is_unauthorized() => Err(e),
             Err(unauthorized_err) => {
                 // Access token expired mid-flight: drop it, refresh, retry
                 // exactly once on a fresh connection. Mirrors api.py's
                 // `_invoke_direct`.
-                self.0.session.set_many(vec![("Token", Value::String(String::new())), ("TokenUpdatedAt", json!(0))]).ok();
+                self.in_session(generation, || self.0.session.set_many(vec![("Token", Value::String(String::new())), ("TokenUpdatedAt", json!(0))]))?;
                 let failed = match self.refresh_access_token() {
                     Ok(Some(_)) => {
                         self.0.hub.close();
-                        match self.0.hub.invoke(method, params.clone(), true, None, retry, priority) {
+                        match self.hub_invoke(method, params.clone(), retry, priority, generation) {
                             Err(e) if e.is_unauthorized() => e,
                             other => return other,
                         }
@@ -634,8 +713,9 @@ impl Client {
                 // The session itself is gone (refresh token rejected, or the
                 // server still says unauthorized with a fresh token): log in
                 // again with the configured account and retry once.
-                if self.relogin() {
-                    return self.0.hub.invoke(method, params, true, None, retry, priority);
+                self.in_session(generation, || Ok(()))?;
+                if self.relogin(generation) {
+                    return self.hub_invoke(method, params, retry, priority, generation);
                 }
                 Err(failed)
             }
@@ -646,20 +726,22 @@ impl Client {
     /// `RELOGIN_AFTER_*`). Concurrent callers wait for the one doing the
     /// login and then reuse its outcome. Returns whether a usable session
     /// exists afterwards.
-    fn relogin(&self) -> bool {
+    fn relogin(&self, generation: u64) -> bool {
         let Some((email, hash)) = self.0.account.lock().unwrap().clone() else {
             return false;
         };
         let mut state = self.0.relogin.lock().unwrap();
+        if state.generation != generation { *state = Relogin { generation, ..Default::default() }; }
         if let Some(last) = state.last {
             let wait = if state.ok { RELOGIN_AFTER_OK } else { RELOGIN_AFTER_FAIL };
             if last.elapsed() < wait {
                 return state.ok;
             }
         }
+        if self.in_session(generation, || Ok(())).is_err() { return false; }
         state.last = Some(Instant::now());
         let mut rejected = false;
-        state.ok = match self.login_inner(&email, &hash, true) {
+        state.ok = match self.login_inner(&email, &hash, true, generation) {
             Ok(_) => {
                 eprintln!("[net] 登录已失效, 已用保存的账号重新登录");
                 true
@@ -673,9 +755,7 @@ impl Client {
         };
         let ok = state.ok;
         drop(state);
-        if rejected {
-            self.reject_account();
-        }
+        if rejected { self.reject_in_session(generation); }
         ok
     }
 
@@ -816,10 +896,41 @@ impl Client {
     }
 
     /// `priority`: 0 = 交互级; 数字越大越让位给其它请求 (换章时的上传用后台优先级)。
+    pub fn queue_read_position(&self, book_id: i64, chapter_id: i64, xpath: String, priority: i32) {
+        // 在 UI 调用时入队, 不让线程调度或请求优先级改变同一本书的位置顺序。
+        let generation = self.0.generation.lock().unwrap();
+        let mut queue = self.0.positions.lock().unwrap();
+        let key = (*generation, book_id, chapter_id, xpath.clone());
+        if !queue.running && queue.last.as_ref() == Some(&key) { return; }
+        queue.pending.retain(|p| p.0 == *generation && p.1 != book_id);
+        queue.pending.push_back((*generation, book_id, chapter_id, xpath, priority));
+        if queue.running { return; }
+        queue.running = true;
+        let net = self.clone();
+        if let Err(e) = std::thread::Builder::new().name("kn-progress".into()).spawn(move || loop {
+            let next = {
+                let mut queue = net.0.positions.lock().unwrap();
+                match queue.pending.pop_front() {
+                    Some(next) => next,
+                    None => { queue.running = false; return; }
+                }
+            };
+            let (generation, book_id, chapter_id, xpath, priority) = next;
+            let result = net.invoke_direct("SaveReadPosition", json!({"Bid": book_id, "Cid": chapter_id, "XPath": if xpath.is_empty() { "." } else { &xpath }}), priority, generation);
+            match result {
+                Ok(_) => net.0.positions.lock().unwrap().last = Some((generation, book_id, chapter_id, xpath)),
+                Err(e) => eprintln!("[net] 进度上传失败: {e}"),
+            }
+        }) {
+            queue.running = false;
+            eprintln!("[net] 无法启动进度上传: {e}");
+        }
+    }
+
     pub fn save_read_position(&self, book_id: i64, chapter_id: i64, xpath: &str, priority: i32) -> Result<Value, NetError> {
         let xpath = if xpath.is_empty() { "." } else { xpath };
         self.invoke(
-            "SaveReadPosition",
+            "SaveReadPosition", // 位置快照不自动重试, 免得旧快照覆盖后续位置。
             json!({"Bid": book_id, "Cid": chapter_id, "XPath": xpath}),
             priority,
             Duration::ZERO,
@@ -917,6 +1028,16 @@ impl Client {
         }
     }
 
+    /// 同一客户端的整表读改写串行执行, 并禁止跨会话写回。
+    pub fn update_book_shelf(&self, version: &str, edit: impl FnOnce(Value) -> Result<Value, NetError>) -> Result<(), NetError> {
+        let generation = self.generation();
+        let _guard = self.0.shelf_lock.lock().unwrap();
+        let current = self.invoke_direct("GetBookShelf", json!({}), 0, generation)?;
+        let items = edit(current)?;
+        self.invoke_direct("SaveBookShelf", json!({"data": items, "ver": version}), 0, generation)?;
+        Ok(())
+    }
+
     pub fn save_book_shelf(&self, items: Value, version: &str) -> Result<Value, NetError> {
         self.invoke("SaveBookShelf", json!({"data": items, "ver": version}), 0, Duration::ZERO)
     }
@@ -962,7 +1083,7 @@ fn get_access_token(inner: &Arc<Inner>) -> Result<Option<String>, NetError> {
         Ok(opt) => Ok(opt),
         Err(e) => {
             if e.is_refresh_invalid() {
-                let _ = inner.session.clear_credentials();
+                // refresh_access_token 已在会话锁内清理, 此处不再写入。
                 Ok(None)
             } else {
                 Err(e)

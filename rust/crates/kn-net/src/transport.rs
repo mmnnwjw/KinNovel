@@ -72,6 +72,7 @@ impl Default for SignalRConfig {
 
 struct ConnState {
     socket: Option<tungstenite::WebSocket<NetStream>>,
+    generation: u64,
     record_buffer: Vec<u8>,
     last_used: Option<Instant>,
     /// Only bumped by a real `invoke()`, not by the keepalive ping -- used
@@ -107,6 +108,7 @@ pub struct SignalRClient {
     /// without `self._lock` for the same reason).
     raw: Mutex<Option<std::net::TcpStream>>,
     shutdown: AtomicBool,
+    generation: std::sync::atomic::AtomicU64,
 
     keepalive_signal: Arc<KeepaliveSignal>,
     keepalive_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -131,12 +133,14 @@ impl SignalRClient {
             turn: TurnScheduler::new(),
             state: Mutex::new(ConnState {
                 socket: None,
+                generation: 0,
                 record_buffer: Vec::new(),
                 last_used: None,
                 last_real_use: None,
             }),
             raw: Mutex::new(None),
             shutdown: AtomicBool::new(false),
+            generation: std::sync::atomic::AtomicU64::new(0),
             keepalive_signal: Arc::new(KeepaliveSignal { stop: Mutex::new(true), cv: Condvar::new() }),
             keepalive_handle: Mutex::new(None),
             self_weak: weak.clone(),
@@ -164,14 +168,18 @@ impl SignalRClient {
     /// Drop the current connection but keep the client reusable (the next
     /// `invoke()` reconnects lazily). Mirrors `transport.py`'s `close()`.
     pub fn close(&self) {
-        // Shut down the raw fd first, independent of `state`'s lock, so a
-        // thread blocked inside a read on this socket unblocks promptly
-        // even if we then have to wait briefly for `state` ourselves.
-        if let Some(tcp) = self.raw.lock().unwrap().take() {
-            let _ = tcp.shutdown(std::net::Shutdown::Both);
-        }
-        let mut state = self.state.lock().unwrap();
-        self.close_locked(&mut state);
+        let mut raw = self.raw.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(tcp) = raw.take() { let _ = tcp.shutdown(std::net::Shutdown::Both); }
+        drop(raw);
+        // 协商/握手持有 state, 退出不能等网络超时; 旧连接在下次使用前按代数清理。
+        if let Ok(mut state) = self.state.try_lock() { self.close_locked(&mut state); }
+    }
+
+    pub(crate) fn generation(&self) -> u64 { self.generation.load(Ordering::SeqCst) }
+
+    fn check_generation(&self, expected: u64) -> Result<(), NetError> {
+        if self.generation() != expected { Err(Self::closed_err()) } else { Ok(()) }
     }
 
     fn close_locked(&self, state: &mut ConnState) {
@@ -247,6 +255,7 @@ impl SignalRClient {
             return Err(Self::closed_err());
         }
         self.close_locked(state);
+        let generation = self.generation();
         let token = match self.token_provider.as_ref() {
             Some(provider) => provider()?,
             None => None,
@@ -270,7 +279,11 @@ impl SignalRClient {
             NetStream::connect(&url.host, url.port, url.secure, self.connect_timeout, self.tls_config())?;
         net_stream.set_read_timeout(Some(self.connect_timeout)).ok();
         net_stream.set_write_timeout(Some(self.connect_timeout)).ok();
-        let raw_handle = net_stream.try_clone_raw()?;
+        {
+            let mut raw = self.raw.lock().unwrap();
+            self.check_generation(generation)?;
+            *raw = Some(net_stream.try_clone_raw()?);
+        }
 
         let host_header = if url.port == default_port(url.secure) {
             url.host.clone()
@@ -364,7 +377,8 @@ impl SignalRClient {
             }
         }
 
-        *self.raw.lock().unwrap() = Some(raw_handle);
+        self.check_generation(generation)?;
+        state.generation = generation;
         state.socket = Some(socket);
         state.record_buffer.clear();
         let now = Instant::now();
@@ -378,6 +392,7 @@ impl SignalRClient {
         if self.is_shutdown() {
             return Err(Self::closed_err());
         }
+        if state.generation != self.generation() { self.close_locked(state); }
         if state.socket.is_some() {
             if let Some(last_used) = state.last_used {
                 if last_used.elapsed() > self.idle_reconnect {
@@ -545,12 +560,14 @@ impl SignalRClient {
         Ok(messages)
     }
 
-    fn invoke_once(&self, invocation: &Value, timeout: Duration) -> Result<Value, NetError> {
+    fn invoke_once(&self, invocation: &Value, timeout: Duration, generation: u64) -> Result<Value, NetError> {
         if self.is_shutdown() {
             return Err(Self::closed_err());
         }
         let mut state = self.state.lock().unwrap();
+        self.check_generation(generation)?;
         self.ensure_connected_locked(&mut state)?;
+        self.check_generation(generation)?;
         let text = format!("{}{}", serde_json::to_string(invocation).unwrap(), RECORD_SEPARATOR as char);
         if let Err(e) = state.socket.as_mut().unwrap().send(Message::Text(text.into())) {
             self.close_locked(&mut state);
@@ -635,9 +652,13 @@ impl SignalRClient {
         retry: bool,
         priority: i32,
     ) -> Result<Value, NetError> {
-        if self.is_shutdown() {
-            return Err(Self::closed_err());
-        }
+        self.invoke_in_generation(method, params, use_gzip, timeout, retry, priority, self.generation())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn invoke_in_generation(&self, method: &str, params: Value, use_gzip: bool, timeout: Option<Duration>, retry: bool, priority: i32, generation: u64) -> Result<Value, NetError> {
+        if self.is_shutdown() { return Err(Self::closed_err()); }
+        self.check_generation(generation)?;
         let timeout = timeout.unwrap_or_else(|| self.timeout.mul_f64(2.0).min(Duration::from_secs(25)));
         let invocation_id = random_hex_id();
         let invocation = json!({
@@ -656,14 +677,19 @@ impl SignalRClient {
             if self.turn.acquire(priority).is_err() {
                 return Err(Self::closed_err());
             }
-            let result = self.invoke_once(&invocation, timeout);
+            let result = self.invoke_once(&invocation, timeout, generation);
             self.turn.release();
+            self.check_generation(generation)?;
             match result {
                 Ok(v) => return Ok(v),
                 Err(e @ NetError::Api { .. }) => return Err(e),
                 Err(e) => {
                     last_error = Some(e);
-                    self.close();
+                    {
+                        let mut state = self.state.lock().unwrap();
+                        self.check_generation(generation)?;
+                        self.close_locked(&mut state);
+                    }
                     if self.is_shutdown() || attempt + 1 >= attempts {
                         return Err(last_error.unwrap());
                     }

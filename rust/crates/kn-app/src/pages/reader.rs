@@ -22,7 +22,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use kn_platform::{GestureKind, InputEvent, KeyCode, SwipeDir};
@@ -100,11 +100,6 @@ enum Leave {
     /// 打开目录 / 插图预览, 之后还会回到阅读页: 不上传
     Child,
 }
-
-/// 最近一次上传成功的 (书, 章节, XPath): 位置没变就不再上传。
-/// 换章会新建阅读页实例, 所以放在模块级。
-/// 漫画阅读页共用 (键里的 XPath 换成页码)。
-pub(super) static LAST_UPLOAD: Mutex<Option<(i64, i64, String)>> = Mutex::new(None);
 
 /// 后台加载结果。
 struct Loaded {
@@ -512,14 +507,7 @@ impl ReaderPage {
         let xpath = kn_text::first_path_on_page(&self.pages, self.page as i64);
         let (book_id, chapter_id) = (self.book_id, self.chapter.chapter_id);
         let key = (book_id, chapter_id, xpath);
-        if LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&key) {
-            return;
-        }
-        eprintln!("[reader] 上传进度 {}#{} (优先级 {priority})", key.0, key.1);
-        std::thread::spawn(move || match net.save_read_position(key.0, key.1, &key.2, priority) {
-            Ok(_) => *LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(key),
-            Err(e) => eprintln!("[reader] 进度上传失败: {e}"),
-        });
+        net.queue_read_position(key.0, key.1, key.2, priority);
     }
 
     fn on_loaded(&mut self, cx: &mut Cx<KinNovel>, loaded: Loaded) {

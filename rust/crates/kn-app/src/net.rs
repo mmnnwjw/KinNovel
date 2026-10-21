@@ -37,17 +37,8 @@ pub fn ensure_login(net: &Client) -> Result<(), String> {
             return Ok(());
         }
     }
-    let Some((email, hash)) = account else { return Err("未登录".into()) };
-    match net.login_hashed(&email, &hash) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            if matches!(e, kn_net::NetError::Auth(_)) {
-                // 保存的账号被拒 (密码改了等): 删掉它, 界面回到登录页 (`KinNovel::take_transition`)
-                net.reject_account();
-            }
-            Err(format!("登录失败: {e}"))
-        }
-    }
+    if account.is_none() { return Err("未登录".into()); }
+    net.login_saved().map(|_| ()).map_err(|e| format!("登录失败: {e}"))
 }
 
 /// 由配置建网络客户端 (session.json / visitor-id 与 Python 版共用)。

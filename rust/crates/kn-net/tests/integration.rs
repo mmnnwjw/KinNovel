@@ -468,3 +468,164 @@ fn gzip_base64(data: &[u8]) -> String {
     let compressed = encoder.finish().unwrap();
     base64::engine::general_purpose::STANDARD.encode(compressed)
 }
+
+/// 登录/刷新已到服务器但尚未返回时退出, 旧回包不能恢复凭据或触发账号拒绝。
+#[test]
+fn logout_cancels_pending_credentials() {
+    for mode in ["login", "saved", "refresh", "rejected"] {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let handler = Arc::new(move |_: &Value| {
+            started_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            (200, match mode {
+                "refresh" => json!({"Success": true, "Response": "late-token"}),
+                "rejected" => json!({"Success": false, "Status": 401, "Msg": "密码错误"}),
+                _ => json!({"Success": true, "Response": {"Token": "late-token", "RefreshToken": "late-refresh"}}),
+            })
+        });
+        let server = FakeServer::start(FakeServerConfig {
+            login_handler: Some(handler.clone()), refresh_handler: Some(handler), ..Default::default()
+        });
+        let path = temp_session_path(mode);
+        std::fs::write(&path, json!({"RefreshToken": "old", "User": {"Id": 1}}).to_string()).unwrap();
+        let client = Client::new(ClientConfig { server: server.url(), session_path: path.clone(), timeout: Duration::from_secs(5), ..Default::default() });
+        client.set_account(Some(("test@example.invalid".into(), "hash".into())));
+        let work = client.clone();
+        let task = std::thread::spawn(move || match mode {
+            "refresh" => work.refresh_access_token().map(|_| ()),
+            "saved" | "rejected" => work.login_saved().map(|_| ()),
+            _ => work.login_hashed("test@example.invalid", "hash").map(|_| ()),
+        });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        client.logout().unwrap();
+        release_tx.send(()).unwrap();
+        assert!(task.join().unwrap().is_err(), "{mode}");
+        assert!(!client.has_refresh_token() && client.user().is_none() && !client.has_account(), "{mode}");
+        assert!(!client.take_account_rejected(), "{mode}");
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("RefreshToken").and_then(Value::as_str).unwrap_or("").is_empty());
+        client.shutdown();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[test]
+fn logout_interrupts_a_pending_handshake() {
+    let server = FakeServer::start(FakeServerConfig { reject_handshake: true, ..Default::default() });
+    let client = client_for(&server, "logout-handshake");
+    let work = client.clone();
+    let task = std::thread::spawn(move || work.get_my_info());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while server.connection_count() == 0 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
+    assert_eq!(server.connection_count(), 1);
+    let started = Instant::now();
+    client.logout().unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    assert!(task.join().unwrap().is_err());
+    assert_eq!(server.connection_count(), 1, "旧请求不能重连");
+    client.shutdown();
+}
+
+#[test]
+fn queued_positions_keep_the_latest_intent() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let log = saved.clone();
+    let server = FakeServer::start(FakeServerConfig {
+        invoke_handler: Arc::new(move |method, invocation| {
+            assert_eq!(method, "SaveReadPosition");
+            let chapter = invocation["arguments"][0]["Cid"].as_i64().unwrap();
+            if chapter == 1 {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            log.lock().unwrap().push(chapter);
+            if chapter == 3 { done_tx.send(()).unwrap(); }
+            Action::Success(json!(true))
+        }), ..Default::default()
+    });
+    let client = client_for(&server, "ordered-position");
+    client.queue_read_position(7, 1, "first".into(), 5);
+    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    client.queue_read_position(7, 2, "middle".into(), 5);
+    client.queue_read_position(7, 3, "latest".into(), 0);
+    release_tx.send(()).unwrap();
+    done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(*saved.lock().unwrap(), vec![1, 3]);
+    client.shutdown();
+}
+
+#[test]
+fn shelf_edits_preserve_both_changes_and_cancel_after_logout() {
+    let shelf = Arc::new(Mutex::new(json!([])));
+    let saved = shelf.clone();
+    let server = FakeServer::start(FakeServerConfig {
+        invoke_handler: Arc::new(move |method, invocation| match method {
+            "GetBookShelf" => Action::Success(json!({"data": saved.lock().unwrap().clone()})),
+            "SaveBookShelf" => {
+                *saved.lock().unwrap() = invocation["arguments"][0]["data"].clone();
+                Action::Success(json!(true))
+            }
+            _ => panic!("unexpected {method}"),
+        }), ..Default::default()
+    });
+    let client = client_for(&server, "shelf-edits");
+    let start = Arc::new(std::sync::Barrier::new(2));
+    let tasks: Vec<_> = [1, 2].into_iter().map(|id| {
+        let client = client.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            client.update_book_shelf("20260921", |current| {
+                let mut items = current["data"].as_array().unwrap().clone();
+                items.push(json!({"id": id}));
+                Ok(json!(items))
+            }).unwrap();
+        })
+    }).collect();
+    for task in tasks { task.join().unwrap(); }
+    let mut ids: Vec<_> = shelf.lock().unwrap().as_array().unwrap().iter().map(|v| v["id"].as_i64().unwrap()).collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2]);
+    let result = client.update_book_shelf("20260921", |_| {
+        client.logout()?;
+        Ok(json!([]))
+    });
+    assert!(result.is_err());
+    assert_eq!(shelf.lock().unwrap().as_array().unwrap().len(), 2, "退出后不能写回旧书架");
+    client.shutdown();
+}
+
+#[test]
+fn late_login_cannot_replace_a_new_account() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let server = FakeServer::start(FakeServerConfig {
+        login_handler: Some(Arc::new(move |request| {
+            let token = if request["email"] == "old@example.invalid" {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                "old"
+            } else { "new" };
+            (200, json!({"Success": true, "Response": {"Token": token, "RefreshToken": token}}))
+        })),
+        invoke_handler: Arc::new(|_, _| Action::Success(json!({"Id": 2}))),
+        ..Default::default()
+    });
+    let client = client_for(&server, "switch-account");
+    let work = client.clone();
+    let old = std::thread::spawn(move || work.login_hashed("old@example.invalid", "hash"));
+    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    client.login_hashed("new@example.invalid", "hash").unwrap();
+    release_tx.send(()).unwrap();
+    assert!(old.join().unwrap().is_err());
+    assert_eq!(client.get_access_token().unwrap().as_deref(), Some("new"));
+    assert_eq!(client.user_id(), 2);
+    client.shutdown();
+}

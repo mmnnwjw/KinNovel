@@ -28,7 +28,7 @@ use kn_render::{Bitmap, Point, Rect};
 use kn_ui::widgets::{self, ButtonStyle, Ink};
 use kn_ui::{Cx, HitId, Orientation, Page, PageId, RefreshHint, Transition};
 
-use super::reader::{Entry, LAST_UPLOAD};
+use super::reader::Entry;
 use crate::api;
 use crate::comic::{self, ComicBook, ComicProgress, Manifest};
 use crate::store;
@@ -593,14 +593,7 @@ impl ComicReaderPage {
             return;
         }
         let key = (self.book_id, self.chapter_id, (self.page + 1).to_string());
-        if LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&key) {
-            return;
-        }
-        eprintln!("[comic] 上传进度 {}#{} 第 {} 页 (优先级 {priority})", key.0, key.1, key.2);
-        std::thread::spawn(move || match net.save_read_position(key.0, key.1, &key.2, priority) {
-            Ok(_) => *LAST_UPLOAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(key),
-            Err(e) => eprintln!("[comic] 进度上传失败: {e}"),
-        });
+        net.queue_read_position(key.0, key.1, key.2, priority);
     }
 
     // ---- 菜单 ----

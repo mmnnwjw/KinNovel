@@ -511,23 +511,24 @@ fn fetch_shelf(net: Option<&Client>) -> Result<Value, String> {
     net.get_book_shelf().map_err(|e| e.to_string())
 }
 
-fn save_shelf(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
-    // 写回后书架页必须重新拉取 (书架页、书籍详情页、文件夹编辑页的写回都经过这里);
-    // 写回前后各作废一次: 写回期间完成的加载拿到的可能还是旧表
+fn edit_shelf(net: Option<&Client>, edit: impl FnOnce(Vec<Value>) -> Result<Vec<Value>, String>) -> Result<(), String> {
     forget_shelf();
-    let result = save_shelf_now(net, items);
+    let result = if fake_mode() {
+        // fixture 同样覆盖整个读改写, 不能只锁各自的读/写。
+        let mut shelf = FAKE_SHELF.lock().unwrap_or_else(|e| e.into_inner());
+        let current = shelf.clone().map(Ok).unwrap_or_else(|| load_fake("book_shelf"));
+        current.and_then(|current| edit(shelf_items(&current))).map(|items| *shelf = Some(json!({"data": items})))
+    } else {
+        (|| {
+            let net = net.ok_or("离线，无法保存")?;
+            crate::net::ensure_login(net)?;
+            // 格式版本与 Python 版 / 网页版一致。
+            net.update_book_shelf("20260921", |current| edit(shelf_items(&current))
+                .map(Value::Array).map_err(kn_net::NetError::protocol)).map_err(|e| e.to_string())
+        })()
+    };
     forget_shelf();
     result
-}
-
-fn save_shelf_now(net: Option<&Client>, items: Vec<Value>) -> Result<(), String> {
-    if fake_mode() {
-        *FAKE_SHELF.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "data": items }));
-        return Ok(());
-    }
-    let net = net.ok_or("离线，无法保存")?;
-    // `ver` 与 Python 版 / 网页版写回时带的格式版本一致
-    net.save_book_shelf(Value::Array(items), "20260921").map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// 书目元数据缓存多久: 进入书架时只给缓存里没有 (或过期) 的书请求 `GetBookListByIds`。
@@ -679,15 +680,12 @@ pub fn shelf_contains(net: Option<&Client>, book_id: i64) -> Result<bool, String
 
 /// 加入/移出书架 (拉取最新的表、只改这一本、整表写回)。返回操作后是否在书架上。
 pub fn shelf_set_book(net: Option<&Client>, book_id: i64, comic: bool, on_shelf: bool) -> Result<bool, String> {
-    let items = shelf_items(&fetch_shelf(net)?);
-    let items = if on_shelf { with_book(items, book_id, comic, &iso_now()) } else { without_book(items, book_id) };
-    save_shelf(net, items)?;
+    edit_shelf(net, |items| Ok(if on_shelf { with_book(items, book_id, comic, &iso_now()) } else { without_book(items, book_id) }))?;
     Ok(on_shelf)
 }
 
 pub fn shelf_delete_folder(net: Option<&Client>, folder: &str) -> Result<(), String> {
-    let items = shelf_items(&fetch_shelf(net)?);
-    save_shelf(net, without_folder(items, folder))
+    edit_shelf(net, |items| Ok(without_folder(items, folder)))
 }
 
 // 新建 / 重命名文件夹、移动条目: 规则照网页版 `stores/shelf.ts` (createFolder / renameFolder / moveItems),
@@ -845,20 +843,17 @@ fn moved(mut items: Vec<Value>, what: &ShelfRef, to: &[String]) -> Result<Vec<Va
 
 /// 新建文件夹, 返回它的 id。
 pub fn shelf_create_folder(net: Option<&Client>, parents: &[String], name: &str) -> Result<String, String> {
-    let items = shelf_items(&fetch_shelf(net)?);
     let id = new_folder_id();
-    save_shelf(net, with_new_folder(items, parents, name, &id, &iso_now())?)?;
+    edit_shelf(net, |items| with_new_folder(items, parents, name, &id, &iso_now()))?;
     Ok(id)
 }
 
 pub fn shelf_rename_folder(net: Option<&Client>, id: &str, name: &str) -> Result<(), String> {
-    let items = shelf_items(&fetch_shelf(net)?);
-    save_shelf(net, renamed_folder(items, id, name)?)
+    edit_shelf(net, |items| renamed_folder(items, id, name))
 }
 
 pub fn shelf_move(net: Option<&Client>, what: &ShelfRef, to: &[String]) -> Result<(), String> {
-    let items = shelf_items(&fetch_shelf(net)?);
-    save_shelf(net, moved(items, what, to)?)
+    edit_shelf(net, |items| moved(items, what, to))
 }
 
 /// 阅读历史的全部 id (最新在前, 对照 `GetReadHistory()`): 小说是书 id, 漫画是分卷 (书) id。
