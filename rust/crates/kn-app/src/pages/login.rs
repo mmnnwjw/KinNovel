@@ -96,10 +96,9 @@ impl LoginPage {
         if let Some(old) = self.focus {
             self.editor(old).finish();
         }
-        // 键盘出现/收起是大面积变化, 区域闪刷; 只换输入框时普通刷新
         let hint = if self.focus.is_some() != field.is_some() { RefreshHint::Clean } else { RefreshHint::Ui };
         self.focus = field;
-        cx.request_redraw(hint);
+        cx.request_ui_redraw(hint);
     }
 
     fn submit(&mut self, cx: &mut Cx<KinNovel>) {

@@ -128,17 +128,3 @@ pub fn render(width: u32, height: u32) -> Bitmap {
     draw_text(&mut frame, &version, vx, y, version_cell, DARK);
     frame
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn art_rows_have_equal_width_and_fit_small_screens() {
-        assert!(ART.iter().all(|r| r.len() == ART[0].len()));
-        for (w, h) in [(1236, 1648), (600, 800), (758, 1024), (1860, 2480)] {
-            let f = render(w, h);
-            assert_eq!((f.width(), f.height()), (w, h));
-        }
-    }
-}

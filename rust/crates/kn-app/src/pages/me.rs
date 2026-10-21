@@ -303,7 +303,7 @@ impl Page<KinNovel> for MePage {
                     self.dialog = None;
                     self.info = None;
                     self.show_toast(cx, "已退出登录");
-                    cx.request_redraw(RefreshHint::Clean);
+                    cx.request_ui_redraw(RefreshHint::Clean);
                 }
                 HIT_CHECK_UPDATE if !matches!(self.update_check, Some(None)) => {
                     self.update_check = Some(None);
@@ -317,8 +317,8 @@ impl Page<KinNovel> for MePage {
                 }
                 HIT_DIALOG_CLOSE => {
                     self.dialog = None;
-                    // 弹窗区域局部闪刷: 深色按钮在普通局部刷新下残留严重
-                    cx.request_redraw(RefreshHint::Clean);
+                    // 普通 UI 恢复弹窗下的内容。
+                    cx.request_ui_redraw(RefreshHint::Clean);
                 }
                 _ => {}
             }

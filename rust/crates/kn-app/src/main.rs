@@ -128,6 +128,10 @@ impl App for KinNovel {
         Theme::new(self.night)
     }
 
+    fn ui_refresh_mode(&self) -> kn_ui::UiRefreshMode {
+        self.config.ui_refresh_mode()
+    }
+
     /// 有令牌就不动; 没有令牌但保存了账号时, 后台登录。走任务池: 账号被拒时结果送回 UI 线程,
     /// 随后的 `take_transition` 弹出登录页。
     fn on_start(cx: &mut kn_ui::Cx<Self>) {
@@ -264,7 +268,6 @@ impl KinNovel {
     pub fn net(&self) -> Option<kn_net::Client> {
         self.online.then(|| self.net_client.clone())
     }
-
 
     /// 登录成功: 保存账号 (密码只存哈希), 之后会话失效时用它自动重新登录。
     pub fn remember_account(&mut self, account: account::Account) {
@@ -502,6 +505,8 @@ fn run_device(start: StartMode) {
     let ui_fonts = load_ui_fonts(&mut fonts, &config);
     let policy = RefreshPolicy {
         supports_reagl: info.supports_reagl,
+        ui_waveform: if info.is_mtk && info.bytes_per_pixel == 1 { kn_platform::Waveform::Auto } else { kn_platform::Waveform::Gc16 },
+        ui_mode: config.ui_refresh_mode(),
         full_refresh_every: config.float("full_refresh_every", 6.0) as f32,
         flash_every_turn: config.bool("page_flash", false),
     };

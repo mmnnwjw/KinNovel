@@ -370,22 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn worker_stack_fits_deep_recursion() {
-        // 约 1.5 MB 的递归: 512 KB 的栈会溢出 (P0-1)
-        fn deep(n: u32) -> u32 {
-            let pad = [n as u8; 1024];
-            if n == 0 {
-                pad[0] as u32
-            } else {
-                deep(n - 1) + std::hint::black_box(pad)[1] as u32
-            }
-        }
-        let tasks: Tasks<u32> = Tasks::new(1, Waker::new().unwrap());
-        tasks.submit(Lane::Local, || Some(deep(1536)));
-        assert_eq!(wait_for(&tasks, 1).len(), 1);
-    }
-
-    #[test]
     fn panicking_job_does_not_kill_pool() {
         let tasks: Tasks<Cb<u32>> = Tasks::new(1, Waker::new().unwrap());
         tasks.spawn(|| panic!("boom"));

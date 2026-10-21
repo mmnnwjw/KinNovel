@@ -1,6 +1,6 @@
 # KinNovel (Rust) — 架构设计
 
-> 状态: 已发布 (当前 v1.6.4)。Python 版 0.8.x 在 `legacy` 分支维护, 作为排版对拍基准。
+> 状态: 已发布 (当前 v1.6.5)。Python 版 0.8.x 在 `legacy` 分支维护, 作为排版对拍基准。
 > 各页面的界面规范见 [`UI-DESIGN.md`](UI-DESIGN.md), 机型差异见 [`research-kindle-devices.md`](research-kindle-devices.md)。
 
 ## 目标与现状
@@ -40,10 +40,13 @@ crates/
 ## 显示与刷新 (参考 KOReader UIManager + FBInk)
 
 - 页面每帧整屏重画到 L8 位图 (立即模式), 调度器和上一帧做差分, 只提交变化的区域。
-- 刷新类型: `Ui` (GC16 局部)、`Turn` (翻页, MTK 用 REAGL)、按下反馈 (反相 + A2/DU)、`Flash` (GC16 闪刷)、`Clean` (区域闪刷, 关闭弹窗时)。
-- 调度器把差分按纵向间隔拆成最多 4 个区域分别刷新, 面积过大升级为整屏, 沿用 0.8.0 的残影预算; 实心深色块被清回背景色时对该块单独闪刷 (KOReader 关闭弹窗的 `flashui`)。细则见 `kn-ui/src/refresh.rs` 模块说明。
+- 刷新类型: `Ui` (黑白 MTK 用 AUTO, 其它设备 GC16)、`Turn` (翻页, MTK 用 REAGL)、按下反馈 (反相 + A2/DU)、`Flash` (GC16 闪刷)、`Clean` (显式区域闪刷)。
+- 调度器把差分按纵向间隔拆成最多 4 个区域分别刷新, 面积过大时覆盖整屏。默认流畅模式的 UI 不自动升级为闪刷; 可在「设置 → 显示 → UI 刷新模式」切换经典模式 (v1.6.4 的 GC16、面积预算和定点清理, 见 `kn-ui/src/refresh/classic.rs`), 即时生效。阅读预算独立于 UI 模式和 UI 反馈; 缺少新配置键 `ui_refresh_mode` 时默认流畅。
+- 控件可通过 `Cx::request_clean` 请求原区域清理, 不依赖像素变化, 不被同帧翻页覆盖。小说注释与阅读菜单沿用此策略; 流畅模式的普通 UI 弹窗、键盘和设置分组使用非闪刷恢复。
+- 小说根据当前页已就绪插图的裁剪后并集面积选择清理 (起始阈值 7.5%): 进入、离开和异步到达都重新评估, 同页时钟重绘不重复清理。`Page::refresh_hint` 在绘制后影响同帧计划, `presented` 在全部提交成功后记录内容。
+- MTK 清理与动画互斥, 在显示层统一执行; 普通动画仍保留。动画会改写为 AUTO/PARTIAL, 所以阅读预算不套用 REAGL 折扣。流畅模式与插图清理已由用户在 KPW5 验收; 阅读 REAGL 配对保持原策略。
 - 按钮按下立即反相反馈, 再执行动作 —— 解决"点了没反应"的墨水屏通病。
-- 进入新页面、切换主题、唤醒时整屏闪刷; 阅读页在章节排好后自己闪刷一次。
+- 流畅模式普通页面导航不主动闪刷, 经典模式保留夜间导航与弹窗/键盘清理规则; 切换主题和唤醒时整屏清理, 阅读页在章节排好后自己清理一次。
 - 帧缓冲写入: 直接写 FBInk 映射的 framebuffer (考虑 line_length 填充); 24/32 bpp (ColorSoft) 展开灰度。
 - 横屏 / 倒拿: 帧缓冲不转 (KOReader 在 Kindle 上同样软件旋转), 页面按逻辑画面画 (横屏时宽高互换),
   `FbinkDisplay::present` 用 `kn_platform::Rotation::copy_region` 把区域转好再写入, `InputReader` 把识别出的手势转回逻辑坐标
@@ -67,6 +70,7 @@ crates/
 ## 验证与发布
 
 - Python 版作为基准: 断行/分页/进度锚点的 golden 数据, Rust 逐项对拍。
+- 测试以日常行为、格式兼容和真实回归为主; 不在正式测试集保留一次性计时/截图导出脚手架, 不用超大数据或缩小线程栈做压力验收。内存预算、签名校验、更新恢复等保留少量代表性边界用例。
 - 主机测试: `./build.sh host-test`; 主机预览: `kinnovel --preview out.pgm`, 配合 `KN_FAKE_DIR` 的模拟接口数据驱动真实页面。
 - 每项功能在 KPW5 实机验收 (性能数字 + 截图), 联网测试严格限频。
 - CI (`.github/workflows/ci.yml`): 每次推送跑主机单测并构建 armv7 程序。推送 `vX.Y.Z` 标签时 `release.yml` 构建发布包, 以 `docs/releases/vX.Y.Z.md` 为说明创建 GitHub Release。正式发布包只来自 CI (Windows 本地构建与 CI 构建的二进制不会逐字节相同)。

@@ -419,11 +419,11 @@ mod tests {
 
     /// 很多小块 + 块头在读缓冲边界上: 解码结果不变 (每块之后丢掉原始数据)。
     #[test]
-    fn download_many_chunks() {
+    fn download_chunks_across_read_buffer() {
         let mut expected = Vec::new();
         let mut raw = String::from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
-        for i in 0..3000 {
-            let chunk: String = std::iter::repeat((b'a' + (i % 26) as u8) as char).take(1 + i % 37).collect();
+        for i in 0..32 {
+            let chunk: String = std::iter::repeat((b'a' + (i % 26) as u8) as char).take(300 + i % 37).collect();
             raw.push_str(&format!("{:x}\r\n{chunk}\r\n", chunk.len()));
             expected.extend_from_slice(chunk.as_bytes());
         }

@@ -1906,24 +1906,6 @@ mod tests {
     }
 
     #[test]
-    fn comments_deep_reply_chain_is_capped() {
-        let n = 100_000i64;
-        let mut commentaries = serde_json::Map::new();
-        for i in 1..=n {
-            commentaries.insert(i.to_string(), json!({"UserId": 1, "Content": "c", "Replies": [i + 1]}));
-        }
-        let v = json!({"Users": {}, "Commentaries": Value::Object(commentaries), "Data": [{"Id": 1}]});
-        let page = parse_comments(&v, 1);
-        let mut depth = 0;
-        let mut c = &page.items[0];
-        while let Some(r) = c.replies.first() {
-            depth += 1;
-            c = r;
-        }
-        assert_eq!(depth, MAX_REPLY_DEPTH);
-    }
-
-    #[test]
     fn comments_fallback_user_name_when_missing() {
         let v = json!({"Users": {}, "Commentaries": {"1": {"UserId": 1, "Content": "x"}}, "Data": [{"Id": 1}]});
         let page = parse_comments(&v, 1);

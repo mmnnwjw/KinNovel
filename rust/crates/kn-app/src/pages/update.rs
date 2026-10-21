@@ -320,7 +320,7 @@ impl Page<KinNovel> for UpdatePage {
                 Ok(v) => State::Installed(v),
                 Err(e) => State::Failed(format!("安装失败: {e}")),
             };
-            cx.request_redraw(RefreshHint::Clean);
+            cx.request_ui_redraw(RefreshHint::Clean);
         }
     }
 
@@ -441,7 +441,7 @@ impl Page<KinNovel> for UninstallPage {
         match hit {
             HIT_CANCEL if self.confirming => {
                 self.confirming = false;
-                cx.request_redraw(RefreshHint::Clean);
+                cx.request_ui_redraw(RefreshHint::Clean);
             }
             HIT_CANCEL => return Transition::Exit,
             HIT_PRIMARY => {
@@ -526,8 +526,8 @@ impl Page<KinNovel> for UpdatePrompt {
         }
         match cx.hits.at(Point { x: g.start.0, y: g.start.1 }) {
             Some(HIT_PROMPT_LATER) => {
-                // 下面那页重画后弹窗区域局部闪刷, 不留深色按钮的残影
-                cx.request_redraw(RefreshHint::Clean);
+                // 下面那页按普通 UI 重画。
+                cx.request_ui_redraw(RefreshHint::Clean);
                 Transition::Back
             }
             // 更新页会重新检查一次, 装的是那时最新的版本

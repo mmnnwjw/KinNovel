@@ -123,13 +123,12 @@ impl SearchPage {
         self.query = keywords;
         self.editing = false;
         self.search(cx, 1);
-        // 键盘收起是大面积变化, 区域闪刷清掉残影
-        cx.request_redraw(RefreshHint::Clean);
+        cx.request_ui_redraw(RefreshHint::Clean);
     }
 
     fn start_editing(&mut self, cx: &mut Cx<KinNovel>) {
         self.editing = true;
-        cx.request_redraw(RefreshHint::Clean);
+        cx.request_ui_redraw(RefreshHint::Clean);
     }
 
     /// 返回: 有结果时先收起键盘, 否则离开本页。
@@ -138,7 +137,7 @@ impl SearchPage {
             self.editor.finish();
             self.editor.set_text(&self.query);
             self.editing = false;
-            cx.request_redraw(RefreshHint::Clean);
+            cx.request_ui_redraw(RefreshHint::Clean);
             return Transition::None;
         }
         Transition::Back

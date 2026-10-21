@@ -1,5 +1,7 @@
 # Kindle 设备差异化处理研究报告（KOReader + FBInk）
 
+> 2026-10-21 补充：本文保留早期调研与历史实测，当前刷新策略见 [架构设计](DESIGN.md#显示与刷新-参考-koreader-uimanager--fbink)。MTK 支持显式 REAGL；驱动 FULL 不等于肉眼闪屏；当前 FBInk 在启用 MTK 动画时会改写为 AUTO/PARTIAL，不能假定“动画 + 闪刷”会同时兑现。
+
 来源：`koreader/koreader`（AGPL-3.0）`frontend/device/kindle/device.lua`、`powerd.lua`、`platform/kindle/koreader.sh`（master 分支，2026-10 抓取）；`NiLuJe/FBInk`（GPL-3.0）`fbink.h`、`README.md`。标注"不确定"处均为代码未直接验证、需上机测试的内容。
 
 ## 1. 触屏机型表
@@ -91,11 +93,11 @@ Waveform 模式常量（`WFM_MODE_INDEX_E`, fbink.h:374-459）与我们需要的
 
 | 用途场景 | 建议 WFM 模式 | 说明 |
 |---|---|---|
-| 翻页（全页刷新，追求清晰无残影） | `WFM_GC16`（387，~450ms，最高保真）或 `WFM_GC16_FAST`（418，略快，略低保真） | 普通机型；MTK 机型可配合 `fbink_mtk_toggle_auto_reagl` 让大区域自动升级为 REAGL |
-| 翻页（需要防鬼影、不想整页闪烁） | `WFM_REAGL`（408）/`WFM_REAGLD`（413，更强去鬼影但闪烁抑制较弱）；MTK 上 `WFM_GC16HQ`（438，i.MX专属，REAGL别名）**不适用于 MTK**，MTK 应直接用 auto-REAGL 升级机制 | 仅 i.MX/mxcfb 机型可用 REAGL/REAGLD/GC16HQ |
+| 翻页（需要真正清理闪刷） | 明确请求 `WFM_GC16` + `is_flashing=true`，耗时按设备测量 | MTK 上须关闭本次翻页动画；自动 REAGL 升级不等于清理闪刷，当前 KinNovel 与 KOReader 均主动关闭自动升级 |
+| 翻页（需要残影抑制、减少可见闪烁） | 设备支持时显式使用 `WFM_REAGL`；MTK 映射到 GLR16，不能误判为仅 i.MX 可用 | KOReader 与 FBInk 源码建议 REAGL 配 FULL；当前 KinNovel 保留已验收的日间 MTK PARTIAL 路径 |
 | UI 局部更新（菜单/状态栏，非全页） | `WFM_AUTO`（374，EPDC 自动选择）或 `WFM_DU`（382，快速黑白，~260ms，有轻微鬼影） | 小区域、低延迟优先 |
 | 按钮按下即时反馈 | `WFM_A2`（395，~120ms，仅黑白间切换）或 `WFM_DU4`（420，支持灰度） | 追求最低延迟，可接受轻微鬼影；MTK/部分设备另有 `fbink_mtk_toggle_pen_mode`（手写笔模式专用 DU/DUNM） |
-| 整页强制闪烁刷新（消除残影，如打开书/定期清屏） | 任意模式 + `FBInkConfig.is_flashing = true`（触发 `UPDATE_MODE_FULL`，fbink.h:637），或显式 `WFM_GC16` + flashing | 典型用法是 `WFM_INIT`（431，~2000ms，多次闪烁后到全白，仅用于真正的初始化场景，不建议常规使用） |
+| 整页强制闪烁刷新（消除残影，如打开书/定期清屏） | 整屏矩形 + `WFM_GC16` + `FBInkConfig.is_flashing=true`，MTK 本次禁用动画 | FULL 是驱动模式，不保证所有波形都可见闪烁（如 REAGL）；`WFM_INIT` 是特殊初始化模式，不用于常规清理 |
 | 夜间反色模式下刷新 | `WFM_GL16_INV`（422，为黑底文字优化）或 `WFM_GLKW16`/`WFM_GCK16`（428-429，部分平台专属），需配合 `is_nightmode=true`（走 `EPDC_FLAG_ENABLE_INVERSION`） | 仅 `has_eclipse_wfm=true` 的设备支持专属 nightmode 波形；否则退回软件反色 `is_inverted` |
 
 MTK（Bellatrix，PW5+/Scribe）专属 API（fbink.h:1646-1681）：

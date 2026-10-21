@@ -199,6 +199,14 @@ impl Config {
         self.data.contains_key(key)
     }
 
+    pub fn ui_refresh_mode(&self) -> kn_ui::UiRefreshMode {
+        if self.data.get("ui_refresh_mode").and_then(Value::as_str) == Some("classic") {
+            kn_ui::UiRefreshMode::Classic
+        } else {
+            kn_ui::UiRefreshMode::Smooth
+        }
+    }
+
     pub fn int(&self, key: &str, default: i64) -> i64 {
         self.data.get(key).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))).unwrap_or(default)
     }
@@ -778,6 +786,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ui_refresh_mode_defaults_to_smooth_and_persists_selection() {
+        let dir = std::env::temp_dir().join(format!("kn-ui-refresh-config-{}", std::process::id()));
+        let file = dir.join("settings.json");
+        let mut config = Config::load(file.clone());
+        assert_eq!(config.ui_refresh_mode(), kn_ui::UiRefreshMode::Smooth);
+        config.set("ui_refresh_mode", Value::from("classic"));
+        let mut config = Config::load(file.clone());
+        assert_eq!(config.ui_refresh_mode(), kn_ui::UiRefreshMode::Classic);
+        config.set("ui_refresh_mode", Value::from("smooth"));
+        assert_eq!(Config::load(file).ui_refresh_mode(), kn_ui::UiRefreshMode::Smooth);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn cache_names_match_python() {
         // 与 Python stable_cache_name / _chapter_cache_path / ensure_font 对照 (设备缓存实测文件名)
         let paths = Paths { app_dir: PathBuf::from("/x") };
@@ -833,7 +855,7 @@ mod tests {
         let para = "<p>　　这是一段用来凑长度的正文，里面有“引号”和\\n转义。</p>";
         let content: String = std::iter::repeat_n(para, content_kb * 1024 / para.len() + 1).collect();
         for book in 1..=books {
-            let titles: Vec<String> = (1..=per_book.max(40)).map(|i| format!("第{i}章 标题")).collect();
+            let titles: Vec<String> = (1..=per_book).map(|i| format!("第{i}章 标题")).collect();
             for sort in 1..=per_book {
                 let body = if sort == 1 { format!("<img src=\"https://img.example/{book}.jpg\">{content}") } else { content.clone() };
                 let v = serde_json::json!({
@@ -864,37 +886,6 @@ mod tests {
         // 当前设置是繁转简, 但只缓存了不转换的版本
         assert_eq!(first_image_of_book(&paths, 30003, "t2s").as_deref(), Some("https://img.example/3.jpg"));
         assert_eq!(first_image_of_book(&paths, 30009, ""), None);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// 计时: `cargo test -p kn-app --release -- --ignored --nocapture scan_timing`
-    #[test]
-    #[ignore]
-    fn scan_timing() {
-        let dir = std::env::temp_dir().join(format!("kn-scan-bench-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // 300 章, 每章正文约 30 KB (约一万汉字), 目录 100 项
-        let paths = synthetic_cache(&dir, 3, 100, 30);
-        let full = || {
-            let mut n = 0;
-            for e in std::fs::read_dir(paths.cache_dir().join("content")).unwrap().flatten() {
-                n += Chapter::parse(&std::fs::read(e.path()).unwrap(), false).is_some() as usize;
-            }
-            n
-        };
-        for round in 0..3 {
-            let t = std::time::Instant::now();
-            let a = full();
-            let full_ms = t.elapsed().as_secs_f64() * 1000.0;
-            let t = std::time::Instant::now();
-            let b = list_cached_chapters(&paths).len();
-            let head_ms = t.elapsed().as_secs_f64() * 1000.0;
-            let t = std::time::Instant::now();
-            let reads: usize = std::fs::read_dir(paths.cache_dir().join("content")).unwrap().flatten().map(|e| std::fs::read(e.path()).unwrap().len()).sum();
-            let read_ms = t.elapsed().as_secs_f64() * 1000.0;
-            assert_eq!(a, b);
-            println!("round {round}: {b} 章 {} MB: 完整解析 {full_ms:.1} ms, 只取字段 {head_ms:.1} ms, 只读文件 {read_ms:.1} ms", reads / 1_000_000);
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

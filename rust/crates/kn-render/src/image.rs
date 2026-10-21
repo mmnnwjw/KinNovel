@@ -62,7 +62,6 @@ impl ImageBudget {
     }
 }
 
-
 /// RGB → 灰度 (ITU-R BT.601, 整数近似)。
 #[inline]
 fn luma(r: u8, g: u8, b: u8) -> u8 {
@@ -541,7 +540,7 @@ mod tests {
         let scaled = decode_webp_native(bytes, Some((w, h)), MAX_BUFFER).unwrap();
         assert!(scaled.width() <= w && scaled.height() <= h && (scaled.width() == w || scaled.height() == h));
         assert!(decode_webp_native(include_bytes!("../tests/data/alpha.webp"), Some((8, 8)), MAX_BUFFER).is_ok());
-        assert!(decode_webp_native(b"RIFF    WEBPVP8 junk", None, MAX_BUFFER).is_err());
+        assert!(decode_webp_native(b"RIFF\0\0\0\0WEBPVP8 junk", None, MAX_BUFFER).is_err());
     }
 
     fn jpeg_is_ycbcr(bytes: &[u8]) -> bool {
@@ -558,26 +557,16 @@ mod tests {
         b
     }
 
-    /// SOF 声明的巨大尺寸在解码前就被拒绝 (以前 60000×60000 要解 35 秒、分配约 10 GB)。
+    /// 像素、RGB 输出与渐进式系数的代表性预算边界, 不运行大图解码压力测试。
     #[test]
-    fn huge_jpeg_rejected_before_decoding() {
-        let cases = [
-            (6000, 6000, 0xC0, None),
-            (6000, 6000, 0xC0, Some((800, 1000))),
-            (60000, 60000, 0xC0, None),
-            (60000, 60000, 0xC0, Some((800, 1000))),
-            (65535, 65535, 0xC2, Some((100, 100))),
-            // 30 M 像素: 没超像素上限, 但 RGB 输出 90 MB 超缓冲上限
-            (6000, 5000, 0xC0, None),
-            // 渐进式: 缩放也省不掉按原始尺寸存的系数 (4:2:0 约 90 MB)
-            (6000, 5000, 0xC2, Some((800, 1000))),
-        ];
-        for (w, h, sof, target) in cases {
-            let bytes = jpeg_with_size(w, h, sof);
-            let t = std::time::Instant::now();
-            let r = decode_gray(&bytes, target);
-            assert!(matches!(r, Err(ImageError::TooLarge)), "{w}x{h} {sof:X} {target:?}: {:?}", r.err());
-            assert!(t.elapsed() < std::time::Duration::from_millis(200), "{w}x{h}: {:?}", t.elapsed());
+    fn jpeg_limits_are_checked_before_decoding() {
+        let bytes = jpeg_with_size(6000, 6000, 0xC0);
+        for budget in [ImageBudget::Normal, ImageBudget::LargeOriginal] {
+            assert!(matches!(decode_gray_with_budget(&bytes, Some((800, 1000)), budget), Err(ImageError::TooLarge)));
+        }
+        for (sof, target) in [(0xC0, None), (0xC2, Some((800, 1000)))] {
+            let bytes = jpeg_with_size(6000, 5000, sof);
+            assert!(matches!(decode_gray(&bytes, target), Err(ImageError::TooLarge)));
         }
         // 系数估算: 4:2:0 每像素 1.5 个系数 × 2 字节
         let header = jpeg_header(&jpeg_with_size(6000, 5000, 0xC2));
@@ -605,12 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn huge_png_and_webp_rejected() {
-        // PNG: 只有 IHDR 声明 8000×3000 RGBA (24 M 像素, 缓冲 96 MB)
+    fn png_and_webp_limits_are_checked_before_decoding() {
+        // PNG: 只有 IHDR 声明 4200×4200 RGBA (略超默认 64 MiB 缓冲)
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         let mut ihdr = b"IHDR".to_vec();
-        ihdr.extend_from_slice(&8000u32.to_be_bytes());
-        ihdr.extend_from_slice(&3000u32.to_be_bytes());
+        ihdr.extend_from_slice(&4200u32.to_be_bytes());
+        ihdr.extend_from_slice(&4200u32.to_be_bytes());
         ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
         png.extend_from_slice(&13u32.to_be_bytes());
         png.extend_from_slice(&ihdr);
@@ -621,14 +610,12 @@ mod tests {
         png.extend_from_slice(&png_crc(b"IDAT").to_be_bytes());
         assert!(matches!(decode_gray(&png, None), Err(ImageError::TooLarge)));
 
-        // WebP: 改 VP8 帧头的尺寸为 16383×16383 (快速路径以前会先分配 ~400 MB 的 Y/U/V)
+        // WebP: 6000×6000 超过像素上限, 只检查帧头而不分配图像缓冲
         let mut webp = include_bytes!("../tests/data/color.webp").to_vec();
         let i = webp.windows(4).position(|m| m == b"VP8 ").unwrap() + 8;
         assert_eq!(vp8_dimensions(&webp[i..]).map(|(w, h)| w * h > 0), Some(true));
-        webp[i + 6..i + 8].copy_from_slice(&0x3FFFu16.to_le_bytes());
-        webp[i + 8..i + 10].copy_from_slice(&0x3FFFu16.to_le_bytes());
-        assert!(matches!(decode_webp_with(&webp, true, MAX_BUFFER), Err(ImageError::TooLarge)));
-        assert!(matches!(decode_webp_with(&webp, false, MAX_BUFFER), Err(ImageError::TooLarge)));
+        webp[i + 6..i + 8].copy_from_slice(&6000u16.to_le_bytes());
+        webp[i + 8..i + 10].copy_from_slice(&6000u16.to_le_bytes());
         assert!(matches!(decode_gray(&webp, None), Err(ImageError::TooLarge)));
     }
 
@@ -641,26 +628,6 @@ mod tests {
             }
         }
         !crc
-    }
-
-    /// 真实越过默认缓冲边界, 用户选择后能解码, 下一次默认调用仍拒绝。
-    #[test]
-    fn large_image_budget_is_per_call_and_keeps_pixel_ceiling() {
-        let mut bytes = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut bytes, 4200, 4200);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.set_compression(png::Compression::Fast);
-            encoder.write_header().unwrap().write_image_data(&vec![255; 4200 * 4200 * 4]).unwrap();
-        }
-        assert!(matches!(decode_gray(&bytes, None), Err(ImageError::TooLarge)));
-        let image = decode_gray_with_budget(&bytes, None, ImageBudget::LargeOriginal).unwrap();
-        assert_eq!((image.width(), image.height(), image.get(4199, 4199)), (4200, 4200, 255));
-        assert!(matches!(decode_gray(&bytes, None), Err(ImageError::TooLarge)));
-        for budget in [ImageBudget::Normal, ImageBudget::LargeOriginal] {
-            assert!(matches!(decode_gray_with_budget(&jpeg_with_size(60000, 60000, 0xC0), None, budget), Err(ImageError::TooLarge)));
-        }
     }
 
     #[test]

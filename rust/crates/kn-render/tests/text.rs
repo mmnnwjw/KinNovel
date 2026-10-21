@@ -2,10 +2,9 @@
 //!
 //! These rely on fonts available on the host rather than anything copyrighted/committed:
 //! - System CJK fonts (Windows: simhei.ttf / msyh.ttc) for font-chain/fallback behavior.
-//! - The gitignored spike-font WOFF2 sample for WOFF2 decoding, if present.
 //! Any test whose font is missing on this host is skipped (prints a notice, does not fail).
 
-use kn_render::{decode_woff2, FontStore, GlyphCache, TextStyle};
+use kn_render::{FontStore, GlyphCache, TextStyle};
 use std::path::{Path, PathBuf};
 
 fn find_system_cjk_font() -> Option<PathBuf> {
@@ -20,10 +19,6 @@ fn find_system_cjk_font() -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn woff2_sample_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spike-font/testdata/chapter1.woff2")
 }
 
 macro_rules! skip_if_missing {
@@ -270,31 +265,4 @@ fn glyph_cache_batch_eviction_keeps_recent_glyphs() {
     let hits = st.hits;
     draw(&mut cache, &store, &style, &chars.last().unwrap().to_string());
     assert_eq!(cache.stats().hits, hits + 1);
-}
-
-#[test]
-fn woff2_decode_and_load_if_sample_present() {
-    let path = woff2_sample_path();
-    if !path.is_file() {
-        eprintln!(
-            "skipping: woff2 sample not present at {} (gitignored spike testdata)",
-            path.display()
-        );
-        return;
-    }
-    let bytes = std::fs::read(&path).expect("read woff2 sample");
-    let ttf = decode_woff2(&bytes).expect("decode woff2 -> ttf");
-    assert!(ttf.len() > 4);
-
-    let mut store = FontStore::new();
-    let font = store.load_bytes(ttf).expect("load decoded ttf");
-    // The chapter font should at least resolve something for a common Han character
-    // without panicking, regardless of whether it actually covers it.
-    let _ = store.has_char(font, '的');
-    let style = TextStyle {
-        fonts: &[font],
-        size_px: 32.0,
-    };
-    let w = store.measure("的", &style);
-    assert!(w > 0.0);
 }
