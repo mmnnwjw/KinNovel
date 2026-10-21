@@ -324,16 +324,19 @@ pub fn list_row_cover_badged(ink: &mut Ink, frame: &mut Bitmap, theme: &Theme, m
 #[allow(clippy::too_many_arguments)]
 pub fn pager(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme, m: &Metrics, rect: Rect, page: usize, pages: usize, prev_id: HitId, next_id: HitId) {
     let pages = pages.max(1);
+    pager_with_label(ink, frame, hits, theme, m, rect, &format!("{} / {}", page + 1, pages), page > 0, page + 1 < pages, prev_id, next_id);
+}
+
+/// 同一组翻页按钮, 允许页面显示批次/本地屏数等自己的页码。
+#[allow(clippy::too_many_arguments)]
+pub fn pager_with_label(ink: &mut Ink, frame: &mut Bitmap, hits: &mut Hits, theme: &Theme, m: &Metrics, rect: Rect, label: &str, has_prev: bool, has_next: bool, prev_id: HitId, next_id: HitId) {
     let side = m.margin as i32;
     let bw = ((rect.w as i32 - 2 * side) / 3).max(0) as u32;
     let prev = Rect::new(rect.x + side, rect.y, bw, rect.h);
     let next = Rect::new(rect.right() - side - bw as i32, rect.y, bw, rect.h);
-    let has_prev = page > 0;
-    let has_next = page + 1 < pages;
     ink.text_centered(frame, prev, "上一页", m.small, if has_prev { theme.foreground } else { theme.mid });
     ink.text_centered(frame, next, "下一页", m.small, if has_next { theme.foreground } else { theme.mid });
-    let label = format!("{} / {}", page + 1, pages);
-    ink.text_centered(frame, Rect::new(prev.right(), rect.y, (next.x - prev.right()).max(0) as u32, rect.h), &label, m.small, theme.muted);
+    ink.text_centered(frame, Rect::new(prev.right(), rect.y, (next.x - prev.right()).max(0) as u32, rect.h), label, m.small, theme.muted);
     hits.add(prev_id, prev).enabled(has_prev);
     hits.add(next_id, next).enabled(has_next);
 }

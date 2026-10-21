@@ -42,10 +42,17 @@ enum Status {
     Ready,
 }
 
-struct IdsLoaded(Result<HistoryIds, String>);
+enum PageState {
+    Loading(u64),
+    Error(String),
+    Ready(Vec<BookItem>),
+}
+
+struct IdsLoaded(u64, Result<HistoryIds, String>);
 struct BooksLoaded {
     kind: Kind,
     page: usize,
+    request: u64,
     result: Result<Vec<BookItem>, String>,
 }
 
@@ -53,9 +60,8 @@ pub struct HistoryPage {
     status: Status,
     kind: Kind,
     ids: HistoryIds,
-    pages: HashMap<(Kind, usize), Vec<BookItem>>,
-    /// 漫画: 已经列出过的系列 (按标题去重)
-    seen_series: HashSet<String>,
+    pages: HashMap<(Kind, usize), PageState>,
+    request: u64,
     page: usize,
     covers: CoverCache,
 }
@@ -67,7 +73,7 @@ impl Default for HistoryPage {
             kind: Kind::Novel,
             ids: HistoryIds::default(),
             pages: HashMap::new(),
-            seen_series: HashSet::new(),
+            request: 0,
             page: 0,
             covers: CoverCache::default(),
         }
@@ -100,6 +106,21 @@ fn logged_in(cx: &Cx<KinNovel>) -> bool {
 }
 
 impl HistoryPage {
+    fn visible_items(&self) -> Vec<BookItem> {
+        let Some(PageState::Ready(items)) = self.pages.get(&(self.kind, self.page)) else { return Vec::new() };
+        let mut seen = HashSet::new();
+        if self.kind == Kind::Comic {
+            for (&(kind, page), state) in &self.pages {
+                if kind == Kind::Comic && page < self.page {
+                    if let PageState::Ready(items) = state {
+                        seen.extend(items.iter().map(|b| b.title.clone()));
+                    }
+                }
+            }
+        }
+        items.iter().filter(|b| self.kind != Kind::Comic || seen.insert(b.title.clone())).cloned().collect()
+    }
+
     fn ids(&self) -> &[i64] {
         match self.kind {
             Kind::Novel => &self.ids.novel,
@@ -108,6 +129,8 @@ impl HistoryPage {
     }
 
     fn start_load(&mut self, cx: &mut Cx<KinNovel>) {
+        self.request += 1;
+        self.pages.clear();
         if !online(cx) {
             self.status = Status::Offline;
             return;
@@ -118,7 +141,8 @@ impl HistoryPage {
         }
         self.status = Status::Loading;
         let net = cx.app.net();
-        cx.spawn_droppable(move || IdsLoaded(api::load_history_ids(net.as_ref())));
+        let request = self.request;
+        cx.spawn_droppable(move || IdsLoaded(request, api::load_history_ids(net.as_ref())));
     }
 
     fn load_page(&mut self, cx: &mut Cx<KinNovel>, page: usize) {
@@ -129,13 +153,17 @@ impl HistoryPage {
         let per = per_page(cx);
         let slice: Vec<i64> = self.ids().iter().skip(page * per).take(per).copied().collect();
         if slice.is_empty() {
-            self.pages.insert((kind, page), Vec::new());
+            self.pages.insert((kind, page), PageState::Ready(Vec::new()));
             return;
         }
+        self.request += 1;
+        let request = self.request;
+        self.pages.insert((kind, page), PageState::Loading(request));
         let net = cx.app.net();
         cx.spawn_droppable(move || BooksLoaded {
             kind,
             page,
+            request,
             result: match kind {
                 Kind::Novel => api::load_books_by_ids(net.as_ref(), &slice),
                 Kind::Comic => api::load_comic_series_by_ids(net.as_ref(), &slice),
@@ -148,6 +176,7 @@ impl HistoryPage {
     }
 
     fn turn(&mut self, cx: &mut Cx<KinNovel>, delta: i64) -> Transition<KinNovel> {
+        if !matches!(self.status, Status::Ready) { return Transition::None; }
         let total = self.total_pages(cx) as i64;
         let next = (self.page as i64 + delta).clamp(0, total - 1) as usize;
         if next != self.page {
@@ -191,11 +220,11 @@ impl Page<KinNovel> for HistoryPage {
         };
         let msg = match msg.downcast::<IdsLoaded>() {
             Ok(ids) => {
-                match ids.0 {
+                if ids.0 != self.request || !matches!(self.status, Status::Loading) { return; }
+                match ids.1 {
                     Ok(ids) => {
                         self.ids = ids;
                         self.pages.clear();
-                        self.seen_series.clear();
                         self.page = 0;
                         self.status = Status::Ready;
                         self.load_page(cx, 0);
@@ -208,12 +237,14 @@ impl Page<KinNovel> for HistoryPage {
             Err(other) => other,
         };
         if let Ok(books) = msg.downcast::<BooksLoaded>() {
-            if let Ok(mut items) = books.result {
-                if books.kind == Kind::Comic {
-                    items.retain(|b| self.seen_series.insert(b.title.clone()));
-                }
-                self.pages.insert((books.kind, books.page), items);
+            if !matches!(self.pages.get(&(books.kind, books.page)), Some(PageState::Loading(request)) if *request == books.request) {
+                return;
             }
+            let state = match books.result {
+                Ok(items) => PageState::Ready(items),
+                Err(e) => PageState::Error(e),
+            };
+            self.pages.insert((books.kind, books.page), state);
             if books.kind == self.kind {
                 cx.request_redraw(RefreshHint::Ui);
             }
@@ -233,7 +264,7 @@ impl Page<KinNovel> for HistoryPage {
         let top = list_top(cx);
         let row_h = m.row_h_cover();
         let list_bottom = tabs_top - m.pager_h() as i32;
-        let items = self.pages.get(&(self.kind, self.page)).cloned().unwrap_or_default();
+        let items = self.visible_items();
         if matches!(self.status, Status::Ready) {
             let cover_rect = widgets::cover_slot(&m, Rect::new(0, 0, cx.width, row_h));
             for (row, book) in items.iter().enumerate() {
@@ -286,9 +317,15 @@ impl Page<KinNovel> for HistoryPage {
             widgets::list_row_cover_badged(&mut ink, frame, &theme, &m, r, img, &book.badge(), &book.title, &book.subtitle(), &book.last_update);
             cx.hits.add(HitId(ROW_BASE + row as u32), r);
         }
-        if !self.pages.contains_key(&(self.kind, self.page)) {
+        if !matches!(self.pages.get(&(self.kind, self.page)), Some(PageState::Ready(_))) {
             let loading_area = Rect::new(0, top, cx.width, (list_bottom - top).max(0) as u32);
-            widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, loading_area, "加载中…", None);
+            match self.pages.get(&(self.kind, self.page)) {
+                Some(PageState::Error(e)) => {
+                    let text = format!("加载失败\n{}", ink.fit(e, m.small, (cx.width - 2 * m.margin) as f32));
+                    widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, loading_area, &text, Some(("重试", HIT_RETRY)));
+                }
+                _ => widgets::state_message(&mut ink, frame, cx.hits, &theme, &m, loading_area, "加载中…", None),
+            }
         }
         if total > 1 || per < self.ids().len() {
             let pr = Rect::new(0, list_bottom, cx.width, m.pager_h());
@@ -315,7 +352,12 @@ impl Page<KinNovel> for HistoryPage {
             }
             HIT_LOGIN => Transition::Push(Box::new(super::login::LoginPage::new())),
             HIT_RETRY => {
-                self.start_load(cx);
+                if matches!(self.status, Status::Ready) {
+                    self.pages.remove(&(self.kind, self.page));
+                    self.load_page(cx, self.page);
+                } else {
+                    self.start_load(cx);
+                }
                 cx.request_redraw(RefreshHint::Ui);
                 Transition::None
             }
@@ -323,12 +365,56 @@ impl Page<KinNovel> for HistoryPage {
             HIT_NEXT => self.turn(cx, 1),
             HitId(id) if id >= ROW_BASE => {
                 let index = (id - ROW_BASE) as usize;
-                match self.pages.get(&(self.kind, self.page)).and_then(|v| v.get(index)) {
+                match self.visible_items().get(index) {
                     Some(book) => Transition::Push(Box::new(BookDetailPage::new(book.id))),
                     None => Transition::None,
                 }
             }
             _ => Transition::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_page_can_retry_and_stale_results_are_ignored() {
+        crate::test_support::with_cx(|cx, frame| {
+            let mut page = HistoryPage::default();
+            page.status = Status::Ready;
+            page.ids.novel = vec![1];
+            page.pages.insert((Kind::Novel, 0), PageState::Loading(1));
+            page.on_message(cx, Box::new(BooksLoaded { kind: Kind::Novel, page: 0, request: 1, result: Err("连接超时".into()) }));
+            page.render(cx, frame);
+            let retry = cx.hits.rect_of(HIT_RETRY).expect("分页失败显示重试按钮");
+            let event = InputEvent::Gesture(kn_platform::Gesture { kind: GestureKind::Tap, start: (retry.x + 1, retry.y + 1), end: (retry.x + 1, retry.y + 1), duration_ms: 80 });
+            page.on_input(cx, &event);
+            let Some(PageState::Loading(request)) = page.pages.get(&(Kind::Novel, 0)) else { panic!("应重新加载当前页") };
+            let request = *request;
+            page.on_message(cx, Box::new(BooksLoaded { kind: Kind::Novel, page: 0, request: request - 1, result: Err("旧请求".into()) }));
+            assert!(matches!(page.pages.get(&(Kind::Novel, 0)), Some(PageState::Loading(_))));
+            page.on_message(cx, Box::new(BooksLoaded { kind: Kind::Novel, page: 0, request, result: Ok(vec![BookItem { id: 1, title: "恢复".into(), ..Default::default() }]) }));
+            assert_eq!(page.visible_items()[0].id, 1);
+        });
+    }
+
+    #[test]
+    fn duplicate_comic_result_preserves_the_page() {
+        crate::test_support::with_cx(|cx, _| {
+            let mut page = HistoryPage::default();
+            page.status = Status::Ready;
+            page.kind = Kind::Comic;
+            page.pages.insert((Kind::Comic, 0), PageState::Loading(1));
+            let items = vec![BookItem { id: 7, title: "系列".into(), ..Default::default() }];
+            for _ in 0..2 {
+                page.on_message(cx, Box::new(BooksLoaded { kind: Kind::Comic, page: 0, request: 1, result: Ok(items.clone()) }));
+                assert_eq!(page.visible_items(), items);
+            }
+            page.page = 1;
+            page.pages.insert((Kind::Comic, 1), PageState::Ready(vec![items[0].clone(), BookItem { id: 8, title: "其它系列".into(), ..Default::default() }]));
+            assert_eq!(page.visible_items().iter().map(|b| b.id).collect::<Vec<_>>(), vec![8]);
+        });
     }
 }

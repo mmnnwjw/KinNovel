@@ -19,6 +19,8 @@ mod store;
 mod tz;
 mod update;
 mod userdata;
+#[cfg(test)]
+mod test_support;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
