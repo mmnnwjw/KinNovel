@@ -262,6 +262,50 @@ fn is_corrupt_image(bytes: &[u8], err: &kn_render::ImageError) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum ImageSource { Normal(u32), Comic(u32), Original }
+
+impl ImageSource {
+    fn load(self, paths: &Paths, net: Option<&Client>, url: &str) -> Result<Option<CachedImage>, String> {
+        match self {
+            Self::Normal(h) => image_source(paths, net, url, h),
+            Self::Comic(h) => crate::comic::page_bytes(paths, net, url, h),
+            Self::Original => original_image_bytes(paths, net, url),
+        }
+    }
+}
+
+/// 缓存读取和解码走 Local; 只有缺失的字节进入 Net, 不被 API 请求堵住。
+pub fn spawn_image<M: std::any::Any + Send, F: FnOnce(Result<Option<CachedImage>, String>) -> M + Send + 'static>(
+    cx: &kn_ui::Cx<crate::KinNovel>, paths: Paths, net: Option<Client>, url: String, source: ImageSource,
+    valid: impl Fn() -> bool + Send + 'static, finish: F,
+) {
+    let Some(spawner) = cx.spawner() else { return };
+    cx.spawn_local_droppable(move || {
+        if !valid() { spawner.spawn_on(kn_ui::Lane::Local, true, move || finish(Ok(None))); return; }
+        let cached = match source {
+            ImageSource::Normal(h) if net.is_some() => {
+                // 在线只命中当前尺寸, 保留下载失败才回退其它尺寸的行为。
+                if let Some(bytes) = crate::api::fixture_file(&url) { Some(CachedImage::new(bytes, None)) }
+                else {
+                    let file = paths.image_file(&url, h);
+                    std::fs::read(&file).ok().map(|bytes| { store::touch(&file); CachedImage::new(bytes, Some(file)) })
+                }
+            }
+            _ => source.load(&paths, None, &url).ok().flatten(),
+        };
+        if cached.is_some() || net.is_none() {
+            spawner.spawn_on(kn_ui::Lane::Local, true, move || finish(Ok(cached)));
+        } else {
+            let local = spawner.clone();
+            spawner.spawn_on(kn_ui::Lane::Net, true, move || {
+                let result = if valid() { source.load(&paths, net.as_ref(), &url) } else { Ok(None) };
+                local.spawn_on(kn_ui::Lane::Local, true, move || finish(result));
+            });
+        }
+    });
+}
+
 /// 同 [`image_bytes`], 但带上缓存文件路径 (见 [`CachedImage`])。
 pub fn image_source(paths: &Paths, net: Option<&Client>, url: &str, height: u32) -> Result<Option<CachedImage>, String> {
     if let Some(bytes) = crate::api::fixture_file(url) {
@@ -329,6 +373,41 @@ fn strip_height(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_images_decode_while_network_lane_is_busy() {
+        crate::test_support::with_cx(|cx, _| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            cx.spawn_droppable(move || {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let paths = cx.app.paths.clone();
+            let net = Client::new(kn_net::ClientConfig { server: "http://127.0.0.1:9".into(), session_path: paths.cache_dir().join("image-test-session.json"), ..Default::default() });
+            let url = "https://example.invalid/cached.jpg";
+            let files = [paths.image_file(url, 300), paths.comic_image_file(url, 300), paths.original_image_file(url)];
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            for (source, file) in [ImageSource::Normal(300), ImageSource::Comic(300), ImageSource::Original].into_iter().zip(files) {
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, include_bytes!("../../kn-render/tests/data/color.jpg")).unwrap();
+                let done = done_tx.clone();
+                spawn_image(cx, paths.clone(), Some(net.clone()), url.into(), source, || true, move |bytes| {
+                    let image = bytes.unwrap().unwrap().decode(Some((100, 100))).unwrap();
+                    done.send((std::thread::current().name().unwrap_or("").to_string(), image.width())).unwrap();
+                });
+            }
+            let results: Vec<_> = (0..3).map(|_| done_rx.recv_timeout(Duration::from_secs(2))).collect();
+            release_tx.send(()).unwrap();
+            for result in results {
+                let (thread, width) = result.expect("缓存图不应等待网络任务");
+                assert!(thread.starts_with("kn-local-"));
+                assert!(width > 0);
+            }
+            net.shutdown();
+        });
+    }
 
     /// 过期缓存 + 服务器不可达: 必须立即返回缓存, 不能等网络失败。
     #[test]

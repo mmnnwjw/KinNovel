@@ -325,15 +325,13 @@ impl ComicReaderPage {
         let focus = self.focus.clone();
         let keep = Self::keep_radius(cx);
         let high = Self::high_quality(cx);
-        cx.spawn_droppable(move || {
-            // 排队期间读者可能已经翻远了: 下载前、解码前各查一次
+        let height = comic::request_height(&url, w, h, high);
+        let queued_focus = focus.clone();
+        crate::net::spawn_image(cx, paths, net, url, crate::net::ImageSource::Comic(height),
+            move || (index as i64 - queued_focus.load(Ordering::Relaxed)).abs() <= keep, move |bytes| {
+            // 排队期间读者可能已经翻远了: 解码前再查一次
             let far = || (index as i64 - focus.load(Ordering::Relaxed)).abs() > keep;
             let cancelled = PageLoaded { chapter_id, index, size: (w, h), cancelled: true, result: Ok(None) };
-            if far() {
-                return cancelled;
-            }
-            let height = comic::request_height(&url, w, h, high);
-            let bytes = comic::page_bytes(&paths, net.as_ref(), &url, height);
             if far() {
                 return cancelled;
             }

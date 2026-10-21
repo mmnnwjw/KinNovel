@@ -2,7 +2,7 @@
 //!
 //! 每个列表页自己持有一个 `CoverCache` (页面状态放页面结构体, 不用全局), 用法与
 //! `pages::reader::ImageSlot` 一致: `request` 在后台线程解码 (磁盘缓存与 Python 版共用,
-//! 见 `crate::net::image_bytes`), 结果通过 `cx.spawn_droppable` 投递回同一页面实例的 `on_message` (页面出栈后还没开始的就不做了)。
+//! 见 `crate::net::spawn_image`), 结果投递回同一页面实例的 `on_message` (页面出栈后还没开始的就不做了)。
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -62,9 +62,8 @@ impl CoverCache {
         self.entries.insert(key.clone(), Slot::Pending);
         let paths: Paths = cx.app.paths.clone();
         let net: Option<Client> = cx.app.net();
-        cx.spawn_droppable(move || {
-            let (url, w, h) = (key.0.clone(), key.1, key.2);
-            let result = crate::net::image_source(&paths, net.as_ref(), &url, h).and_then(|cached| match cached {
+        crate::net::spawn_image(cx, paths, net, key.0.clone(), crate::net::ImageSource::Normal(h), || true, move |bytes| {
+            let result = bytes.and_then(|cached| match cached {
                 None => Ok(None),
                 Some(cached) => cached.decode(Some((w, h))).map(|img| Some(img.fit_within(w, h).dithered())).map_err(|e| e.to_string()),
             });

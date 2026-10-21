@@ -807,8 +807,8 @@ impl ReaderPage {
             let paths = cx.app.paths.clone();
             let net = cx.app.net();
             let (url, w, h) = (url.clone(), *width as u32, *height as u32);
-            cx.spawn_droppable(move || {
-                let result = crate::net::image_source(&paths, net.as_ref(), &url, h).and_then(|cached| match cached {
+            crate::net::spawn_image(cx, paths, net, url.clone(), crate::net::ImageSource::Normal(h), || true, move |bytes| {
+                let result = bytes.and_then(|cached| match cached {
                     None => Ok(None),
                     Some(cached) => cached
                         .decode(Some((w, h)))

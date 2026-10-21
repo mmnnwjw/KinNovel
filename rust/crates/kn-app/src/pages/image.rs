@@ -174,16 +174,10 @@ impl ImagePage {
         let net = cx.app.net();
         let url = self.url.clone();
         let (height, comic, budget) = (self.height, self.comic, self.budget);
-        cx.spawn_droppable(move || Decoded {
-            original,
-            result: decode_image(if original {
-                crate::net::original_image_bytes(&paths, net.as_ref(), &url)
-            } else if comic {
-                crate::comic::page_bytes(&paths, net.as_ref(), &url, height)
-            } else {
-                crate::net::image_source(&paths, net.as_ref(), &url, height)
-            }, budget),
-        });
+        let source = if original { crate::net::ImageSource::Original }
+            else if comic { crate::net::ImageSource::Comic(height) }
+            else { crate::net::ImageSource::Normal(height) };
+        crate::net::spawn_image(cx, paths, net, url, source, || true, move |bytes| Decoded { original, result: decode_image(bytes, budget) });
         cx.request_redraw(RefreshHint::Ui);
     }
 
