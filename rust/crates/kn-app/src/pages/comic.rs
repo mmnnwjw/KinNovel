@@ -815,6 +815,12 @@ impl Page<KinNovel> for ComicReaderPage {
         self.upload_position(cx, 0);
     }
 
+    fn on_resume(&mut self, _cx: &mut Cx<KinNovel>) {
+        if matches!(self.status, Status::Ready) {
+            self.tracker.start();
+        }
+    }
+
     fn on_message(&mut self, cx: &mut Cx<KinNovel>, msg: Box<dyn Any + Send>) {
         let msg = match msg.downcast::<PageLoaded>() {
             Ok(p) => return self.on_page(cx, *p),

@@ -412,6 +412,9 @@ pub trait Page<A: App> {
 
     /// 即将休眠 (落盘阅读进度等)。在 `App::on_suspend` 之前调用。
     fn on_suspend(&mut self, _cx: &mut Cx<A>) {}
+
+    /// 系统唤醒后恢复页面自身的计时等状态, 不把休眠时间计入。
+    fn on_resume(&mut self, _cx: &mut Cx<A>) {}
     /// 弹窗式页面要的背景 (见 [`Backdrop`]); 运行时在下一次绘制前用 [`Page::set_backdrop`] 交给页面一次。
     fn wants_backdrop(&self) -> Backdrop {
         Backdrop::None
@@ -1071,6 +1074,8 @@ pub fn run<A: App>(
                     display.set_night(rt.app.theme().night);
                     scheduler.invalidate();
                     rt.app.on_resume();
+                    let entry = stack.top();
+                    entry.page.on_resume(&mut rt.cx(entry.instance));
                     // 应用唤醒后要盖的页面 (例如锁屏) 在第一帧之前压栈, 原页面不会先露出来
                     let top = stack.top().page.id();
                     match rt.app.take_transition(top) {
