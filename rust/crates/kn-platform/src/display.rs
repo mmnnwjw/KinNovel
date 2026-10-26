@@ -509,6 +509,31 @@ pub fn restore_after_crash() {
 #[cfg(not(target_os = "linux"))]
 pub fn restore_after_crash() {}
 
+/// 框架恢复后刷新当前帧缓冲, 不走应用显示初始化 (不切换自动 REAGL / 硬件反色)。
+#[cfg(target_os = "linux")]
+pub fn refresh_system_screen() -> std::io::Result<()> {
+    use crate::ffi;
+    unsafe {
+        let fd = ffi::shim_fbink_open();
+        if fd < 0 {
+            return Err(std::io::Error::from_raw_os_error(-fd));
+        }
+        let mut rc = ffi::shim_fbink_init(fd, 0);
+        if rc >= 0 {
+            // 全零区域表示整屏; GC16 + FULL 清掉应用留下的残影。
+            rc = ffi::shim_refresh(fd, 0, 0, 0, 0, 2, 1, 0);
+            if rc >= 0 {
+                rc = ffi::shim_wait_for_complete(fd, ffi::shim_get_last_marker());
+            }
+        }
+        ffi::shim_fbink_close(fd);
+        if rc < 0 { Err(std::io::Error::from_raw_os_error(-rc)) } else { Ok(()) }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn refresh_system_screen() -> std::io::Result<()> { Ok(()) }
+
 /// 提交后可能还没刷完的一次刷新 (面板坐标)。
 #[cfg(target_os = "linux")]
 struct Inflight {

@@ -447,6 +447,15 @@ fn main() {
         kn_platform::display::restore_after_crash();
         return;
     }
+    if args.len() >= 2 && args[1] == "--refresh-display" {
+        // 启动脚本恢复框架后调用, 只刷新原生画面, 不改帧缓冲内容或驱动全局状态。
+        if let Err(e) = kn_platform::display::refresh_system_screen() {
+            eprintln!("[display] 刷新原生画面失败: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("[display] 已刷新原生画面");
+        return;
+    }
     if args.len() >= 3 && args[1] == "--preview" {
         preview(&args[2..]);
         return;

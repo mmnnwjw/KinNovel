@@ -1,7 +1,7 @@
 //! 休眠屏保: 显示最近在读的书的封面 (设置「休眠显示封面」, 重启后生效)。
 //!
 //! 做法同 KOReader (frontend/device/kindle/device.lua): 启动脚本在暂停框架前卸载系统屏保模块
-//! (`lipc-set-prop com.lab126.blanket unload screensaver`, 有广告的机型不卸载), 退出时再加载回来,
+//! (非广告版 `screensaver`, 广告版 `ad_screensaver`), 退出时再加载原来的模块,
 //! 并用环境变量 `KN_SLEEP_COVER=1` 告诉程序; 进入屏保时运行时渲染 [`SleepPage`] 并整屏闪刷。
 //!
 //! 封面地址: 书目接口解析时顺手记下 (书 id → 封面 URL, 只在内存); 打开阅读页时把当前书的地址写进

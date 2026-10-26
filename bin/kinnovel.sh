@@ -11,6 +11,7 @@ LOG_FILE="$LOG_DIR/kinnovel.log"
 PAUSE_LIST="/tmp/kinnovel_paused_pids"
 LOCK_DIR="/tmp/kinnovel.lock"
 FB_DEV="/dev/fb0"
+FB_BACKUP="/tmp/kinnovel-fb.dump"
 # vfat 上不能执行, 复制到 tmpfs 运行
 BIN_SRC="$SCRIPT_DIR/kinnovel"
 BIN_RUN="/tmp/kinnovel-bin"
@@ -72,17 +73,36 @@ pause_fb_users() {
 }
 
 SLEEP_COVER=0
+SCREENSAVER_MODULE=
+DISPLAY_TAKEN=0
 GRAYSCALE_MARKER=/tmp/kinnovel_grayscale
 CLEANED=0
+
+restore_screensaver() {
+  [ -n "$SCREENSAVER_MODULE" ] || return 0
+  if lipc-set-prop com.lab126.blanket load "$SCREENSAVER_MODULE" >> "$LOG_FILE" 2>&1; then
+    log "restored $SCREENSAVER_MODULE"
+    SCREENSAVER_MODULE=
+  else
+    log "cannot restore $SCREENSAVER_MODULE"
+  fi
+}
 
 # 收尾只做一次 (卸载流程会手动调用, 正常退出由 EXIT trap 调用)
 on_exit() {
   [ "$CLEANED" = 1 ] && return 0
   CLEANED=1
+  # 框架仍暂停时还原原生画面, 避免覆盖它恢复后刚画的主页 (同 KOReader 保存帧缓冲)。
+  if [ -f "$FB_BACKUP" ]; then
+    cat "$FB_BACKUP" > "$FB_DEV" 2>> "$LOG_FILE" || log "cannot restore framebuffer"
+    rm -f "$FB_BACKUP"
+  fi
   resume_fb_users
-  [ "$SLEEP_COVER" = 1 ] && lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
-  # 让系统主页重新绘制屏幕
-  lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >/dev/null 2>&1 || true
+  restore_screensaver
+  # 主页可能已经在前台, start 不一定重绘; 等它处理请求后显式刷新当前帧缓冲。
+  lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >> "$LOG_FILE" 2>&1 || log "cannot start home"
+  usleep 250000 2>/dev/null || sleep 1
+  [ "$DISPLAY_TAKEN" = 1 ] && "$BIN_RUN" --refresh-display >> "$LOG_FILE" 2>&1
   rm -f "$BIN_RUN"
   rm -rf "$LOCK_DIR"
 }
@@ -103,14 +123,24 @@ trap 'on_signal 143' TERM
 # 上次异常退出可能留下被暂停的进程
 resume_fb_users
 # 休眠显示封面 (设置 sleep_cover, 同 KOReader): 暂停框架前卸载系统屏保模块, 退出时加载回来。
-# blanket 也会被暂停, 所以必须在 pause_fb_users 之前 / resume_fb_users 之后调用。有广告的机型 (ad_screensaver) 不动。
+# blanket 也会被暂停, 所以必须在 pause_fb_users 之前 / resume_fb_users 之后调用。
+# 广告版卸载 ad_screensaver, 非广告版卸载 screensaver, 退出时恢复原来的模块。
 # 设置在 data/settings.json; 1.4 及以前是 bin/config.json (第一次启动新版时程序才迁移, 所以两个都看)
 SETTINGS_DIR="${KN_APP_DIR:-$APP_DIR}"
 if grep -q '"sleep_cover": *true' "$SETTINGS_DIR/data/settings.json" "$SETTINGS_DIR/bin/config.json" 2>/dev/null; then
   case "$(lipc-get-prop com.lab126.blanket load 2>/dev/null)" in
-    *ad_screensaver*) log "special offers device, keeping the system screensaver" ;;
-    *screensaver*) lipc-set-prop com.lab126.blanket unload screensaver 2>/dev/null && SLEEP_COVER=1 ;;
+    *ad_screensaver*) SCREENSAVER_MODULE=ad_screensaver ;;
+    *screensaver*) SCREENSAVER_MODULE=screensaver ;;
   esac
+  if [ -n "$SCREENSAVER_MODULE" ]; then
+    if lipc-set-prop com.lab126.blanket unload "$SCREENSAVER_MODULE" >> "$LOG_FILE" 2>&1; then
+      SLEEP_COVER=1
+      log "unloaded $SCREENSAVER_MODULE"
+    else
+      log "cannot unload $SCREENSAVER_MODULE"
+      SCREENSAVER_MODULE=
+    fi
+  fi
 fi
 export KN_SLEEP_COVER=$SLEEP_COVER
 # 更新安装到这个目录 (数据目录 KN_APP_DIR 测试时可以在别处)
@@ -124,7 +154,13 @@ cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; 
 [ -n "$KN_ORIENTATION" ] || KN_ORIENTATION=$(lipc-get-prop com.lab126.winmgr accelerometer 2>/dev/null)
 export KN_ORIENTATION
 pause_fb_users
+DISPLAY_TAKEN=1
 usleep 200000 2>/dev/null || sleep 1
+# 只有完整读出的画面才用于恢复; /tmp 中的副本退出即删, 不写用户存储。
+if ! cat "$FB_DEV" > "$FB_BACKUP" 2>> "$LOG_FILE"; then
+  log "cannot save framebuffer"
+  rm -f "$FB_BACKUP"
+fi
 KN_APP_DIR="${KN_APP_DIR:-$APP_DIR}" "$BIN_RUN" "$@" >> "$LOG_FILE" 2>&1
 RET=$?
 log "exited with $RET"
@@ -150,10 +186,7 @@ if [ "$RET" = 0 ] && [ -f "$RESTART_MARKER" ]; then
   rm -f "$RESTART_MARKER"
   log "restarting after update"
   trap - INT TERM EXIT
-  resume_fb_users
-  [ "$SLEEP_COVER" = 1 ] && lipc-set-prop com.lab126.blanket load screensaver >/dev/null 2>&1
-  rm -f "$BIN_RUN"
-  rm -rf "$LOCK_DIR"
+  on_exit
   exec /bin/sh "$SCRIPT_DIR/kinnovel.sh"
 fi
 # 卸载: 先照常恢复系统界面, 再删除整个扩展目录 (程序确认过; 只删带 KinNovel 的 config.xml 的目录)
