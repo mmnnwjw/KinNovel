@@ -1035,8 +1035,14 @@ pub fn run<A: App>(
                     rt.app.on_suspend();
                     input.reset();
                     let _ = input.ungrab();
-                    if let Some(mut page) = rt.app.sleep_screen() {
-                        // 框架还暂停着, 先画好屏保再交还 (唤醒后整屏重画)
+                    let sleep_screen = rt.app.sleep_screen();
+                    let custom_screen = sleep_screen.is_some();
+                    if custom_screen {
+                        // 电源键可能已临时放行整个框架; 画封面前重新暂停窗口管理器, 其余服务继续处理休眠。
+                        power.release_framework_for_sleep(true);
+                    }
+                    if let Some(mut page) = sleep_screen {
+                        // 窗口管理器保持暂停, 封面不会被随后绘制的原生主页覆盖 (唤醒后整屏重画)。
                         let started = std::time::Instant::now();
                         if applied.swaps_axes() {
                             // 横屏阅读中休眠: 屏保 (封面) 按竖屏画; 唤醒后的重绘再转回页面要的方向
@@ -1060,7 +1066,9 @@ pub fn run<A: App>(
                     }
                     // 系统界面 (屏保 / 唤醒后的锁屏) 不该被反色; 唤醒回来再开
                     display.set_night(false);
-                    power.release_framework();
+                    if !custom_screen {
+                        power.release_framework();
+                    }
                 }
                 PowerEvent::OutOfScreenSaver if sleeping => {
                     sleeping = false;

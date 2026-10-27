@@ -2,6 +2,8 @@
 
 > 2026-10-21 补充：本文保留早期调研与历史实测，当前刷新策略见 [架构设计](DESIGN.md#显示与刷新-参考-koreader-uimanager--fbink)。MTK 支持显式 REAGL；驱动 FULL 不等于肉眼闪屏；当前 FBInk 在启用 MTK 动画时会改写为 AUTO/PARTIAL，不能假定“动画 + 闪刷”会同时兑现。
 
+> 2026-10-27 补充：当前机型对照与封面保持修复见末尾“本轮兼容性核对”。下文“截至 v1.3.0”的屏保行为是历史记录。
+
 来源：`koreader/koreader`（AGPL-3.0）`frontend/device/kindle/device.lua`、`powerd.lua`、`platform/kindle/koreader.sh`（master 分支，2026-10 抓取）；`NiLuJe/FBInk`（GPL-3.0）`fbink.h`、`README.md`。标注"不确定"处均为代码未直接验证、需上机测试的内容。
 
 ## 1. 触屏机型表
@@ -15,7 +17,7 @@
 | KindleOasis2 (KOA2) | mxcfb | 300 DPI | 无 | 同上 (1592-1595) | `KindleGyroTransform`：值 15-18，对应 `drivers/input/misc/accel/bma2x2.c`（1537-1571） | 无 |
 | KindleOasis3 (KOA3) | mxcfb | 300 DPI | 无 | 同上 (1669-1672) | 同 KOA2 gyro | 有：`fl_intensity_files`(lm3697-bl1) + `warmth_intensity_files`(lm3697-bl0)（1658-1659） |
 | KindleBasic2/3(KT3/KT4)、PW4 | mxcfb (Rex SoC: bd71827/bd7181x PMIC) | 300 DPI | KindleBasic3 用 "snow protocol"：`self.input.snow_protocol = true`，因设备不发送 `ABS_MT_TRACKING_ID:-1`（1760） | 无 | 无 | 无 |
-| KindlePaperWhite5/5SE/6, Basic4/5 | **MTK (Bellatrix)**, `isMTK=yes` | 300 DPI | 无特殊标记 | 无(纯触摸) | 无（5SE 有光线感应 `hasLightSensor`） | PW5/5SE/6, Basic4/5 均 `hasNaturalLight`+`hasNaturalLightMixer` |
+| KindlePaperWhite5/5SE/6, Basic4/5 | **MTK (Bellatrix)**, `isMTK=yes` | 300 DPI | 无特殊标记 | 无(纯触摸) | 无（5SE 有光线感应 `hasLightSensor`） | PW5/5SE/6 有暖光；Basic4/5 无暖光 |
 | KindleScribe/Scribe3/ColorSoft | **MTK**, `isMTK=yes`, Wacom 数位笔 | 300 DPI | `self.input.wacom_protocol = true`（1896, 1959, 2022） | 无 | `hasGSensor=yes`，用 `KindleGyroTransform`（同 KOA2） | `hasNaturalLight`+Mixer+`hasLightSensor` |
 | K11 (KindleBasic5) | MTK | 300 DPI | 无 | 无 | 无 | 无 |
 
@@ -136,3 +138,47 @@ Dithering（抖动）：`dithering_mode`（`HWD_PASSTHROUGH`/`FLOYD_STEINBERG`/`
 - `/proc/usid` 型号判定表是否已覆盖所有新机型（如 K12/未来机型），需以当前 master 为准动态核对。
 - 是否存在不依赖 `liblipclua`/lipc 协议的纯 sysfs 挂起事件通道；目前看到的所有可靠事件源都经过 lipc。
 - `touch_swap_axes`/`touch_mirror_x/y` 具体每机型取值未在 `fbink.h` 中列出（仅字段定义），需运行 `fbink_get_state` 在实机或已知设备 ID 表（`fbink_device_id.c`，未抓取）中查询确认，建议后续直接读取该源文件获取完整 deviceQuirks 表。
+
+## 本轮兼容性核对 (2026-10-27, v1.6.8)
+
+固定参考 KOReader 提交 [`f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6`](https://github.com/koreader/koreader/tree/f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6)。核对范围为机型能力、输入、显示、启动接管、休眠/唤醒和退出恢复；不等于移植其全部设备功能。
+
+来源：[device.lua](https://github.com/koreader/koreader/blob/f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6/frontend/device/kindle/device.lua)、[powerd.lua](https://github.com/koreader/koreader/blob/f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6/frontend/device/kindle/powerd.lua)、[启动脚本](https://github.com/koreader/koreader/blob/f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6/platform/kindle/koreader.sh)、[屏保](https://github.com/koreader/koreader/blob/f0db5fcb3c3e35949a99c8bff3dc36837a3f0fd6/frontend/ui/screensaver.lua)。只参考接口与设备事实，沿用现有 Rust/FBInk 实现。
+
+### 逐机型对照
+
+| 机型组 (FBInk 名称) | 现有处理 | 本轮补齐 / 验证边界 |
+|---|---|---|
+| Touch、PaperWhite (1) | 无 REAGL；Touch 无前光，PW1 关灯需写专用 sysfs；Home 键 | 保留；旧固件状态栏使用下述旧接口。未有本轮实机证据 |
+| PaperWhite 2/3、Voyage | Wario/mxcfb；PW2/3/Voyage 的真正关灯档；Voyage 压感键方向与冷区 | 保留；PW2 广告版封面按下述公共流程修复，等待该用户复测 |
+| Basic、Basic 2、Basic 3、PaperWhite 4 | Basic/2 无前光；Basic3 有前光但无暖光；BTN_TOUCH 结束手势覆盖 snow protocol；非 MTK 不使用 MTK 动画 | 保留；未有本轮实机证据 |
+| Oasis | 翻页键方向与 Voyage 相反；重力感应；软件倒拿与触摸变换 | 保留 15/17/19 正向、16/18/20 倒置的旧编码 |
+| Oasis 2/3 | 翻页键、重力感应；Oasis3 暖光 | 修正为仅 15/16 表示正向/倒置；17/18 是横屏，不再误触发 180° 翻转 |
+| Basic 4/5、PaperWhite 5/6、ColorSoft | MTK 探测、auto-REAGL 开关恢复；PW5/6/ColorSoft 暖光，Basic4/5 无暖光；24/32 bpp 展开灰度；可用的边框双击转翻页键 | 保留；本轮只在 PW5 验证。ColorSoft 仍为灰度 UI，不宣称彩色显示验收 |
+| Scribe / Scribe 2 / Scribe 3 / Scribe ColorSoft | 重力感应、暖光、FBInk scaled-tablet 设备发现、ABS_X/Y + BTN_TOUCH 笔输入路径 | 与 Oasis2/3 一样修正 15–18 编码；启动方向 R 按倒拿处理 (U/L 正向、D/R 倒置)。未实机验证笔输入或方向 |
+| Kindle 2/3/4/DX、未知机型 | 表内保留早期能力；未知名称回退已有探测 | 不扩展二进制的 ARMv7+NEON 和 8/24/32 bpp 要求；能力表有条目不代表 ARMv6、4/16 bpp 设备可运行 |
+
+输入仍通过 FBInk 发现与缩放，旋转事件只接受独立 Rotation 设备的 ABS_PRESSURE，避免把触摸/笔压力当作方向。阅读横屏沿用应用设置，不因 17/18 横屏事件自动切换页面布局。启动时仍在暂停 winmgr 前读取朝向；Scribe 的别名与 Oasis 的真实横屏代码分开处理。
+
+### 公共启动、封面与恢复流程
+
+- 自定义封面有效时，在暂停框架前按实际加载模块卸载 `screensaver` 或 `ad_screensaver`，退出恢复同一模块。KOReader 默认对广告版使用系统屏保；允许广告版自定义封面是 KinNovel 的扩展，不能据此宣称已有 KOReader 的实机覆盖。
+- 按 KOReader 的固件分界：低于 5.6.5 用 `interrogatePillow` 的 hideMe/showMe；5.6.5 起用 disableEnablePillow。版本未知时沿用停用接口。仅恢复本次成功修改的状态。
+- 存在独立 `statusbar` Upstart 作业且原先运行时才停止它，退出时重新启动；不存在、原先停止或停止失败时不启动它。
+- 电源键仍临时放行框架，让 powerd 完成进入屏保的交互。收到 goingToScreenSaver 后，自定义封面分支重新暂停 `awesome`/`cvm`，其余已跟踪服务放行；画封面后不再全量放行窗口管理器。不开自定义封面时保持原来的系统屏保流程。
+- 唤醒沿用已有流程：重新暂停框架、重置并抓取输入、重初始化显示、恢复夜间状态、整屏重绘。退出仍先恢复帧缓冲，再放行进程、恢复状态栏和屏保模块、请求原生主页并显式刷新。
+
+### 证据与尚未覆盖的部分
+
+主机：方向映射与窗口管理器策略有单元测试；启动脚本通过隔离模拟检查普通/广告屏保、旧/新固件、状态栏原先运行/停止/操作失败，以及正常退出、重启、信号和失败清理。模拟不证明设备服务确实接受命令。
+
+PW5 实机：FW 5.17.1、Linux 4.9.77、MT8110 Bellatrix、非广告版。独立安装到 `/mnt/us/extensions/kinnovelLog/`，离线使用缓存，不复制账号或会话。两轮实体唤醒后均由用户确认画面完整。第一轮未停止独立 statusbar 时，5/70/110 秒抓图发现顶部少量像素仍变；第二轮停止它后三次可见像素 SHA-256 完全一致。第二轮内核日志记录从休眠请求到 suspend entry 约 116.5 秒，证明该策略未阻止这轮内核休眠。退出后原生主页、pillow/statusbar 和屏保模块恢复，没有遗留暂停进程；原安装程序和脚本哈希未变。这不是 PW2 广告版的实机通过结论。
+
+PW2 反馈日志：FW 5.12.2.2、Linux 3.0.35、i.MX6/Wario、广告版。旧诊断包已成功卸载 ad_screensaver，但放行全部框架后约一分钟出现帧缓冲变化，照片显示原生主页覆盖封面。支持“原生重绘覆盖”这一修复方向，但尚不能锁定 PW2 上具体的写入进程，也不能从 readyToSuspend 单独推断内核已经休眠。
+
+以下 KOReader 行为暂不照搬，仍是明确的兼容性边界：
+
+- 原生 PIN：KOReader 临时移除原生密码启用标记。本轮不修改用户的系统锁屏安全设置；原生 PIN 交互未验证。
+- USB 与系统服务：KOReader 会暂停 volumd 以阻止 USB 大容量存储，并停用若干后台服务。本轮不批量停止它们；应用运行/休眠时插 USB 的协调仍待独立验证。
+- 长时深度休眠：KOReader 对 hibernation 唤醒提示有延迟清理；本轮几分钟测试不覆盖一小时以上休眠，未增加无证据的定时补刷。
+- 完整停止框架、SysV 老系统、旧固件窗口几何调整、启动脚本自替换保护：尚未提供同等支持。本轮不改变更新流程，也不引入可能影响旧固件的窗口调整或模拟触摸。

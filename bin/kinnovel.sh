@@ -74,6 +74,8 @@ pause_fb_users() {
 
 SLEEP_COVER=0
 SCREENSAVER_MODULE=
+PILLOW_DISABLED=0
+STATUSBAR_STOPPED=0
 DISPLAY_TAKEN=0
 GRAYSCALE_MARKER=/tmp/kinnovel_grayscale
 CLEANED=0
@@ -98,6 +100,14 @@ on_exit() {
     rm -f "$FB_BACKUP"
   fi
   resume_fb_users
+  if [ "$PILLOW_DISABLED" = 1 ]; then
+    lipc-set-prop com.lab126.pillow disableEnablePillow enable >> "$LOG_FILE" 2>&1 || log "cannot enable pillow"
+  elif [ "$PILLOW_DISABLED" = 2 ]; then
+    lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId":"default_status_bar","function":"nativeBridge.showMe();"}' >> "$LOG_FILE" 2>&1 || log "cannot show status bar"
+  fi
+  if [ "$STATUSBAR_STOPPED" = 1 ]; then
+    start statusbar >> "$LOG_FILE" 2>&1 || log "cannot start statusbar"
+  fi
   restore_screensaver
   # 主页可能已经在前台, start 不一定重绘; 等它处理请求后显式刷新当前帧缓冲。
   lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >> "$LOG_FILE" 2>&1 || log "cannot start home"
@@ -139,6 +149,32 @@ if grep -q '"sleep_cover": *true' "$SETTINGS_DIR/data/settings.json" "$SETTINGS_
     else
       log "cannot unload $SCREENSAVER_MODULE"
       SCREENSAVER_MODULE=
+    fi
+  fi
+fi
+if [ "$SLEEP_COVER" = 1 ]; then
+  # 同 KOReader: 自定义屏保期间停用原生状态栏, 否则框架放行处理电源事件时仍可能覆盖封面。
+  # 5.6.5 以前使用隐藏接口, 新固件才需要停用整个 pillow; 版本未知时沿用停用方式。
+  FW_VERSION=$(awk '/^Kindle 5[.]/ { split($2, v, "."); print v[1]*1000000+v[2]*1000+v[3]; exit }' /etc/prettyversion.txt 2>/dev/null)
+  if [ -n "$FW_VERSION" ] && [ "$FW_VERSION" -lt 5006005 ]; then
+    if lipc-set-prop com.lab126.pillow interrogatePillow '{"pillowId":"default_status_bar","function":"nativeBridge.hideMe();"}' >> "$LOG_FILE" 2>&1; then
+      PILLOW_DISABLED=2
+    else
+      log "cannot hide status bar"
+    fi
+  else
+    if lipc-set-prop com.lab126.pillow disableEnablePillow disable >> "$LOG_FILE" 2>&1; then
+      PILLOW_DISABLED=1
+    else
+      log "cannot disable pillow"
+    fi
+  fi
+  # 新固件把状态栏拆成独立作业, 停用 pillow 不会停止它 (同 KOReader)。只恢复本次停掉的作业。
+  if [ -f /etc/upstart/statusbar.conf ] && initctl status statusbar 2>/dev/null | grep -q 'start/running'; then
+    if stop statusbar >> "$LOG_FILE" 2>&1; then
+      STATUSBAR_STOPPED=1
+    else
+      log "cannot stop statusbar"
     fi
   fi
 fi

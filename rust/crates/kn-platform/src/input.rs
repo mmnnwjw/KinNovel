@@ -91,13 +91,21 @@ fn map_key_code(code: u16, reversed: bool) -> KeyCode {
     }
 }
 
-/// Oasis / Scribe 重力感应 (EV_ABS:ABS_PRESSURE 的自定义取值, KOReader `OasisGyroTranslation`):
+/// 系统启动朝向; Scribe 的 L/R 是 U/D 的别名 (同 KOReader), Oasis 的 L/R 则是横屏。
+pub fn startup_upside_down(device_name: &str, orientation: &str) -> bool {
+    orientation == "D" || (device_name.starts_with("Scribe") && orientation == "R")
+}
+
+/// Oasis / Scribe 重力感应 (EV_ABS:ABS_PRESSURE, KOReader `OasisGyroTranslation` / `KindleGyroTransform`):
 /// 竖屏正向 → Some(false), 竖屏倒置 → Some(true), 横屏 / 其它 → None。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn orientation_from_gyro(value: i32) -> Option<bool> {
+fn orientation_from_gyro(value: i32, original_oasis: bool) -> Option<bool> {
     match value {
-        15 | 17 | 19 => Some(false),
-        16 | 18 | 20 => Some(true),
+        15 => Some(false),
+        16 => Some(true),
+        // 只有一代 Oasis 把倾斜的竖屏编码为 17/18; 后续机型的这两个值是横屏。
+        17 | 19 if original_oasis => Some(false),
+        18 | 20 if original_oasis => Some(true),
         _ => None,
     }
 }
@@ -563,7 +571,7 @@ mod linux_impl {
                         }
                         Kind::Rotation => {
                             if ev.type_ == EV_ABS && ev.code == ABS_PRESSURE {
-                                if let Some(upside_down) = orientation_from_gyro(ev.value) {
+                                if let Some(upside_down) = orientation_from_gyro(ev.value, self.info.device_name == "Oasis") {
                                     out.push(InputEvent::Rotation { upside_down });
                                 }
                             }
@@ -748,10 +756,30 @@ mod tests {
     }
 
     #[test]
-    fn gyro_and_voyage_cold_spots() {
-        assert_eq!(orientation_from_gyro(19), Some(false));
-        assert_eq!(orientation_from_gyro(20), Some(true));
-        assert_eq!(orientation_from_gyro(21), None);
+    fn startup_orientation_aliases() {
+        for name in ["Oasis", "Oasis 2", "Oasis 3", "Scribe", "Scribe 2", "Scribe 3", "Scribe ColorSoft"] {
+            assert!(startup_upside_down(name, "D"));
+            assert!(!startup_upside_down(name, "U"));
+            assert!(!startup_upside_down(name, "L"));
+            assert_eq!(startup_upside_down(name, "R"), name.starts_with("Scribe"));
+        }
+    }
+
+    #[test]
+    fn gyro_codes_by_generation() {
+        for original_oasis in [true, false] {
+            assert_eq!(orientation_from_gyro(15, original_oasis), Some(false));
+            assert_eq!(orientation_from_gyro(16, original_oasis), Some(true));
+            assert_eq!(orientation_from_gyro(21, original_oasis), None);
+        }
+        for (value, expected) in [(17, false), (18, true), (19, false), (20, true)] {
+            assert_eq!(orientation_from_gyro(value, true), Some(expected));
+            assert_eq!(orientation_from_gyro(value, false), None);
+        }
+    }
+
+    #[test]
+    fn voyage_cold_spots() {
         assert!(in_voyage_cold_spot(1071, 485) && in_voyage_cold_spot(0, 910));
         assert!(!in_voyage_cold_spot(536, 724) && !in_voyage_cold_spot(1071, 1300));
     }

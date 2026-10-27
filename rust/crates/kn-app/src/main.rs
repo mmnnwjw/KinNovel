@@ -496,8 +496,9 @@ fn run_device(start: StartMode) {
     let test_gsensor = std::env::var("KN_TEST_GSENSOR").ok();
     let gsensor = info.has_gsensor() || test_gsensor.is_some();
     // KOReader (Oasis / Scribe init): 启动时读 `com.lab126.winmgr accelerometer` (U/D/L/R) 定朝向。
-    // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来。横屏 (L/R) 只在系统阅读器里出现, 按正向处理。
-    let upside_down = gsensor && std::env::var("KN_ORIENTATION").as_deref() == Ok("D");
+    // winmgr 属于框架, 暂停后读不了, 由启动脚本在暂停前读好传进来; Scribe 的 R 与 D 都表示倒拿。
+    let orientation = std::env::var("KN_ORIENTATION").unwrap_or_default();
+    let upside_down = gsensor && kn_platform::input::startup_upside_down(&info.device_name, &orientation);
     if gsensor {
         let fb_upside_down = upside_down && test_gsensor.as_deref() != Some("flip");
         eprintln!("[device] gsensor: upside_down={upside_down} fb_upside_down={fb_upside_down} (fb rota {})", info.fb_rota);

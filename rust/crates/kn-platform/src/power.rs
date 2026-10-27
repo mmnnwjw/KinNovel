@@ -5,7 +5,7 @@
 //!   子进程, 逐行解析 stdout; 其 stdout fd 交给主循环 poll。子进程意外退出时自动重启 (带退避)。
 //! - 看门狗: 进入休眠后若 30 s 内没有 outOfScreenSaver, 以 15 s 间隔调用 `lipc-get-prop com.lab126.powerd state`
 //!   自检, 发现已经是 active 则合成 `OutOfScreenSaver` (防止事件丢失卡在休眠态)。
-//! - 框架进程 (占用 /dev/fb0 的 awesome/cvm 等) 由启动脚本 SIGSTOP; 休眠时需要 SIGCONT 让系统锁屏显示,
+//! - 框架进程 (占用 /dev/fb0 的 awesome/cvm 等) 由启动脚本 SIGSTOP; 系统屏保时 SIGCONT, 自定义封面保留窗口管理器暂停,
 //!   唤醒后再 SIGSTOP。PID 列表由启动脚本写入 `/tmp/kinnovel_paused_pids` (与 Python 版相同)。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +13,11 @@ pub enum PowerEvent {
     GoingToScreenSaver,
     OutOfScreenSaver,
     ReadyToSuspend,
+}
+
+#[cfg(any(unix, test))]
+fn keep_window_manager_paused(custom_screen: bool, name: &str) -> bool {
+    custom_screen && matches!(name.trim(), "awesome" | "cvm")
 }
 
 #[cfg(unix)]
@@ -327,14 +332,21 @@ mod unix_impl {
         }
 
         pub fn release_framework(&self) {
+            self.release_framework_for_sleep(false);
+        }
+
+        /// 自定义封面时只放行系统服务, 保留窗口管理器暂停, 避免原生主页延迟重绘盖住封面。
+        pub fn release_framework_for_sleep(&self, custom_screen: bool) {
             let pids = if self.tracked_pids.is_empty() {
                 read_paused_pids(&self.pause_file)
             } else {
                 self.tracked_pids.clone()
             };
             for pid in pids {
+                let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                let signal = if super::keep_window_manager_paused(custom_screen, &name) { libc::SIGSTOP } else { libc::SIGCONT };
                 unsafe {
-                    libc::kill(pid, libc::SIGCONT);
+                    libc::kill(pid, signal);
                 }
             }
         }
@@ -395,6 +407,24 @@ impl PowerMonitor {
     /// 休眠: 继续 (SIGCONT) 被暂停的框架进程, 让系统锁屏接管屏幕。
     pub fn release_framework(&self) {}
 
+    pub fn release_framework_for_sleep(&self, _custom_screen: bool) {}
+
     /// 唤醒: 重新暂停 (SIGSTOP) 框架进程。
     pub fn reclaim_framework(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keep_window_manager_paused;
+
+    #[test]
+    fn custom_cover_keeps_window_managers_paused_but_allows_power_services() {
+        for name in ["awesome\n", "cvm\n"] {
+            assert!(keep_window_manager_paused(true, name));
+            assert!(!keep_window_manager_paused(false, name));
+        }
+        for name in ["Xorg", "blanket", "powerd", ""] {
+            assert!(!keep_window_manager_paused(true, name));
+        }
+    }
 }
