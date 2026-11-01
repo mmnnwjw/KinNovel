@@ -13,6 +13,7 @@ mod covers;
 mod net;
 mod pages;
 mod sleep;
+mod screenshots;
 mod splash;
 mod stats;
 mod store;
@@ -132,6 +133,17 @@ impl App for KinNovel {
 
     fn ui_refresh_mode(&self) -> kn_ui::UiRefreshMode {
         self.config.ui_refresh_mode()
+    }
+
+    fn screenshot(&mut self, frame: &kn_render::Bitmap) -> Option<String> {
+        screenshots::capture(&self.paths, frame)
+    }
+
+    fn shortcuts_enabled(&self) -> bool { !self.locked() }
+
+    fn draw_toast(&self, frame: &mut kn_render::Bitmap, fonts: &FontStore, glyphs: &mut kn_render::GlyphCache, text: &str) {
+        let mut ink = kn_ui::widgets::Ink { fonts, glyphs, chain: &self.ui_fonts };
+        kn_ui::widgets::toast(&mut ink, frame, &self.theme(), &self.metrics, text, frame.height() as i32 - self.metrics.margin as i32);
     }
 
     /// 有令牌就不动; 没有令牌但保存了账号时, 后台登录。走任务池: 账号被拒时结果送回 UI 线程,

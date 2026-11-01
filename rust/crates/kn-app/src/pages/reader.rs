@@ -666,7 +666,7 @@ impl ReaderPage {
                     let size_px = *size as f32;
                     let ascent = cx.fonts.line_metrics(&TextStyle { fonts: &metrics_chain, size_px }).ascent;
                     let style = TextStyle { fonts: &self.chain, size_px };
-                    cx.glyphs.draw_text(&*cx.fonts, &mut bmp, *x as f32, (*y as f32 + ascent).round(), text, &style, theme.foreground);
+                    cx.glyphs.draw_text_synth(&*cx.fonts, &mut bmp, *x as f32, (*y as f32 + ascent).round(), text, &style, theme.foreground, Synth { weight: cx.app.config.int("font_weight", 0).clamp(-4, 4) as i8, ..Synth::default() });
                 }
                 PageItem::Image { url, x, y, width, height, .. } => {
                     let r = Rect::new(*x as i32, *y as i32, *width as u32, *height as u32);
@@ -698,6 +698,7 @@ impl ReaderPage {
         let metrics_chain = [cx.app.ui_fonts[0]];
         let ascent = |cx: &Cx<KinNovel>, size: u32| cx.fonts.line_metrics(&TextStyle { fonts: &metrics_chain, size_px: size as f32 }).ascent;
         let baseline = (y + ascent(cx, line.max_size)).round();
+        let weight = cx.app.config.int("font_weight", 0).clamp(-4, 4) as i8;
         // 最近的注音基字 (x, 宽, 字号)
         let mut base: Option<(f32, f32, u32)> = None;
         for r in &line.runs {
@@ -733,12 +734,12 @@ impl ReaderPage {
                     let rt = &text[r.start..r.end];
                     let w = cx.fonts.measure(rt, &style);
                     let rbl = (baseline - ascent(cx, bsize) - size * 0.15).round();
-                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, (bx + (bw - w) / 2.0).round(), rbl, rt, &style, color, Synth { bold: s.bold, italic: s.italic });
+                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, (bx + (bw - w) / 2.0).round(), rbl, rt, &style, color, Synth { bold: s.bold, italic: s.italic, weight });
                 }
                 None => {
                     let style = TextStyle { fonts: &self.chain, size_px: size };
                     let run = &text[r.start..r.end];
-                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, rx, bl, run, &style, color, Synth { bold: s.bold, italic: s.italic });
+                    cx.glyphs.draw_text_synth(&*cx.fonts, bmp, rx, bl, run, &style, color, Synth { bold: s.bold, italic: s.italic, weight });
                     let thick = ((size / 20.0).round() as u32).max(1);
                     if s.underline {
                         bmp.fill_rect(Rect::new(rx.round() as i32, (bl + size * 0.12).round() as i32, r.width.round() as u32, thick), color);
@@ -1649,7 +1650,7 @@ impl ReaderPage {
         let style = TextStyle { fonts: &self.chain, size_px: font };
         let mut y = card.y + pad / 2 + title_h + (line_h - font as i32) / 2;
         for line in &lines {
-            cx.glyphs.draw_text(&*cx.fonts, frame, (card.x + pad) as f32, (y as f32 + ascent).round(), line, &style, theme.foreground);
+            cx.glyphs.draw_text_synth(&*cx.fonts, frame, (card.x + pad) as f32, (y as f32 + ascent).round(), line, &style, theme.foreground, Synth { weight: cx.app.config.int("font_weight", 0).clamp(-4, 4) as i8, ..Synth::default() });
             y += line_h;
         }
     }

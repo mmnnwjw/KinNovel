@@ -21,6 +21,34 @@ fn find_system_cjk_font() -> Option<PathBuf> {
     None
 }
 
+#[test]
+fn reader_weight_changes_ink_without_changing_advance_or_cache() {
+    use kn_render::{Bitmap, Synth};
+    let mut fonts = FontStore::new();
+    let font = fonts.load_bytes(app_font("KinNovelSymbols.ttf")).unwrap();
+    let style = TextStyle { fonts: &[font], size_px: 48.0 };
+    let mut cache = GlyphCache::new(1 << 20);
+    for (background, foreground) in [(255, 0), (0, 255)] {
+        for bold in [false, true] {
+            let mut previous = 0;
+            let mut expected_width = None;
+            let mut original = None;
+            for weight in -4..=4 {
+                let mut frame = Bitmap::new(240, 90, background);
+                let width = cache.draw_text_synth(&fonts, &mut frame, 10.0, 60.0, "♡→", &style, foreground, Synth { bold, weight, ..Synth::default() });
+                if let Some(w) = expected_width { assert_eq!(width, w); } else { expected_width = Some(width); }
+                let ink: u64 = frame.data().iter().map(|&p| p.abs_diff(background) as u64).sum();
+                assert!(ink > previous, "weight={weight}, bold={bold}, ink={ink}, previous={previous}");
+                previous = ink;
+                if weight == 0 { original = Some(frame); }
+            }
+            let mut frame = Bitmap::new(240, 90, background);
+            cache.draw_text_synth(&fonts, &mut frame, 10.0, 60.0, "♡→", &style, foreground, Synth { bold, ..Synth::default() });
+            assert_eq!(frame.data(), original.unwrap().data());
+        }
+    }
+}
+
 macro_rules! skip_if_missing {
     ($opt:expr, $msg:expr) => {
         match $opt {

@@ -56,6 +56,8 @@ pub struct Synth {
     pub bold: bool,
     /// 斜体: 光栅化时把轮廓向右倾斜 (约 12°)
     pub italic: bool,
+    /// 阅读设置的粗细 (-4~4, 0 = 原始), 与网页粗体叠加, 不改变 advance。
+    pub weight: i8,
 }
 
 /// 斜体的倾斜系数 (x += y * k, 约 12°)。
@@ -361,7 +363,7 @@ pub struct GlyphCache {
     max_bytes: usize,
     bytes_used: usize,
     tick: u64,
-    map: FxMap<(FontId, u32, u32), GlyphEntry>,
+    map: FxMap<(FontId, u32, u32, i8), GlyphEntry>,
     /// 字体链 → 编号 (按整条链查, 不会串号; 编号不复用)。
     chains: FxMap<Vec<FontId>, u32>,
     next_chain: u32,
@@ -407,7 +409,7 @@ impl GlyphCache {
         id
     }
 
-    fn rasterize(fonts: &FontStore, font_id: FontId, gid: GlyphId, size_px: f32, italic: bool) -> GlyphEntry {
+    fn rasterize(fonts: &FontStore, font_id: FontId, gid: GlyphId, size_px: f32, italic: bool, thin: i8) -> GlyphEntry {
         let font_ref = fonts.font_ref(font_id);
         let metrics = font_ref.glyph_metrics(Size::new(size_px), LocationRef::default());
         let advance = metrics.advance_width(gid).unwrap_or(size_px);
@@ -418,6 +420,22 @@ impl GlyphCache {
             let settings = DrawSettings::unhinted(Size::new(size_px), LocationRef::default());
             if outline.draw(settings, &mut pen).is_ok() && !pen.cmds.is_empty() {
                 let (pixels, placement) = Mask::new(&pen.cmds).style(Fill::NonZero).render();
+                // 分数像素收缩: 与相邻覆盖率的最小值混合。最多收缩 0.75 px,
+                // 保留细笔画的部分覆盖率, 避免小字号直接断笔; 结果按粗细单独缓存。
+                let pixels = if thin < 0 {
+                    let amount = (size_px * 0.004 * -thin as f32).min(0.75);
+                    let w = placement.width as usize;
+                    let h = placement.height as usize;
+                    let mix = (amount * 256.0).round() as u32;
+                    (0..pixels.len()).map(|i| {
+                        let x = i % w;
+                        let y = i / w;
+                        let neighbor = if x == 0 || y == 0 || x + 1 == w || y + 1 == h { 0 } else {
+                            pixels[i - 1].min(pixels[i + 1]).min(pixels[i - w]).min(pixels[i + w]).min(pixels[i])
+                        };
+                        ((pixels[i] as u32 * (256 - mix) + neighbor as u32 * mix + 128) / 256) as u8
+                    }).collect()
+                } else { pixels };
                 return GlyphEntry {
                     width: placement.width,
                     height: placement.height,
@@ -448,7 +466,7 @@ impl GlyphCache {
             return;
         }
         let goal = self.max_bytes / 4 * 3;
-        let mut ages: Vec<(u64, (FontId, u32, u32))> = self.map.iter().map(|(k, e)| (e.last_used, *k)).collect();
+        let mut ages: Vec<(u64, (FontId, u32, u32, i8))> = self.map.iter().map(|(k, e)| (e.last_used, *k)).collect();
         let mut start = 0;
         while self.bytes_used > goal && start < ages.len() {
             // 按字节比例估计要淘汰几个, 字形大小不一时不够就再来一轮
@@ -506,7 +524,8 @@ impl GlyphCache {
         }
         // 斜体字形单独缓存 (最高位做标记)
         let size_key = quantize_size(style.size_px) | if synth.italic { 1 << 31 } else { 0 };
-        let strokes = if synth.bold { bold_strokes(style.size_px) } else { 0 };
+        let extra = if synth.weight <= 0 { 0 } else { (style.size_px * 0.02 * synth.weight.min(4) as f32).round().max(1.0) as i32 };
+        let strokes = if synth.bold { bold_strokes(style.size_px) } else { 0 } + extra;
         let base_y = baseline_y.round() as i32;
         let start_x_64 = (x as f64 * 64.0).round() as i64;
         let mut pen_x_64 = start_x_64;
@@ -522,14 +541,15 @@ impl GlyphCache {
                 (font_id, fonts.glyph_id(font_id, ch))
             });
 
-            let key = (font_id, gid.to_u32(), size_key);
+            let thin = synth.weight.clamp(-4, 0);
+            let key = (font_id, gid.to_u32(), size_key, thin);
             self.tick += 1;
             let tick = self.tick;
             if self.map.contains_key(&key) {
                 self.stats.hits += 1;
             } else {
                 self.stats.misses += 1;
-                let mut entry = Self::rasterize(fonts, font_id, gid, style.size_px, synth.italic);
+                let mut entry = Self::rasterize(fonts, font_id, gid, style.size_px, synth.italic, thin);
                 entry.last_used = tick; // 先标记为最新, 免得插入后立刻被淘汰
                 self.bytes_used += entry.byte_size();
                 self.map.insert(key, entry);

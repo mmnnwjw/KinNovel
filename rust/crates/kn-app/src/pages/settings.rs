@@ -53,6 +53,7 @@ const GROUPS: &[(&str, &[Setting])] = &[
         "阅读",
         &[
             step("font_size", "正文字号", "", 28.0, 80.0, 4.0, 0, 48.0),
+            step("font_weight", "字体粗细", "0 为原始粗细", -4.0, 4.0, 1.0, 0, 0.0),
             step("line_spacing", "行距", "", 1.2, 2.2, 0.1, 1, 1.42),
             step("paragraph_spacing", "段间距", "行", 0.0, 1.5, 0.1, 1, 0.2),
             step("reader_margin", "页边距", "", 16.0, 96.0, 8.0, 0, 34.0),

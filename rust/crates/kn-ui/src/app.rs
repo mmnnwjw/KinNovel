@@ -87,6 +87,12 @@ pub trait App: Sized + 'static {
     fn ui_refresh_mode(&self) -> UiRefreshMode {
         UiRefreshMode::Smooth
     }
+    /// 应用锁屏尚未验证时禁用全局角落操作。
+    fn shortcuts_enabled(&self) -> bool { true }
+    /// 左上角长按: 保存当前逻辑画面 (不含按下反馈)。
+    fn screenshot(&mut self, _frame: &Bitmap) -> Option<String> { None }
+    /// 全局操作提示, 由运行时按时收起, 不切换页面。
+    fn draw_toast(&self, _frame: &mut Bitmap, _fonts: &FontStore, _glyphs: &mut GlyphCache, _text: &str) {}
     /// 每分钟时钟走动时调用 (顶栏时间/电量), 返回是否需要重绘。
     fn on_minute(&mut self) -> bool {
         true
@@ -475,6 +481,7 @@ struct Runtime<A: App> {
     upside_down: bool,
     next_instance: u64,
     timers: Timers,
+    toast: Option<(String, std::time::Instant)>,
 }
 
 impl<A: App> Runtime<A> {
@@ -496,6 +503,7 @@ impl<A: App> Runtime<A> {
             upside_down: false,
             next_instance: 0,
             timers: Timers::default(),
+            toast: None,
         }
     }
 
@@ -544,6 +552,26 @@ struct Stack<A> {
 }
 
 impl<A: App> Stack<A> {
+    /// 角落按当前视图的逻辑坐标判断, 输入层已处理横屏与倒拿。
+    /// 两端都在角落才消费长按, 不影响普通点按、滑动和其它区域的长按。
+    fn shortcut(&mut self, rt: &mut Runtime<A>, event: &InputEvent, frame: &Bitmap) -> bool {
+        let InputEvent::Gesture(g) = event else { return false };
+        if g.kind != GestureKind::Long || !rt.app.shortcuts_enabled() { return false; }
+        let side = frame.width().min(frame.height()) / 12;
+        let corners = [Rect::new(0, 0, side, side), Rect::new((frame.width() - side) as i32, (frame.height() - side) as i32, side, side)];
+        let Some(corner) = corners.iter().position(|r| r.contains(Point { x: g.start.0, y: g.start.1 }) && r.contains(Point { x: g.end.0, y: g.end.1 })) else { return false };
+        if corner == 0 {
+            if let Some(text) = rt.app.screenshot(frame) {
+                rt.toast = Some((text, std::time::Instant::now() + Duration::from_secs(2)));
+                rt.redraw_ui();
+            }
+        } else {
+            rt.swipe = None;
+            rt.redraw = Some(RefreshHint::Flash);
+        }
+        true
+    }
+
     fn top(&mut self) -> &mut Entry<A> {
         self.entries.last_mut().expect("page stack never empty")
     }
@@ -668,6 +696,20 @@ impl<A: App> Stack<A> {
 }
 
 impl<A: App> Runtime<A> {
+    fn expire_toast(&mut self) {
+        if self.toast.as_ref().is_some_and(|(_, until)| std::time::Instant::now() >= *until) {
+            self.toast = None;
+            self.redraw_ui();
+        }
+    }
+
+    fn draw_toast(&mut self, frame: &mut Bitmap) {
+        if !self.app.shortcuts_enabled() { self.toast = None; }
+        if let Some((text, _)) = &self.toast {
+            self.app.draw_toast(frame, &self.fonts, &mut self.glyphs, text);
+        }
+    }
+
     fn redraw_ui(&mut self) {
         if self.redraw.map_or(true, |h| h.strength() < RefreshHint::Ui.strength()) {
             self.redraw = Some(RefreshHint::Ui);
@@ -876,7 +918,8 @@ impl<A: App> Headless<A> {
     /// 把输入事件交给当前页; 返回 false 表示应用请求退出。
     /// 先渲染一次当前页 (与设备上一致: 用户点的是屏幕上最新的画面, 命中区域随渲染登记)。
     pub fn input(&mut self, event: &InputEvent) -> bool {
-        let _ = self.frame();
+        let (frame, _) = self.frame();
+        if self.stack.shortcut(&mut self.rt, event, &frame) { return true; }
         let top = self.stack.top();
         let instance = top.instance;
         let transition = top.page.on_input(&mut self.rt.cx(instance), event);
@@ -909,12 +952,14 @@ impl<A: App> Headless<A> {
 
     /// 渲染当前页到新帧, 返回 (帧, 待处理的重绘提示)。
     pub fn frame(&mut self) -> (Bitmap, Option<RefreshHint>) {
+        self.rt.expire_toast();
         let top = self.stack.top();
         self.rt.orient_for(&*top.page);
         let mut frame = Bitmap::new(self.rt.width, self.rt.height, self.rt.app.theme().background);
         self.rt.hits.clear();
         let instance = top.instance;
         top.page.render(&mut self.rt.cx(instance), &mut frame);
+        self.rt.draw_toast(&mut frame);
         let mut hint = self.rt.redraw.take();
         if let Some(rendered) = top.page.refresh_hint() {
             if hint.is_none_or(|h| h.strength() < rendered.strength()) {
@@ -1005,6 +1050,9 @@ pub fn run<A: App>(
 
         // 1. 等待
         let mut timeout = ms_to_next_minute();
+        if let Some((_, until)) = &rt.toast {
+            timeout = timeout.min(until.saturating_duration_since(std::time::Instant::now()).as_millis() as u64);
+        }
         if let Some(ms) = rt.timers.next_ms() {
             timeout = timeout.min(ms);
         }
@@ -1021,6 +1069,7 @@ pub fn run<A: App>(
         if waker_ready {
             waker.drain();
         }
+        rt.expire_toast();
 
         // 2. 电源
         power_events.clear();
@@ -1148,6 +1197,14 @@ pub fn run<A: App>(
                     wants_idle = true;
                     continue;
                 }
+                if stack.shortcut(&mut rt, &event, &frame) {
+                    if feedback_shown {
+                        rt.redraw_ui();
+                        feedback_shown = false;
+                    }
+                    wants_idle = true;
+                    continue;
+                }
                 if let InputEvent::Gesture(g) = &event {
                     if g.kind == GestureKind::Down {
                         let p = Point { x: g.start.0, y: g.start.1 };
@@ -1261,6 +1318,7 @@ pub fn run<A: App>(
                 rt.hits.clear();
                 let instance = top.instance;
                 top.page.render(&mut rt.cx(instance), &mut frame);
+                rt.draw_toast(&mut frame);
                 if let Some(rendered) = top.page.refresh_hint() {
                     if rendered.strength() > hint.strength() {
                         hint = rendered;
@@ -1328,6 +1386,7 @@ mod tests {
         log: Vec<String>,
         night: bool,
         ui_mode: UiRefreshMode,
+        locked: bool,
     }
 
     impl App for TestApp {
@@ -1339,6 +1398,14 @@ mod tests {
         }
         fn ui_refresh_mode(&self) -> UiRefreshMode {
             self.ui_mode
+        }
+        fn screenshot(&mut self, frame: &Bitmap) -> Option<String> {
+            self.log.push(format!("screenshot:{}x{}", frame.width(), frame.height()));
+            Some("saved".to_string())
+        }
+        fn shortcuts_enabled(&self) -> bool { !self.locked }
+        fn draw_toast(&self, frame: &mut Bitmap, _: &FontStore, _: &mut GlyphCache, _: &str) {
+            frame.fill_rect(Rect::new(10, 10, 5, 5), 222);
         }
     }
 
@@ -1392,6 +1459,78 @@ mod tests {
     fn headless() -> Headless<TestApp> {
         Headless::new(TestApp::default(), FontStore::new(), 100, 100).unwrap()
     }
+
+    #[test]
+    fn corner_shortcuts_follow_rotated_view_and_preserve_other_gestures() {
+        use kn_platform::Gesture;
+        let mut h = headless();
+        let panel = (758, 1024);
+        for q in 0..4 {
+            let rotation = Rotation::new(q);
+            let (w, height) = rotation.logical_size(panel);
+            let frame = Bitmap::new(w, height, 255);
+            for (point, screenshot) in [((2, 3), true), ((w as i32 - 3, height as i32 - 4), false)] {
+                let physical = rotation.to_panel_point(point, panel);
+                let g = Gesture { kind: GestureKind::Long, start: physical, end: physical, duration_ms: 700 };
+                let event = InputEvent::Gesture(rotation.from_panel_gesture(g, panel));
+                h.rt.redraw = None;
+                h.rt.swipe = Some(SwipeDir::Left);
+                assert!(h.stack.shortcut(&mut h.rt, &event, &frame));
+                if screenshot {
+                    assert_eq!(h.app().log.pop().unwrap(), format!("screenshot:{w}x{height}"));
+                    assert_eq!(h.stack.entries.len(), 1, "screenshot must not leave the page");
+                    h.rt.toast.as_mut().unwrap().1 = std::time::Instant::now();
+                    h.rt.expire_toast();
+                    assert!(h.rt.toast.is_none());
+                } else {
+                    assert_eq!(h.rt.redraw, Some(RefreshHint::Flash));
+                    assert_eq!(h.rt.swipe, None);
+                    let scheduler = RefreshScheduler::new(w, height, Default::default());
+                    let plan = scheduler.plan(&frame, h.rt.redraw.unwrap());
+                    assert_eq!(plan.len(), 1);
+                    assert!(plan[0].flash && plan[0].swipe.is_none());
+                    assert_eq!(plan[0].rect, frame.bounds());
+                }
+            }
+            for (kind, point) in [(GestureKind::Tap, (2, 3)), (GestureKind::SwipeLeft, (2, 3)), (GestureKind::Long, (w as i32 / 2, height as i32 / 2))] {
+                let event = InputEvent::Gesture(Gesture { kind, start: point, end: point, duration_ms: 700 });
+                assert!(!h.stack.shortcut(&mut h.rt, &event, &frame));
+            }
+        }
+    }
+
+    #[test]
+    fn shortcuts_preempt_modal_input_and_toast_stays_above_repaints() {
+        use kn_platform::Gesture;
+        struct Modal;
+        impl Page<TestApp> for Modal {
+            fn id(&self) -> PageId { PageId(1) }
+            fn render(&mut self, _: &mut Cx<TestApp>, frame: &mut Bitmap) { frame.fill_rect(frame.bounds(), 70); }
+            fn on_input(&mut self, _: &mut Cx<TestApp>, _: &InputEvent) -> Transition<TestApp> { Transition::Exit }
+        }
+        let mut h = headless();
+        h.push(Box::new(Modal));
+        let event = InputEvent::Gesture(Gesture { kind: GestureKind::Long, start: (2, 2), end: (2, 2), duration_ms: 700 });
+        assert!(h.input(&event), "global screenshot must run before the modal's Exit");
+        assert_eq!(h.frame().0.get(10, 10), 222);
+        h.push(Box::new(Modal));
+        assert_eq!(h.frame().0.get(10, 10), 222, "new page repaint must not cover the global toast");
+        h.rt.app.locked = true;
+        assert_eq!(h.frame().0.get(10, 10), 70);
+        assert!(h.rt.toast.is_none());
+        for point in [(2, 2), (98, 98)] {
+            let event = InputEvent::Gesture(Gesture { kind: GestureKind::Long, start: point, end: point, duration_ms: 700 });
+            let frame = Bitmap::new(100, 100, 255);
+            h.rt.redraw = None;
+            assert!(!h.stack.shortcut(&mut h.rt, &event, &frame));
+            assert!(h.rt.redraw.is_none() && h.rt.toast.is_none());
+        }
+        assert_eq!(h.app().log.len(), 1, "locked shortcuts must not capture a frame");
+        h.rt.app.locked = false;
+        assert!(h.input(&event));
+        assert_eq!(h.app().log.len(), 2);
+    }
+
 
     #[test]
     fn ordinary_navigation_does_not_flash_in_either_theme() {

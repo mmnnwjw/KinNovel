@@ -658,6 +658,24 @@ impl Bitmap {
         self
     }
 
+    /// 导出可见像素为 8 位灰度 PNG, 不包含 stride 填充。
+    pub fn write_png(&self, output: impl std::io::Write) -> Result<(), png::EncodingError> {
+        let mut encoder = png::Encoder::new(output, self.width, self.height);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let packed;
+        let data = if self.stride == self.width as usize {
+            &self.data
+        } else {
+            packed = (0..self.height).flat_map(|y| self.row(y).iter().copied()).collect::<Vec<_>>();
+            &packed
+        };
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(data)?;
+        writer.finish()
+    }
+
     /// 导出为二进制 PGM (P5), 便于在主机上查看/测试快照。
     pub fn to_pgm(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + self.width as usize * self.height as usize);
@@ -1164,5 +1182,18 @@ mod tests {
         assert_eq!(&pgm[..header.len()], header);
         assert_eq!(pgm.len(), header.len() + 6);
         assert!(pgm[header.len()..].iter().all(|&p| p == 9));
+    }
+
+    #[test]
+    fn png_roundtrip_ignores_stride_padding() {
+        let mut frame = Bitmap::with_stride(3, 2, 8, 99);
+        frame.row_mut(0).copy_from_slice(&[0, 100, 255]);
+        frame.row_mut(1).copy_from_slice(&[255, 50, 0]);
+        let mut png = Vec::new();
+        frame.write_png(&mut png).unwrap();
+        let decoded = crate::decode_gray(&png, None).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 2));
+        assert_eq!(decoded.row(0), frame.row(0));
+        assert_eq!(decoded.row(1), frame.row(1));
     }
 }
