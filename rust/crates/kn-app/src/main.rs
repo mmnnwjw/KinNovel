@@ -437,6 +437,16 @@ fn preview(args: &[String]) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     eprintln!("kinnovel {}", env!("CARGO_PKG_VERSION"));
+    #[cfg(target_os = "linux")]
+    if args.len() == 3 && matches!(args[1].as_str(), "--hide-titlebar" | "--restore-titlebar") {
+        let path = std::path::Path::new(&args[2]);
+        let result = if args[1] == "--hide-titlebar" { kn_platform::titlebar::hide(path) } else { kn_platform::titlebar::restore(path) };
+        if let Err(e) = result {
+            eprintln!("[titlebar] {} failed: {e}", args[1]);
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() >= 3 && args[1] == "--splash" {
         let (w, h) = args.get(3).and_then(|s| s.split_once('x')).and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))).unwrap_or((1236, 1648));
         std::fs::write(&args[2], splash::render(w, h).to_pgm()).expect("write splash");

@@ -19,6 +19,7 @@ pub mod light;
 pub mod model;
 pub mod power;
 pub mod rotation;
+pub mod titlebar;
 
 #[cfg(target_os = "linux")]
 mod ffi;

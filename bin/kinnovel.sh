@@ -12,6 +12,7 @@ PAUSE_LIST="/tmp/kinnovel_paused_pids"
 LOCK_DIR="/tmp/kinnovel.lock"
 FB_DEV="/dev/fb0"
 FB_BACKUP="/tmp/kinnovel-fb.dump"
+TITLEBAR_STATE="/tmp/kinnovel_titlebar"
 # vfat 上不能执行, 复制到 tmpfs 运行
 BIN_SRC="$SCRIPT_DIR/kinnovel"
 BIN_RUN="/tmp/kinnovel-bin"
@@ -111,6 +112,9 @@ on_exit() {
   restore_screensaver
   # 主页可能已经在前台, start 不一定重绘; 等它处理请求后显式刷新当前帧缓冲。
   lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >> "$LOG_FILE" 2>&1 || log "cannot start home"
+  if [ -f "$TITLEBAR_STATE" ] && [ -f "$BIN_RUN" ]; then
+    "$BIN_RUN" --restore-titlebar "$TITLEBAR_STATE" >> "$LOG_FILE" 2>&1 || log "cannot restore title bar"
+  fi
   usleep 250000 2>/dev/null || sleep 1
   [ "$DISPLAY_TAKEN" = 1 ] && "$BIN_RUN" --refresh-display >> "$LOG_FILE" 2>&1
   rm -f "$BIN_RUN"
@@ -189,6 +193,10 @@ cp "$BIN_SRC" "$BIN_RUN" && chmod +x "$BIN_RUN" || { log "cannot stage binary"; 
 # 重力感应机型 (Oasis / Scribe) 的当前朝向 U/D/L/R (同 KOReader); winmgr 属于框架, 必须在暂停前读
 [ -n "$KN_ORIENTATION" ] || KN_ORIENTATION=$(lipc-get-prop com.lab126.winmgr accelerometer 2>/dev/null)
 export KN_ORIENTATION
+# 旧固件的 CVM 标题栏仍会直接画时钟 (同 KOReader); 5.12.4 起不调整窗口, 避免退出软锁。
+if [ "$SLEEP_COVER" = 1 ] && [ -n "$FW_VERSION" ] && [ "$FW_VERSION" -ge 5007002 ] && [ "$FW_VERSION" -lt 5012004 ]; then
+  "$BIN_RUN" --hide-titlebar "$TITLEBAR_STATE" >> "$LOG_FILE" 2>&1 || log "cannot hide title bar"
+fi
 pause_fb_users
 DISPLAY_TAKEN=1
 usleep 200000 2>/dev/null || sleep 1
