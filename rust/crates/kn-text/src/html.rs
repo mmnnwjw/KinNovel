@@ -315,6 +315,8 @@ struct Buf {
     text: String,
     styles: Vec<u16>,
     objects: Vec<Inline>,
+    /// 累计非空白字符/行内对象数, flush 不重置, 用于判断注释链接是否为空。
+    content_len: usize,
 }
 
 impl Buf {
@@ -326,6 +328,7 @@ impl Buf {
             }
             self.text.push(c);
             self.styles.push(style);
+            self.content_len += usize::from(!py_isspace(c));
         }
     }
 
@@ -333,6 +336,7 @@ impl Buf {
         self.text.push(OBJECT_CHAR);
         self.styles.push(style);
         self.objects.push(object);
+        self.content_len += 1;
     }
 
     fn clear(&mut self) {
@@ -677,7 +681,7 @@ impl<'a> Extractor<'a> {
         style_id: u16,
     ) -> usize {
         let raw_src = image_src(attrs);
-        if is_footnote_icon(attrs, &raw_src) {
+        if is_footnote_icon(attrs, &raw_src) || (self.rich && ctx.style.note > 0) {
             if self.rich {
                 buffer.push_object(Inline::Note(ctx.style.note), style_id);
             } else {
@@ -907,12 +911,11 @@ impl<'a> Extractor<'a> {
                         if matches!(&*tag, "td" | "th") && count(&counters, "td") + count(&counters, "th") > 1 {
                             buffer.push_object(Inline::Space(100), style_id);
                         }
-                        let before = (buffer.text.len(), buffer.objects.len());
+                        let before = buffer.content_len;
                         offset = self.append_node(child, kind, level, path, &child_struct, buffer, offset, &child_ctx, bstyle);
                         // 没有文字也没有图标的注释链接: 补一个注释图标, 不然点不到
                         if let Some(n) = marker {
-                            let added = &buffer.text[before.0..];
-                            if buffer.objects.len() == before.1 && added.chars().all(py_isspace) {
+                            if buffer.content_len == before {
                                 let id = self.style_id(child_ctx.style);
                                 buffer.push_object(Inline::Note(n), id);
                             }

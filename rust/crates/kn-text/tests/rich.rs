@@ -149,6 +149,35 @@ fn markdown_footnotes_and_text_markers() {
 }
 
 #[test]
+fn footnote_links_survive_buffer_flushes() {
+    for (content, icons) in [(r#"<div><img src="/art.png" width="600" height="800"></div>"#, 1), ("<div>标记</div>", 0), ("<div> </div>", 1)] {
+        let html = format!(r##"<div>{}<a class="duokan-footnote" href="#n1">{content}</a>后文</div><aside id="n1">注释内容</aside>"##, "甲".repeat(37));
+        let doc = extract_document(&html, BASE, true);
+        assert_eq!(doc.notes, vec!["注释内容"]);
+        assert_eq!(doc.blocks[0].text, "甲".repeat(37));
+        assert_eq!(doc.blocks.last().unwrap().text.replace(OBJECT_CHAR, ""), "后文");
+        assert_eq!(doc.blocks.iter().flat_map(|b| &b.objects).filter(|(_, o)| matches!(o, Inline::Note(1))).count(), icons, "only links without text or an inline icon need a fallback icon");
+        let params = LayoutParams { rich: true, ..LayoutParams::default() };
+        let pages = paginate_all(&doc.blocks, params, &mut Fixed);
+        assert_eq!(pages.iter().flatten().filter(|i| matches!(i, PageItem::Note { index: 1, .. })).count(), 1, "footnote must remain clickable without a duplicate marker");
+    }
+}
+
+#[test]
+fn external_footnote_image_stays_inline() {
+    let html = concat!(
+        r##"<p>正文<a class="duokan-footnote" href="#n1"><img class="w10" src="https://example.com/note.png?size=500x500"></a>后文</p>"##,
+        r#"<aside id="n1">注释内容</aside><img src="/art.png" width="600" height="800">"#,
+    );
+    let doc = extract_document(html, BASE, true);
+    assert_eq!(doc.notes, vec!["注释内容"]);
+    assert_eq!(doc.blocks.len(), 2);
+    assert_eq!(doc.blocks[0].text, format!("正文{OBJECT_CHAR}后文"));
+    assert_eq!(doc.blocks[0].objects, vec![(2, Inline::Note(1))]);
+    assert_eq!((doc.blocks[1].kind, doc.blocks[1].source_url.as_str()), (BlockKind::Image, "https://www.lightnovel.life/art.png"));
+}
+
+#[test]
 fn web_styles_map_to_block_styles() {
     let html = concat!(
         r#"<h1>第一章</h1>"#,
